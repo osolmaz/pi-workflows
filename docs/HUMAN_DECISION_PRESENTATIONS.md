@@ -279,7 +279,7 @@ presentation. Renderers treat all text as untrusted and inert.
 - Ambiguous Telegram delivery remains unknown and is not retried blindly.
 - A channel failure does not choose a default answer.
 - Rules for the first valid answer and stale answers remain unchanged, as do
-  cancellation and settlement rules together with exactly-once continuation.
+  cancellation and settlement rules together with exact same-run response adoption.
 
 ## Verification
 

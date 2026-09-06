@@ -234,7 +234,19 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
-      await workflowMessages.synchronize(pi, client, ctx);
+      await workflowMessages.synchronize(pi, client, ctx, async (message, end) => {
+        if (end.stopReason === "completed") {
+          await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
+        }
+        if (message.kind === "followUp") {
+          const recorder = sessionRecorders.get(message.runId);
+          if (recorder !== undefined) {
+            await recorder.finish();
+            sessionRecorders.delete(message.runId);
+            if (activeRecorder === recorder) activeRecorder = null;
+          }
+        }
+      });
       await activateRecorder(ctx);
     } finally {
       sessionView.refresh(ctx);
@@ -716,23 +728,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", async (_event, ctx) => {
     activeRecorder?.settleAttempt();
-    const finishedMessage = workflowMessages.activeTurnMessage();
-    if (lastStopReason === "completed" && finishedMessage !== undefined) {
-      try {
-        await submitVisibleAssistantResponse(client, ctx, finishedMessage);
-      } catch (error) {
-        ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
-      }
-    }
     workflowMessages.endTurn(lastStopReason, responseEntryId(ctx.sessionManager.getBranch()));
     activeRecorderMessageId = null;
-    if (activeRecorder !== null && finishedMessage?.kind === "followUp") {
-      const recorder = activeRecorder;
-      activeRecorder = null;
-      await recorder.finish();
-      if (sessionRecorders.get(finishedMessage.runId) === recorder)
-        sessionRecorders.delete(finishedMessage.runId);
-    }
     await presentInOrder(ctx).catch((error) => {
       ctx.ui.notify(`Could not record workflow model activity: ${errorMessage(error)}`, "warning");
     });
@@ -1144,14 +1141,19 @@ async function submitVisibleAssistantResponse(
   client: WorkflowClient,
   ctx: ExtensionContext,
   message: WorkflowMessage,
+  settledResponseEntryId: string | null,
 ): Promise<void> {
   const contract = agentContractForWorkflowMessage(message);
   if (contract?.completion !== "assistant" || workflowRunPaused(message.runId)) return;
-  const submission = recoverAssistantStep(ctx.sessionManager.getBranch(), contract);
+  if (settledResponseEntryId === null) return;
+  const branch = ctx.sessionManager.getBranch();
+  const responseIndex = branch.findIndex((entry) => entry.id === settledResponseEntryId);
+  if (responseIndex < 0) return;
+  const submission = recoverAssistantStep(branch.slice(0, responseIndex + 1), contract);
   if (submission === undefined) return;
   const responseId = submission.conversation?.lastEntryId ?? submission.assistantMessage?.entryId;
-  if (responseId === undefined) return;
-  await requestAccepted(client, {
+  if (responseId !== settledResponseEntryId) return;
+  const response = await client.request({
     operation: "interaction.assistant",
     requestId: `assistant-${message.sourceId}-${responseId}`,
     idempotencyKey: `assistant-${message.sourceId}-${responseId}`,
@@ -1162,6 +1164,9 @@ async function submitVisibleAssistantResponse(
       value: submission as unknown as JsonValue,
     },
   });
+  if (response.outcome !== "accepted" && response.outcome !== "adopted") {
+    ctx.ui.notify(`Workflow response was rejected: ${response.error ?? response.outcome}`, "error");
+  }
 }
 
 function workflowRunPaused(runId: string): boolean {

@@ -16,13 +16,16 @@ import {
 
 const WORKFLOW_MESSAGE_ID_FIELD = "workflowMessageId";
 
+type SettledTurn = { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null };
+type BeforeTurnEnd = (message: WorkflowMessage, end: SettledTurn) => Promise<void>;
+
 type PendingTurn = {
   workflowTurnId: string;
   workflowMessageId: string | null;
   runId: string | null;
   message: WorkflowMessage | null;
   startedReported: boolean;
-  end: { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null } | null;
+  end: SettledTurn | null;
 };
 
 /** Adds every server-owned workflow message to one Pi session through one public API path. */
@@ -54,7 +57,7 @@ export class WorkflowMessageCoordinator {
 
   startTurn(): void {
     // Automatic Pi retries belong to the same unsettled workflow turn.
-    if (this.turn !== null && this.turn.end === null) return;
+    if (this.turn !== null) return;
     const awaited = this.awaitingTurnMessage;
     this.awaitingTurnMessage = null;
     this.turn = {
@@ -69,7 +72,8 @@ export class WorkflowMessageCoordinator {
   }
 
   endTurn(stopReason: WorkflowTurnStopReason, responseSessionEntryId: string | null): void {
-    if (this.turn !== null) this.turn.end = { stopReason, responseSessionEntryId };
+    if (this.turn !== null && this.turn.end === null)
+      this.turn.end = { stopReason, responseSessionEntryId };
   }
 
   activeTurnMessage(): WorkflowMessage | undefined {
@@ -81,6 +85,7 @@ export class WorkflowMessageCoordinator {
     pi: ExtensionAPI,
     client: WorkflowClient,
     ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager">,
+    beforeTurnEnd?: BeforeTurnEnd,
   ): Promise<void> {
     if (this.synchronizing || this.view === null) return;
     this.synchronizing = true;
@@ -116,7 +121,7 @@ export class WorkflowMessageCoordinator {
       ) {
         await this.reportBranch(client, ctx, view);
       }
-      await this.flushTurn(client, view);
+      await this.flushTurn(client, view, beforeTurnEnd);
       if (this.turn !== null && this.turn.end === null) return;
       const messageId = view.nextWorkflowMessageId;
       if (messageId === null || this.queued.has(messageId)) return;
@@ -166,7 +171,7 @@ export class WorkflowMessageCoordinator {
         throw error;
       }
       await this.reportBranch(client, ctx, view);
-      await this.flushTurn(client, view);
+      await this.flushTurn(client, view, beforeTurnEnd);
     } finally {
       this.synchronizing = false;
     }
@@ -209,7 +214,11 @@ export class WorkflowMessageCoordinator {
     this.turn.message = message;
   }
 
-  private async flushTurn(client: WorkflowClient, view: WorkflowSessionView): Promise<void> {
+  private async flushTurn(
+    client: WorkflowClient,
+    view: WorkflowSessionView,
+    beforeTurnEnd?: BeforeTurnEnd,
+  ): Promise<void> {
     const pending = this.turn;
     if (
       pending === null ||
@@ -224,42 +233,36 @@ export class WorkflowMessageCoordinator {
     if (!pending.startedReported) {
       message = messageById(view, pending.workflowMessageId) ?? null;
       if (message?.status !== "sent") return;
-      try {
-        const receipt = await reportTurn(client, {
-          state: "started",
-          workflowMessageId: pending.workflowMessageId,
-          workflowTurnId: pending.workflowTurnId,
-          runId: pending.runId,
-          targetSessionId: view.sessionId,
-          coordinatorEpoch: view.coordinatorEpoch,
-        });
-        if (receipt.ownership !== "active") {
-          this.turn = null;
-          return;
-        }
-        pending.message = message;
-        pending.startedReported = true;
-      } catch (error) {
-        this.turn = null;
-        throw error;
-      }
-    }
-    if (pending.end === null) return;
-    try {
-      await reportTurn(client, {
-        state: "ended",
+      const receipt = await reportTurn(client, {
+        state: "started",
         workflowMessageId: pending.workflowMessageId,
         workflowTurnId: pending.workflowTurnId,
         runId: pending.runId,
         targetSessionId: view.sessionId,
         coordinatorEpoch: view.coordinatorEpoch,
-        stopReason: pending.end.stopReason,
-        responseSessionEntryId: pending.end.responseSessionEntryId,
       });
-    } catch (error) {
-      this.turn = null;
-      throw error;
+      if (
+        receipt.ownership !== "active" &&
+        !(receipt.ownership === "settled" && pending.end !== null)
+      ) {
+        this.turn = null;
+        return;
+      }
+      pending.message = message;
+      pending.startedReported = true;
     }
+    if (pending.end === null) return;
+    if (message !== null) await beforeTurnEnd?.(message, pending.end);
+    await reportTurn(client, {
+      state: "ended",
+      workflowMessageId: pending.workflowMessageId,
+      workflowTurnId: pending.workflowTurnId,
+      runId: pending.runId,
+      targetSessionId: view.sessionId,
+      coordinatorEpoch: view.coordinatorEpoch,
+      stopReason: pending.end.stopReason,
+      responseSessionEntryId: pending.end.responseSessionEntryId,
+    });
     if (message?.kind === "followUp") {
       this.closedTurnMessages.add(pending.workflowMessageId);
     }

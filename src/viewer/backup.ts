@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
+import { workflowStateViolations } from "../workflows/diagnostics.js";
 
 /** Verify only an explicit inactive backup. Active state is verified through WorkflowClient. */
 export function verifyInactiveBackup(
@@ -15,6 +16,12 @@ export function verifyInactiveBackup(
   const state = new StateDatabase({ filePath: resolved, mode: "read-only" });
   try {
     state.integrityCheck();
+    const violations = workflowStateViolations(state);
+    if (violations.length > 0) {
+      throw new Error(
+        violations.map((item) => `${item.code} ${item.runId}: ${item.detail}`).join("\n"),
+      );
+    }
   } finally {
     state.close();
   }

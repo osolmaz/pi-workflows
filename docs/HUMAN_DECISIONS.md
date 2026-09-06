@@ -18,7 +18,7 @@ A workflow author can:
 - collect exact text with a choice such as `replan`;
 - address a logical audience instead of a Telegram chat or Pi session;
 - reuse a standard plan approval workflow; and
-- rely on one accepted answer and one continuation after a crash or concurrent reply.
+- rely on one accepted answer and one resumed attempt after a crash or concurrent reply.
 
 The feature uses the existing checkpoint execution primitive. It does not add another engine node type.
 
@@ -124,7 +124,7 @@ When the engine reaches the node, it:
 4. asks the configured channels to deliver it; and
 5. parks the run in `waiting` state.
 
-When a valid answer is accepted, the continuation keeps the workflow's original input. The human answer becomes the checkpoint node's output in the continuation. Ordinary checkpoints keep their current behavior, where `/workflow answer` supplies the continuation input.
+A valid answer completes the exact checkpoint attempt in the same run. The original workflow input stays unchanged. The answer becomes that node's output. Ordinary checkpoints also complete in place, but use the normal `answer` action. A protected decision accepts only the verified human path or its declared timeout policy.
 
 ## Request and response contracts
 
@@ -265,15 +265,15 @@ Human decisions use the canonical [SQLite state](SQLITE_STATE.md) database:
 - `human_decisions` stores each immutable request;
 - `human_decision_submissions` records human, policy, channel, and control candidates;
 - `human_decision_resolutions` stores the one accepted-or-cancelled winner;
-- `continuations` links the parent and continuation runs;
-- `effects` and `effect_attempts` record parent settlement, continuation, external delivery, and external settlement work; and
+- `interactive_requests` and `interactive_submissions` bind the accepted resolution to the exact node attempt;
+- `effects` and `effect_attempts` record run settlement, external delivery, and external settlement work; and
 - `channels`, `channel_cursors`, and `channel_messages` store channel identity, polling position, and decision delivery or settlement receipts.
 
 A valid human answer, eligible timeout policy, explicit cancellation, or no-default expiry competes for the same resolution primary key. The winning transaction records the immutable resolution, audit event, and required effects together. A retry adopts the existing matching result. A conflicting or late answer receives the durable winner.
 
-A deadline with a validated default response is timeout-policy acceptance. It cannot become expiry cancellation. No-default expiry can cancel. Automatic policy and continuation creation require the current run owner's token and lease generation. A verified channel can submit a human candidate without gaining run ownership.
+A deadline with a validated default response is timeout-policy acceptance. It cannot become expiry cancellation. No-default expiry can cancel. Automatic policy and execution require the current owner's token and lease generation. A verified channel can submit a human candidate without gaining run ownership.
 
-The continuation run ID is derived from the decision ID. The owner adopts an existing matching continuation or creates it once. The continuation record and redacted receipt carry the resolution provenance, decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Human actor, channel, event, and idempotency details remain private and do not enter model-visible status output.
+The scheduler resumes the same run and exact request. Accepted resolution and redacted receipt records carry the provenance, decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Human actor, channel, event, and idempotency details remain private and do not enter model-visible status output.
 
 ## Planning workflow composition
 
@@ -312,7 +312,7 @@ Recovery follows these rules:
 - ambiguous Telegram sends are not retried automatically;
 - duplicate channel updates are harmless;
 - stale responses are rejected;
-- one human or timeout response creates one continuation;
+- one human or timeout response completes one exact checkpoint attempt;
 - the winning human answer or timeout policy settles or cancels the pending Pi decision workflow message;
 - confirmed channel settlement is adopted without another remote call;
 - failed channel settlement has a bounded retry count and cannot create an unbounded record loop; and
@@ -320,20 +320,18 @@ Recovery follows these rules:
 
 A required decision with no available channel remains waiting and reports the configuration problem. An automatic decision does not need a channel to apply its saved response after the deadline. A skipped plan policy creates no decision.
 
-Direct answer handling and recovery can notice the same accepted decision at the same time. Both paths use one continuation coordinator. The coordinator prepares the deterministic continuation through the existing durable run queue. The first caller creates and claims the queue row. Only that caller receives the claim token and starts the engine. A compatible later caller adopts the existing row without starting another engine.
-
-Adoption does not change the lease, claim generation, queue state, timestamps, or events. An adopter cannot renew, release, park, complete, or replace the winning claim. Reuse with a different workflow source, definition, input, launch options, parent, or owning session fails without changing the existing run. If the winning process stops after it claims the row, existing lease expiry and activation recovery can continue the prepared run.
+Direct answer handling and recovery can observe the same accepted decision. Both use the exact saved request and the common scheduler. Response acceptance makes the original run eligible; it does not create or directly launch another run. One lease generation owns execution. An identical response retry adopts its receipt, while a conflicting payload or wrong request kind is rejected before queue changes. Source verification and generation fencing remain required after interruption.
 
 ## Compatibility
 
-This alpha change updates the current request, accepted-result, receipt, resolution, continuation, and snapshot contracts in place. Old active runs refuse resume through normal source and definition identity checks. There is no compatibility reader, migration, dual path, or new schema generation. The continuation startup fix uses existing queue and lease records. It adds no field, table, migration, or schema version. Existing compatible prepared or initialized continuations are adopted. Updated viewers label a human decision as a checkpoint, show its deadline and automatic action when present, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
+This alpha contract changes in place. Incompatible state remains untouched and fails with a backup-and-reset instruction. There is no compatibility reader, migration, dual path, or new schema generation. Viewers show the decision deadline and declared automatic action, while keeping the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
 
-The engine remains independent from Pi and Telegram. Core code owns decision contracts and validation. The server owns durable acceptance, continuation, workflow messages, and channel-child supervision. The Pi extension owns documented session presentation and controls. The Telegram adapter child owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
+The engine remains independent from Pi and Telegram. Core code owns decision contracts and validation. The server owns durable acceptance, scheduling, workflow messages, and channel-child supervision. The Pi extension owns documented session presentation and controls. The Telegram adapter child owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
 
 ## Contract impact
 
 - **Session state:** Pi records normal workflow messages and interactive decision results.
-- **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. Continuation startup uses existing run, queue, source, binding, lease, event, continuation, and decision-effect records. External channel attempts use the shared effect records, and channel delivery and settlement records remain separate feature evidence.
+- **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. Same-run resumption uses the existing request, queue, source, binding, lease, event, and effect records. External channel attempts use the shared effect records, and channel delivery and settlement records remain separate feature evidence.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle, message, command, session, and status APIs only.
 - **Public pi-workflows API:** typed human choices, `humanDecision().onTimeout`, `humanDecisionEdge()`, channel profile configuration, the plan approval policy, the shared plan-change workflow, and the additive queue prepare-or-adopt operation.
@@ -345,7 +343,7 @@ The implementation must test:
 - compile-time exhaustive choice routing;
 - choices with no input and choices with exact text input;
 - runtime choice and input validation;
-- legacy checkpoint continuation;
+- ordinary and protected checkpoints completing in the original run;
 - model-tool answer rejection;
 - Pi decision workflow messages, branch adoption, branch-specific decision messages, and verified answers;
 - supervised channel-child protocol fencing and restart recovery;
@@ -354,14 +352,14 @@ The implementation must test:
 - stale request digests;
 - concurrent Pi and Telegram answers;
 - a direct verified answer racing recovery for the same accepted decision;
-- one claim generation, one engine start, one continuation, and one execution of each continuation node;
-- compatible continuation adoption without lease, queue, timestamp, or event mutation;
-- incompatible continuation identity reuse without mutation;
+- one authoritative claim generation and no extra run after a decision;
+- accepted-response adoption without new model work or copied state;
+- request identity and response-kind mismatches rejected before domain mutation;
 - identical and conflicting retries;
-- crashes before and after answer acceptance and continuation creation;
+- crashes before and after answer acceptance and same-run resumption;
 - ambiguous Telegram sends;
 - one supervised long-poll adapter per profile and server-restart recovery;
 - decision cancellation and expiry;
 - included `plan-approval` routes and bounded replan loops;
 - viewer redaction; and
-- real Pi execution without real Telegram credentials or network calls, duplicate-start failures, revision conflicts, or a stranded running continuation.
+- real Pi execution without real Telegram credentials or network calls, duplicate-start failures, revision conflicts, or a stranded resumed run.

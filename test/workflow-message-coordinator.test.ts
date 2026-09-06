@@ -82,6 +82,51 @@ function view(message: WorkflowMessage): WorkflowSessionView {
 }
 
 describe("WorkflowMessageCoordinator", () => {
+  it("retains a settled response through a lost branch acknowledgment before closing its turn", async () => {
+    const message = followUpMessage();
+    const branch: Record<string, unknown>[] = [];
+    const coordinator = new WorkflowMessageCoordinator();
+    coordinator.updateView(view(message));
+    let loseAcknowledgment = true;
+    const order: string[] = [];
+    const request = vi.fn(async (options: Record<string, unknown>) => {
+      if (
+        options.operation === "workflowMessage.reportBranch" &&
+        branch.length > 0 &&
+        loseAcknowledgment
+      ) {
+        loseAcknowledgment = false;
+        throw new Error("Lost branch acknowledgment");
+      }
+      if (options.operation === "workflowTurn.report")
+        order.push((options.payload as { state: string }).state);
+      return acceptedServerRequest(options);
+    });
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "prompt-entry", details: entry.details });
+      coordinator.startTurn();
+      coordinator.endTurn("completed", "response-entry");
+    });
+    const beforeEnd = vi.fn(async (_message, end) => {
+      expect(end).toEqual({ stopReason: "completed", responseSessionEntryId: "response-entry" });
+      order.push("submit");
+    });
+    const ctx = {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    await expect(
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, beforeEnd),
+    ).rejects.toThrow("Lost branch acknowledgment");
+    coordinator.startTurn(); // An unrelated later event cannot replace the pending settled turn.
+    coordinator.endTurn("error", "other-response");
+    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, beforeEnd);
+    expect(order).toEqual(["started", "submit", "ended"]);
+    expect(beforeEnd).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+  });
   it("clears an explicit follow-up turn locally as soon as the host accepts its end", async () => {
     const message = followUpMessage();
     const current = view(message);

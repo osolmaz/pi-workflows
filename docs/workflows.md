@@ -760,9 +760,11 @@ work. A terminal run creates its own terminal workflow message through the share
 
 ## Runtime behavior
 
-Runs execute one node at a time. Every transition is persisted to the run
-database transaction before the engine moves on, which is what makes the live viewer
-possible. Defaults worth knowing:
+Runs execute one node at a time. Workers propose narrow transitions; the host
+validates and commits them before execution moves on. A start must follow the
+accepted graph route. A completed run must return its accepted final node output.
+Workers cannot skip a checkpoint, rewrite an active attempt's start, or replace
+the full saved run state. Defaults worth knowing:
 
 - Node timeout is 15 minutes unless the node sets `timeoutMs` to a positive
   number or context callback. A timed-out node has outcome `timed_out` and can

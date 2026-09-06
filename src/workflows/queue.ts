@@ -31,7 +31,6 @@ export type WorkflowRunReservationOptions = {
   definitionSnapshot: unknown;
   input: unknown;
   launchOptions?: unknown;
-  runnerId: string;
   originSessionId: string;
   executionMode?: "interactive" | "headless";
   parentRunId?: string;
@@ -80,7 +79,6 @@ export type WorkflowRunQueueRecord = {
   claimToken: string | null;
   claimGeneration: number | null;
   claimExpiresAt: string | null;
-  affinityRunnerId: string | null;
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
@@ -129,7 +127,6 @@ type RunRow = {
   launchOptionsHash: Buffer;
   status: WorkflowRunLaunchStatus;
   availableAt: number;
-  affinityRunnerId: string | null;
   consecutiveErrors: number;
   errorCode: string | null;
   errorHash: Buffer | null;
@@ -206,7 +203,7 @@ function workflowRunSelect(clause: string): string {
     r.paused, r.definition_digest AS definitionDigest, d.definition_hash AS definitionHash,
     r.input_hash AS inputHash,
     r.launch_options_hash AS launchOptionsHash,
-    q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
+    q.status, q.available_at AS availableAt,
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
     q.error_hash AS errorHash, b.origin_session_id AS originSessionId,
     b.execution_mode AS executionMode, r.parent_run_id AS parentRunId,
@@ -607,14 +604,13 @@ export class WorkflowRunQueueStore extends ProjectStore {
     this.state.connection
       .prepare(
         `INSERT INTO run_queue(
-             run_id, status, available_at, affinity_runner_id, origin_session_id,
+             run_id, status, available_at, origin_session_id,
              consecutive_errors, created_at, updated_at
-           ) VALUES (?, 'queued', ?, ?, ?, 0, ?, ?)`,
+           ) VALUES (?, 'queued', ?, ?, 0, ?, ?)`,
       )
       .run(
         options.runId,
         now,
-        options.runnerId,
         options.executionMode === "headless" ? null : options.originSessionId,
         now,
         now,
@@ -888,7 +884,6 @@ export class WorkflowRunQueueStore extends ProjectStore {
 
   claimNextWorkflowRun(options: {
     runnerId: string;
-    sessionId?: string;
     claimToken: string;
     leaseMs: number;
     now?: string;
@@ -907,10 +902,6 @@ export class WorkflowRunQueueStore extends ProjectStore {
     if (this.projectId !== null) {
       clauses.unshift("r.project_id = ?");
       params.unshift(this.projectId);
-    }
-    if (options.sessionId !== undefined) {
-      clauses.push("b.origin_session_id = ?");
-      params.push(options.sessionId);
     }
     if (options.excludeRunIds !== undefined && options.excludeRunIds.length > 0) {
       clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
@@ -1710,7 +1701,6 @@ export class WorkflowRunQueueStore extends ProjectStore {
       claimGeneration: row.ownerId === null ? null : row.leaseGeneration,
       claimExpiresAt:
         row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
-      affinityRunnerId: row.affinityRunnerId,
       originSessionId: row.executionMode === "headless" ? null : row.originSessionId,
       executionMode: row.executionMode,
       parentRunId: row.parentRunId,

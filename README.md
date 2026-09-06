@@ -85,11 +85,11 @@ there. The package-owned server is the only production process that opens the
 active database. The extension, CLI, Herdr adapter, and `piw` use the same
 versioned local client protocol. See [SQLite state](docs/SQLITE_STATE.md).
 
-One server-owned workflow-message path handles steps, reminders, resumed work,
-human decisions, notifications, terminal results, and follow-up prompts. The
-shared extension coordinator reports exact Pi branches and model turns, so an
-active workflow turn stays `running`, repeated polling cannot send the same
-message twice, and a terminal result remains visible for 60 seconds.
+One message path handles steps, resumed work, human decisions, notifications,
+terminal results, and explicit follow-ups. The extension tracks exact Pi branch
+and turn evidence. Checkpoints stay in the same run, responses target exact
+requests, and terminal notices do not start model turns. Execution status stays
+separate from model activity.
 
 ## Quick start
 

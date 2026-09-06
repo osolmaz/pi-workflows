@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "../state/json.js";
+import { resolveNext, resolveNextForOutcome } from "./graph.js";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -122,8 +123,11 @@ export function applyExecutionTransition(
       if (state.steps.some((step) => step.attemptId === attemptId)) {
         throw new Error("A completed attempt cannot start again");
       }
-      if (state.currentAttemptId !== undefined && state.currentAttemptId !== attemptId) {
+      if (state.currentAttemptId !== undefined) {
         throw new Error("Another attempt is already active");
+      }
+      if (nextNode(definition, state) !== nodeId) {
+        throw new Error("Attempt does not follow the accepted graph route");
       }
       if (!Number.isFinite(Date.parse(transition.startedAt)))
         throw new Error("Invalid attempt time");
@@ -227,6 +231,16 @@ export function applyExecutionTransition(
       if (transition.status === "completed" && state.currentAttemptId !== undefined) {
         throw new Error("A run with an unfinished attempt cannot complete");
       }
+      if (transition.status === "completed") {
+        const last = state.steps.at(-1);
+        if (
+          last?.outcome !== "ok" ||
+          nextNode(definition, state) !== null ||
+          !isDeepStrictEqual(transition.finalOutput, last.output)
+        ) {
+          throw new Error("Completion does not match the accepted graph result");
+        }
+      }
       state.status = transition.status;
       state.finishedAt = now;
       if (transition.error !== undefined) state.error = transition.error;
@@ -256,6 +270,16 @@ export function applyExecutionTransition(
       throw new Error("Unknown execution transition");
   }
   return state;
+}
+
+function nextNode(definition: WorkflowDefinitionSnapshot, state: WorkflowRunState): string | null {
+  const last = state.steps.at(-1);
+  if (last === undefined) return definition.startAt;
+  const result = state.results[last.nodeId];
+  if (result === undefined) throw new Error("Accepted graph result is missing");
+  return result.outcome === "ok"
+    ? resolveNext(definition.edges, last.nodeId, result.output, result)
+    : resolveNextForOutcome(definition.edges, last.nodeId, result);
 }
 
 function requireEvent(event: WorkflowTraceEventDraft, type: string): void {

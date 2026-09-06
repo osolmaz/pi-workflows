@@ -8,6 +8,8 @@ status: implemented
 
 # ResourceManager runtime plan
 
+> Historical plan. The [durable execution plan](../2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+
 pi-workflows needs a controller mode for automation that spans repeated events, external state changes, and process restarts. The design in [RESOURCE_MANAGERS.md](../RESOURCE_MANAGERS.md) follows the Kubernetes controller pattern. Durable resources hold desired and observed state, events enqueue resource keys, and each reconciliation reads current facts before acting.
 
 The implementation keeps the graph engine focused on finite jobs. Controllers start and observe workflows through a child-run interface. Workflow graphs keep their finite execution model.

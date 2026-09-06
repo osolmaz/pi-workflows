@@ -6,7 +6,7 @@ date: 2026-08-25
 
 # Continue normal work after a workflow finishes
 
-A workflow can save several prompts for normal work while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its terminal message is sent, and its terminal model turn has ended. The completed workflow stays terminal and does not enter its start node again.
+A workflow can save several prompts for normal work while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its terminal notice is sent, and any earlier explicit follow-up turn has settled. The completed workflow stays terminal and does not enter its start node again.
 
 Follow-up prompts are separate from workflow settings. JSON Patch changes future workflow behavior. Follow-up actions create later normal conversation turns.
 
@@ -65,20 +65,20 @@ Prompts keep database acceptance order. Several requests can add several prompts
 
 - Running, paused, parked, and waiting workflows accept new prompts.
 - Pause and park keep prompts queued.
-- A checkpoint continuation keeps queued prompt rows attached to the chain member that accepted them. The server walks the continuation chain to determine their final source outcome; it does not rewrite the rows.
+- A checkpoint completes in the same run and keeps its queued prompts. An explicit restart does not move prompts to its child run.
 - Successful completion records the terminal run and terminal workflow message before a follow-up can send.
 - Failed, timed-out, and cancelled workflows cancel every unsent prompt.
 - A terminal workflow rejects new prompts. Repeating an earlier request ID can still return its first result.
 
 A repeated request ID with the same prompt returns the first result. Reusing that ID with different content fails.
 
-Each accepted prompt creates its `workflow_follow_ups` source record and one `followUp` workflow message in one transaction. The message points to its source through `sourceId`; the source row stores no message pointer. The server derives eligibility from saved domain facts. A follow-up is eligible only after the source continuation chain completes successfully, its terminal message turn ends, every earlier accepted follow-up is settled or cancelled, and no nonterminal run, including one waiting for a checkpoint or protected decision, reserves the origin session.
+Each accepted prompt creates its `workflow_follow_ups` source record and one `followUp` workflow message in one transaction. The message points to its source through `sourceId`; the source row stores no message pointer. The server derives eligibility from saved domain facts. A follow-up is eligible only after the source run completes successfully, its terminal notice is sent, every earlier accepted follow-up is settled or cancelled, and no nonterminal run, including one waiting for a checkpoint or protected decision, reserves the origin session.
 
 ## One message path
 
 The shared `WorkflowMessageCoordinator` handles follow-ups. There is no follow-up sender.
 
-1. Wait for the terminal outcome, sent terminal workflow message, and matching model-turn end.
+1. Wait for the successful terminal outcome and confirmed terminal notice.
 2. After every server connection, wait for the complete origin-session view and report the active branch.
 3. Wait until the server view names this `followUp` as the next eligible pending message, Pi is idle, and no earlier workflow message is active.
 4. Keep its ID in the coordinator's in-memory queued map and report a matching active-branch entry when one already exists.
@@ -86,7 +86,7 @@ The shared `WorkflowMessageCoordinator` handles follow-ups. There is no follow-u
 6. Report the active branch so the server saves the observed Pi entry ID and marks the message `sent`.
 7. Wait for that turn and any workflow it starts to finish before the next follow-up becomes eligible.
 
-The follow-up custom message starts normal conversation work and can use a user-style renderer. Its internal workflow message ID stays in custom details and does not enter provider-facing content. It can ask the model to start another workflow, but it cannot resume or reactivate the completed workflow. Text that starts with `/` remains plain model input; a custom message cannot dispatch a Pi slash command or expand a prompt template. A `restart` chosen from the terminal turn creates a separate immutable workflow run.
+The follow-up custom message starts normal conversation work and can use a user-style renderer. Its internal workflow message ID stays in custom details and does not enter provider-facing content. It can ask the model to start another workflow, but it cannot resume or reactivate the completed workflow. Text that starts with `/` remains plain model input; a custom message cannot dispatch a Pi slash command or expand a prompt template. An explicitly requested `restart` targets the terminal run and revision and creates a separate run.
 
 Follow-up storage contains only prompts explicitly queued through this feature. Terminal restart does not find, copy, hash, or store an original user message. Conversation history remains owned by Pi.
 

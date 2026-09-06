@@ -5,6 +5,7 @@ import rawWorkflow from "../examples/workflows/echo.workflow.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
+import { workflowStateViolations } from "../src/workflows/diagnostics.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
@@ -32,7 +33,6 @@ function reserve(store: WorkflowRunQueueStore, runId = "run-1") {
     definitionSnapshot: snapshot,
     input: { task: "hello" },
     launchOptions: {},
-    runnerId: "session-1",
     originSessionId: "session-1",
   });
 }
@@ -53,6 +53,37 @@ function runPreparation() {
 }
 
 describe("workflow run queue in canonical SQLite", () => {
+  it("distinguishes normal admission phases from terminal queue contradictions", async () => {
+    const { store } = await setup();
+    try {
+      reserve(store);
+      for (const status of ["queued", "running", "waiting"]) {
+        for (const queueStatus of ["queued", "starting", "running", "parked"]) {
+          store.state.connection
+            .prepare("UPDATE runs SET status = ? WHERE run_id = 'run-1'")
+            .run(status);
+          store.state.connection
+            .prepare("UPDATE run_queue SET status = ? WHERE run_id = 'run-1'")
+            .run(queueStatus);
+          expect(
+            workflowStateViolations(store.state).filter((item) => item.code === "queueState"),
+          ).toEqual([]);
+        }
+      }
+      store.state.connection
+        .prepare("UPDATE run_queue SET status = 'done' WHERE run_id = 'run-1'")
+        .run();
+      expect(
+        workflowStateViolations(store.state).filter((item) => item.code === "queueState"),
+      ).toEqual([{ code: "queueState", runId: "run-1", detail: expect.any(String) }]);
+      store.state.connection
+        .prepare("UPDATE runs SET status = 'completed', finished_at = 1 WHERE run_id = 'run-1'")
+        .run();
+      expect(workflowStateViolations(store.state)).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
   it("reserves one run with its definition, input, binding, and queue row", async () => {
     const { store, projectPath } = await setup();
     const run = reserve(store);
@@ -198,7 +229,6 @@ describe("workflow run queue in canonical SQLite", () => {
       definitionDigest: `sha256:${definitionDigest}`,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "session-mounted",
       originSessionId: "session-mounted",
     });
     const queued = new WorkflowRunStore(store.filePath, { state: store.state }).readRun(
@@ -221,7 +251,6 @@ describe("workflow run queue in canonical SQLite", () => {
         definitionDigest,
         definitionSnapshot: snapshot,
         input: {},
-        runnerId: "session-invalid",
         originSessionId: "session-invalid",
       }),
     ).toThrow("Stored workflow source identity is invalid");
@@ -498,7 +527,6 @@ describe("workflow run queue in canonical SQLite", () => {
         definitionDigest,
         definitionSnapshot: snapshot,
         input: {},
-        runnerId: "session-1",
         originSessionId: "session-1",
         parentRunId: "parent-run",
       }),
@@ -514,7 +542,6 @@ describe("workflow run queue in canonical SQLite", () => {
         definitionDigest,
         definitionSnapshot: snapshot,
         input: {},
-        runnerId: "session-1",
         originSessionId: "session-1",
         parentRunId: "parent-run",
       }),
