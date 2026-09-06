@@ -172,6 +172,8 @@ export function clientRequestFingerprint(request: ClientRequest): Buffer {
   // The host verifies current session authority before reading these receipts.
   // Reconnecting changes authority evidence, not the logical response.
   const sessionResponse = [
+    "interaction.submit",
+    "interaction.assistant",
     "interaction.update",
     "checkpoint.answer",
     "decision.answer",

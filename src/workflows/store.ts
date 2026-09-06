@@ -3184,15 +3184,7 @@ export class WorkflowRunStore {
     const rows = this.state.connection
       .prepare(
         `${FOLLOW_UP_ROW_SELECT}
-         WHERE f.run_id IN (
-           WITH RECURSIVE ancestors(run_id, parent_run_id) AS (
-             SELECT run_id, parent_run_id FROM runs WHERE run_id = ?
-             UNION ALL
-             SELECT parent.run_id, parent.parent_run_id
-             FROM runs parent JOIN ancestors ON ancestors.parent_run_id = parent.run_id
-           )
-           SELECT run_id FROM ancestors
-         ) AND f.status = 'queued'`,
+         WHERE f.run_id = ? AND f.status = 'queued'`,
       )
       .all(state.runId)
       .filter(isFollowUpRow);

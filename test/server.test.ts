@@ -1048,7 +1048,7 @@ setInterval(() => {}, 1000);
     }
   }, 60_000);
 
-  it("polls the adopted durable submission identity on an idempotent retry", async () => {
+  it("adopts a durable submission after reconnect while rejecting stale authority", async () => {
     const cwd = await makeTempDir("host-adopted-submission-project");
     const databasePath = path.join(
       await makeTempDir("host-adopted-submission-state"),
@@ -1056,7 +1056,7 @@ setInterval(() => {}, 1000);
     );
     const workflowPath = await writeInteractiveWorkflow(cwd);
     const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowClient({ databasePath });
+    let client = new WorkflowClient({ databasePath, clientId: "submission-owner" });
     await host.start();
     try {
       await startRun({
@@ -1125,6 +1125,10 @@ setInterval(() => {}, 1000);
         payload: { ...payload, submissionId: "first-submission" },
       });
       expect(first.outcome).toBe("accepted");
+      await client.close();
+      client = new WorkflowClient({ databasePath, clientId: "submission-owner" });
+      const reconnectedAuthority = await ownSession(client);
+      expect(reconnectedAuthority.coordinatorEpoch).not.toBe(authority.coordinatorEpoch);
       const second = await Promise.race([
         client.request({
           operation: "interaction.submit",
@@ -1132,7 +1136,7 @@ setInterval(() => {}, 1000);
           idempotencyKey: "same-durable-submission",
           runId: interaction.runId,
           expectedRevision: interaction.revision,
-          payload: { ...payload, submissionId: "retry-submission" },
+          payload: { ...payload, ...reconnectedAuthority, submissionId: "retry-submission" },
         }),
         new Promise<never>((_, reject) => {
           const timer = setTimeout(
@@ -1152,7 +1156,12 @@ setInterval(() => {}, 1000);
       const conflicting = await client.request({
         operation: "interaction.submit",
         idempotencyKey: "same-durable-submission",
-        payload: { ...payload, value: { output: "different" }, submissionId: "conflicting" },
+        payload: {
+          ...payload,
+          ...reconnectedAuthority,
+          value: { output: "different" },
+          submissionId: "conflicting",
+        },
       });
       expect(conflicting.outcome).toBe("rejected");
       const observed = new ServerStateStore(databasePath, { readOnly: true });

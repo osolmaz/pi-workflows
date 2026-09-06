@@ -7,6 +7,115 @@ import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
+it("keeps a completed parent's follow-up when its explicit restart fails", async () => {
+  const cwd = await makeTempDir("restart-follow-up-project");
+  const databasePath = path.join(await makeTempDir("restart-follow-up-state"), "state.sqlite");
+  const workflowPath = path.join(cwd, "restart.workflow.ts");
+  const gate = path.join(cwd, "finish-original");
+  await fs.writeFile(
+    workflowPath,
+    `
+import fs from "node:fs";
+import { compute, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "restart-follow-up", startAt: "done", nodes: {
+  done: compute({ run: async ({ state, signal }) => {
+    if (state.runId !== "original") throw new Error("Restart failed");
+    while (!fs.existsSync(${JSON.stringify(gate)})) {
+      signal.throwIfAborted();
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return { done: true };
+  } })
+}, edges: [] });`,
+  );
+  const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+  const client = new WorkflowClient({ databasePath });
+  await host.start();
+  const runs = new WorkflowRunStore(databasePath, { readOnly: true });
+  const queue = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
+  try {
+    const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
+    expect(
+      await client.request({
+        operation: "run.start",
+        runId: "original",
+        payload: {
+          projectPath: cwd,
+          ...resolved,
+          input: {},
+          launchOptions: {},
+          originSessionId: "session",
+          executionMode: "interactive",
+        },
+      }),
+    ).toMatchObject({ outcome: "accepted" });
+    await waitUntil(() => runs.readRun("original")?.state.status === "running", 30_000);
+    const watched = await client.request({
+      operation: "view.session.watch",
+      payload: {
+        subscriptionId: "owner",
+        sessionId: "session",
+        coordinator: true,
+      },
+    });
+    const authority = {
+      targetSessionId: "session",
+      coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
+    };
+    expect(
+      await client.request({
+        operation: "workflowMessage.reportBranch",
+        payload: {
+          ...authority,
+          entries: [],
+          isIdle: true,
+          hasPendingMessages: false,
+        },
+      }),
+    ).toMatchObject({ outcome: "accepted" });
+    const followUpResponse = await client.request({
+      operation: "followUp.queue",
+      runId: "original",
+      payload: {
+        ...authority,
+        prompt: "Keep the successful source run's follow-up.",
+      },
+    });
+    expect(followUpResponse.error).toBeUndefined();
+    expect(followUpResponse.outcome).toBe("accepted");
+    await fs.writeFile(gate, "finish");
+    await waitUntil(() => queue.getWorkflowRun("original")?.status === "done", 30_000);
+    const before = runs.readFollowUpQueue("original");
+    expect(before?.followUps).toMatchObject([{ state: "queued" }]);
+    const row = queue.state.connection
+      .prepare(
+        "SELECT r.revision FROM resources r JOIN runs w ON w.resource_id = r.resource_id WHERE w.run_id = ?",
+      )
+      .get("original") as { revision: number };
+    const restarted = await client.request({
+      operation: "run.restart",
+      runId: "original",
+      expectedRevision: row.revision,
+      payload: authority,
+    });
+    expect(restarted.outcome).toBe("accepted");
+    const childRunId = (restarted.receipt as { runId: string }).runId;
+    await waitUntil(() => queue.getWorkflowRun(childRunId)?.status === "failed", 30_000);
+    expect(runs.readFollowUpQueue("original")).toEqual(before);
+    expect(runs.readRun("original")?.state.status).toBe("completed");
+    expect(
+      queue.state.connection
+        .prepare("SELECT COUNT(*) AS count FROM events WHERE event_type = 'follow-up.cancelled'")
+        .get(),
+    ).toEqual({ count: 0 });
+  } finally {
+    runs.close();
+    queue.close();
+    await client.close();
+    await host.stop();
+  }
+}, 60_000);
+
 it("restarts only an exact terminal revision and does not require terminal model work", async () => {
   const cwd = await makeTempDir("restart-project");
   const databasePath = path.join(await makeTempDir("restart-state"), "state.sqlite");
