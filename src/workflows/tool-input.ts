@@ -51,7 +51,7 @@ export const WorkflowActionSchemas = {
       expectedRevision: Type.Integer({
         minimum: 0,
         description:
-          "Exact terminal run revision from status. Restart only when the user explicitly requests a fresh run.",
+          "Use runRevision from the terminal run view, not its presentation revision. Restart only when the user explicitly requests a fresh run.",
       }),
     },
     noExtraProperties,

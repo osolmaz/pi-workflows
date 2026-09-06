@@ -1891,6 +1891,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
         now,
         lease.generation || undefined,
       );
+      this.settleRunEffect(runId, status === "parked" ? "run.park_queue" : "run.settle_queue");
       recordViewerDeltas(
         this.state,
         runId,

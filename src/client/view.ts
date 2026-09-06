@@ -51,7 +51,10 @@ export type WorkflowRunQueueView = {
 export type WorkflowRunView = {
   schema: typeof RUN_VIEW_SCHEMA;
   runId: string;
+  /** Presentation cursor for viewer snapshots and deltas. */
   revision: number;
+  /** Execution resource revision for exact state-changing commands. */
+  runRevision: number;
   display: WorkflowDisplay;
   manifest: JsonValue;
   state: JsonValue;

@@ -1525,7 +1525,7 @@ export class WorkflowServer {
       request.expectedRevision,
       "expectedRevision",
     );
-    if (runRevision(this.state, sourceRunId) !== parentRunRevision) {
+    if (this.runStore.runRevision(sourceRunId) !== parentRunRevision) {
       return { outcome: "conflict", error: "Workflow run revision changed" };
     }
     const existingRestart = this.state.connection
@@ -2220,7 +2220,7 @@ export class WorkflowServer {
     afterCommit.push(() => void this.claimOne());
     return {
       outcome: "accepted",
-      revision: runRevision(this.state, runId),
+      revision: this.runStore.runRevision(runId),
       receipt: { runId, status: prepared.run.status } as JsonValue,
     };
   }
@@ -3765,7 +3765,7 @@ export class WorkflowServer {
       claimToken,
       generation,
       supervisor,
-      launchProgressRevision: runRevision(this.state, runId),
+      launchProgressRevision: this.runStore.runRevision(runId),
       exiting: false,
       contentDigests: new Set(),
     };
@@ -3899,7 +3899,7 @@ export class WorkflowServer {
     if (message.operation === "process.register" || message.operation === "process.unregister") {
       return this.handleRunnerProcessOperation(active, message);
     }
-    const currentRevision = runRevision(this.state, message.runId);
+    const currentRevision = this.runStore.runRevision(message.runId);
     if (message.expectedRevision !== currentRevision) {
       return runnerResponse(
         message,
@@ -4040,7 +4040,7 @@ export class WorkflowServer {
         "accepted",
         result === undefined ? null : (result as JsonValue),
         undefined,
-        runRevision(this.state, message.runId),
+        this.runStore.runRevision(message.runId),
       );
     } catch (error) {
       return runnerResponse(message, "rejected", undefined, errorMessage(error));
@@ -4701,7 +4701,7 @@ export class WorkflowServer {
       }
       return;
     }
-    const currentProgressRevision = runRevision(this.state, active.record.runId);
+    const currentProgressRevision = this.runStore.runRevision(active.record.runId);
     if (currentProgressRevision <= active.launchProgressRevision) {
       const detail = `Workflow runner ${outcome} before it committed workflow progress`;
       this.blockedRuns.add(active.record.runId);
@@ -4911,17 +4911,6 @@ function resourceManagerWorkflowResult(record: WorkflowRunQueueRecord): Workflow
         ...(record.errorMessage === null ? {} : { error: record.errorMessage }),
       };
   }
-}
-
-function runRevision(state: StateDatabase, runId: string): number {
-  const row = state.connection
-    .prepare(
-      `SELECT resources.revision FROM resources
-       JOIN runs ON runs.resource_id = resources.resource_id WHERE runs.run_id = ?`,
-    )
-    .get(runId);
-  if (!isRevisionRow(row)) throw new Error(`Workflow run not found: ${runId}`);
-  return row.revision;
 }
 
 function hasUncertainEffect(state: StateDatabase, runId: string): boolean {
@@ -5194,14 +5183,6 @@ function requireNonNegativeInteger(value: unknown, name: string): number {
     throw new Error(`${name} must be a non-negative integer`);
   }
   return value as number;
-}
-
-function isRevisionRow(value: unknown): value is { revision: number } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { revision?: unknown }).revision === "number"
-  );
 }
 
 function runtimePackageVersion(): string {

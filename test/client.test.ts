@@ -843,6 +843,21 @@ describe("WorkflowClient", () => {
       outcome: "notFound",
     });
     await expect(client.getRun("run-missing")).resolves.toBeNull();
+    for (const runRevision of [undefined, -1, 1.5]) {
+      request.mockResolvedValueOnce({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "response",
+        requestId: "invalid-execution-revision",
+        outcome: "accepted",
+        receipt: {
+          schema: "pi-workflows.run-view.v1",
+          runId: "run-valid",
+          revision: 10,
+          ...(runRevision === undefined ? {} : { runRevision }),
+        },
+      });
+      await expect(client.getRun("run-valid")).rejects.toThrow(/invalid run view/);
+    }
     request.mockResolvedValueOnce({
       schema: CLIENT_PROTOCOL_SCHEMA,
       type: "response",
@@ -851,7 +866,8 @@ describe("WorkflowClient", () => {
       receipt: {
         schema: "pi-workflows.run-view.v1",
         runId: "run-valid",
-        revision: 1,
+        revision: 10,
+        runRevision: 1,
       },
     });
     await expect(client.getRun("run-valid")).resolves.toMatchObject({ runId: "run-valid" });

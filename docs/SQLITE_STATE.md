@@ -16,6 +16,8 @@ The database includes the [incremental and virtualized viewer design](plans/2026
 
 `viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. `viewer_session_checkpoints` stores the bounded active message and tool state at each 256-event boundary. `run_view_content` stores generated reference bytes under the exact run ID, content digest, and media type. It is separate from general state blobs, and content reads require all three identities. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit. Session-event transactions write each reached replay checkpoint in that transaction.
 
+Run views expose the presentation cursor as `revision` and the execution resource revision as `runRevision`. Commands such as restart use `runRevision`. Conversation capture can advance the presentation cursor without changing execution, so the two values must not be substituted for each other.
+
 The store retains 256 presentation revisions. A reader with an older cursor must take a bounded snapshot. Patches use `add`, `replace`, `remove`, and `append`. They target small projection documents or pages. Patch creation does not reconstruct and compare complete run views.
 
 `session_entries` and `session_events` have run-wide sequence numbers and indexed `(run_id, run_seq)` ranges. Step, trace, entry, and event reads contain at most 256 rows. Run-list queries read metadata, status, lease facts, and the presentation revision. They do not read payload bodies.

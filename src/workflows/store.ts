@@ -2349,6 +2349,17 @@ export class WorkflowRunStore {
     return this.materializeRunState(row, this.readDefinition(row.definitionHash));
   }
 
+  runRevision(runId: string): number {
+    const row = this.state.connection
+      .prepare(
+        `SELECT resources.revision FROM resources
+       JOIN runs ON runs.resource_id = resources.resource_id WHERE runs.run_id = ?`,
+      )
+      .get(runId) as { revision: number } | undefined;
+    if (row === undefined) throw new Error(`Workflow run not found: ${runId}`);
+    return row.revision;
+  }
+
   readRun(runId: string, options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun | null {
     const row = this.readRunRow(runId);
     if (row === undefined) return null;
@@ -2755,7 +2766,7 @@ export class WorkflowRunStore {
     if (state.paused || ["completed", "failed", "cancelled"].includes(state.status)) {
       closeRunTime(this.state, state.runId);
     }
-    if (state.status !== "running") {
+    if (state.status !== "running" && state.status !== run.status) {
       this.enqueueRunSettlementEffect(run.resourceId, expectedRevision, state, now);
     }
   }
