@@ -1,9 +1,8 @@
+import type { JsonObject } from "../state/json.js";
 import type { JsonPatch } from "../workflows/json-patch.js";
 
+export type { JsonPrimitive, JsonValue, JsonObject } from "../state/json.js";
 export type MaybePromise<T> = T | Promise<T>;
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-export type JsonObject = { [key: string]: JsonValue };
 
 export type ManagedResourceConditionStatus = true | false | "unknown";
 

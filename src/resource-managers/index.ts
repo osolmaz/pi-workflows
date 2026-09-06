@@ -20,14 +20,7 @@ export { ResourceManagerEffectService } from "./effects.js";
 export { canonicalJson, jsonFingerprint } from "./json.js";
 export { ResourceManagerRuntime, type ResourceManagerRuntimeOptions } from "./runtime.js";
 export { createResultHelpers, requeue, requeueAfter, settled } from "./results.js";
-export {
-  SqliteResourceManagerStore,
-  type RunEventRecord,
-  type WorkflowRunClaimOptions,
-  type WorkflowRunPreparationResult,
-  type WorkflowRunQueueRecord,
-  type WorkflowRunReservationOptions,
-} from "./sqlite.js";
+export { SqliteResourceManagerStore } from "./sqlite.js";
 export {
   type ResourceManagerStore,
   type EffectReservation,

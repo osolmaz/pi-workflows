@@ -7,6 +7,7 @@ import { canonicalJson } from "../src/state/json.js";
 import { WorkflowMessageStore, workflowMessageIdFor } from "../src/state/workflow-messages.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import {
   notificationWorkflowMessageContent,
@@ -18,14 +19,19 @@ async function databaseFixture() {
   const projectPath = await makeTempDir("sqlite-lifecycle-project");
   const databasePath = path.join(await makeTempDir("sqlite-lifecycle-state"), "state.sqlite");
   const store = new SqliteResourceManagerStore(databasePath, { projectPath });
-  return { store, projectPath, databasePath };
+  return {
+    store,
+    queue: new WorkflowRunQueueStore(databasePath, { state: store.state, projectPath }),
+    projectPath,
+    databasePath,
+  };
 }
 
-function reserve(store: SqliteResourceManagerStore, runId: string, sessionId: string) {
+function reserve(queue: WorkflowRunQueueStore, runId: string, sessionId: string) {
   const workflow = compileWorkflowDefinition(echoWorkflow);
   const snapshot = createDefinitionSnapshot(workflow);
   const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-  return store.reserveWorkflowRun({
+  return queue.reserveWorkflowRun({
     runId,
     workflowName: "echo",
     workflowSourceRef: "builtin:echo",
@@ -40,14 +46,14 @@ function reserve(store: SqliteResourceManagerStore, runId: string, sessionId: st
 
 describe("SQLite delivery lifecycle", () => {
   it("returns explicit missing and stale resource manager outcomes", async () => {
-    const { store } = await databaseFixture();
+    const { store, queue } = await databaseFixture();
     expect(store.getResource({ resourceManager: "missing", key: "none" })).toBeUndefined();
     expect(store.getResourceByUid("missing")).toBeUndefined();
     expect(
       store.claimNext({ resourceManagers: [], ownerId: "worker", leaseMs: 10_000 }),
     ).toBeUndefined();
     expect(
-      store.renewWorkflowRunClaim({
+      queue.renewWorkflowRunClaim({
         runId: "missing",
         claimToken: "missing",
         leaseMs: 10_000,
@@ -79,7 +85,7 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("validates finalizers and missing effect or workflow records", async () => {
-    const { store } = await databaseFixture();
+    const { store, queue } = await databaseFixture();
     const resource = store.putResource({
       resourceManager: "jobs",
       key: "one",
@@ -135,10 +141,10 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("persists workflow messages and model turns without send claims", async () => {
-    const { store, databasePath } = await databaseFixture();
-    reserve(store, "message-run", "session-a");
+    const { store, queue, databasePath } = await databaseFixture();
+    reserve(queue, "message-run", "session-a");
     const token = "run-token";
-    store.claimWorkflowRun({
+    queue.claimWorkflowRun({
       runId: "message-run",
       runnerId: "session-a",
       claimToken: token,
@@ -146,7 +152,7 @@ describe("SQLite delivery lifecycle", () => {
     });
     const runStore = new WorkflowRunStore(databasePath, {
       state: store.state,
-      authorityProvider: () => store.workflowRunAuthority("message-run", token),
+      authorityProvider: () => queue.workflowRunAuthority("message-run", token),
     });
     const run = await new WorkflowEngine({
       store: runStore,
@@ -255,7 +261,7 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("maps rejected and ambiguous resource manager effects", async () => {
-    const { store } = await databaseFixture();
+    const { store, queue } = await databaseFixture();
     const resource = store.putResource({
       resourceManager: "jobs",
       key: "one",
@@ -300,11 +306,11 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("filters claims by session and rejects wrong tokens", async () => {
-    const { store } = await databaseFixture();
-    reserve(store, "run-a", "session-a");
-    reserve(store, "run-b", "session-b");
+    const { store, queue } = await databaseFixture();
+    reserve(queue, "run-a", "session-a");
+    reserve(queue, "run-b", "session-b");
     expect(
-      store.claimNextWorkflowRun({
+      queue.claimNextWorkflowRun({
         runnerId: "session-a",
         sessionId: "session-a",
         claimToken: "token-a",
@@ -312,9 +318,9 @@ describe("SQLite delivery lifecycle", () => {
         excludeRunIds: ["run-b"],
       })?.runId,
     ).toBe("run-a");
-    expect(store.verifyWorkflowRunClaim({ runId: "run-a", claimToken: "wrong" })).toBe(false);
-    expect(store.parkWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
-    expect(store.deleteWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
+    expect(queue.verifyWorkflowRunClaim({ runId: "run-a", claimToken: "wrong" })).toBe(false);
+    expect(queue.parkWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
+    expect(queue.deleteWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
     store.close();
   });
 });

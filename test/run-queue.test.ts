@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -17,12 +17,12 @@ async function setup() {
   const projectPath = await makeTempDir("run-queue-project");
   const databasePath = path.join(await makeTempDir("run-queue-state"), "state.sqlite");
   return {
-    store: new SqliteResourceManagerStore(databasePath, { projectPath }),
+    store: new WorkflowRunQueueStore(databasePath, { projectPath }),
     projectPath,
   };
 }
 
-function reserve(store: SqliteResourceManagerStore, runId = "run-1") {
+function reserve(store: WorkflowRunQueueStore, runId = "run-1") {
   return store.reserveWorkflowRun({
     runId,
     workflowName: "echo",
@@ -275,7 +275,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(claimed).toMatchObject({ runId: "control-run", status: "queued" });
     expect(store.getWorkflowRun("control-run")?.status).toBe("queued");
 
-    const global = new SqliteResourceManagerStore(store.filePath, { readOnly: true, global: true });
+    const global = new WorkflowRunQueueStore(store.filePath, { readOnly: true, global: true });
     expect(global.listWorkflowRuns().map((run) => run.runId)).toContain("control-run");
     global.close();
     store.close();

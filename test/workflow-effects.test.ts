@@ -2,16 +2,17 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
+import { claimTestRun } from "./queue-helpers.js";
 
 const workflow = compileWorkflowDefinition(rawWorkflow);
 const snapshot = createDefinitionSnapshot(workflow);
 const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-const stores: Array<{ queue: SqliteResourceManagerStore; runs: WorkflowRunStore }> = [];
+const stores: Array<{ queue: WorkflowRunQueueStore; runs: WorkflowRunStore }> = [];
 
 afterEach(() => {
   for (const { queue, runs } of stores.splice(0)) {
@@ -23,7 +24,7 @@ afterEach(() => {
 async function fixture(runId: string, claimed = true) {
   const projectPath = await makeTempDir("workflow-effects-project");
   const databasePath = path.join(await makeTempDir("workflow-effects-state"), "state.sqlite");
-  const queue = new SqliteResourceManagerStore(databasePath, { projectPath });
+  const queue = new WorkflowRunQueueStore(databasePath, { projectPath });
   const reservation = {
     runId,
     workflowName: workflow.name,
@@ -37,7 +38,7 @@ async function fixture(runId: string, claimed = true) {
     originSessionId: "effect-session",
   };
   if (claimed) {
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       ...reservation,
       claimToken: "effect-token",
       leaseMs: 60_000,

@@ -3,9 +3,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore } from "../src/server/state.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function setup(maxWorkers: number) {
@@ -31,7 +31,7 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
   const client = new WorkflowClient({ databasePath });
   await host.start();
   const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
-  const queue = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+  const queue = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
   const state = new ServerStateStore(databasePath, { readOnly: true });
   return {
     cwd,

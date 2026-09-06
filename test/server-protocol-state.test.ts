@@ -10,13 +10,14 @@ import {
   parseClientRequest,
   type ClientRequest,
 } from "../src/client/protocol.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore, type WorkflowRunnerLaunchEnvelope } from "../src/server/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { claimTestRun } from "./queue-helpers.js";
 
 const workflow = compileWorkflowDefinition(rawWorkflow);
 const snapshot = createDefinitionSnapshot(workflow);
@@ -38,12 +39,12 @@ function request(overrides: Partial<ClientRequest> = {}): ClientRequest {
 async function fixture() {
   const projectPath = await makeTempDir("host-state-project");
   const databasePath = path.join(await makeTempDir("host-state-db"), "state.sqlite");
-  const queue = new SqliteResourceManagerStore(databasePath, { projectPath });
+  const queue = new WorkflowRunQueueStore(databasePath, { projectPath });
   return { projectPath, databasePath, queue, server: new ServerStateStore(databasePath) };
 }
 
-function reserve(queue: SqliteResourceManagerStore, runId = "run-1") {
-  return queue.enqueueWorkflowRun({
+function reserve(queue: WorkflowRunQueueStore, runId = "run-1") {
+  return claimTestRun(queue, {
     runId,
     workflowName: workflow.name,
     workflowSourceRef: "builtin:echo",

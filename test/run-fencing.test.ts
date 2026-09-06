@@ -2,17 +2,18 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { ClaimLostError, type ClaimLostReason } from "../src/workflows/errors.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import {
   createDefinitionSnapshot,
   WorkflowRunStore,
   type RunWriteAuthority,
 } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { claimTestRun } from "./queue-helpers.js";
 
 const workflow = compileWorkflowDefinition(rawWorkflow);
 const snapshot = createDefinitionSnapshot(workflow);
@@ -21,7 +22,7 @@ const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).di
 async function setup() {
   const projectPath = await makeTempDir("run-fence-project");
   const databasePath = path.join(await makeTempDir("run-fence-state"), "state.sqlite");
-  const queue = new SqliteResourceManagerStore(databasePath, { projectPath });
+  const queue = new WorkflowRunQueueStore(databasePath, { projectPath });
   return { queue, databasePath };
 }
 
@@ -30,7 +31,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = "owned-run";
     const token = "token-1";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -63,7 +64,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = "capture-handoff";
     const now = Date.now();
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -132,7 +133,7 @@ describe("run ownership fencing", () => {
   it("rejects the old writer after claim handoff", async () => {
     const { queue, databasePath } = await setup();
     const runId = "handoff-run";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -192,7 +193,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = `typed-${reason}`;
     const token = "typed-token";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -230,7 +231,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = "atomic-renewal";
     const token = "renew-token";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -264,7 +265,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = "invalid-renewal-duration";
     const token = "invalid-duration-token";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -292,7 +293,7 @@ describe("run ownership fencing", () => {
     const { queue, databasePath } = await setup();
     const runId = "renewal-rollback";
     const token = "rollback-token";
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
