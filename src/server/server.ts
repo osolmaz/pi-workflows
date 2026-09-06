@@ -3443,103 +3443,110 @@ export class WorkflowServer {
     result: ReconcileResult<unknown>,
   ): void {
     if (active.settled) return;
-    const now = new Date();
-    const ref = { resourceManager: active.claim.resourceManager, key: active.claim.key };
-    const status = applyStatusPatch(
-      active.resource.status,
-      result.status,
-      active.resource.metadata.generation,
-      now.toISOString(),
-    );
-    try {
-      const updated = active.store.updateStatus({
-        ref,
-        expectedResourceVersion: active.claim.resourceVersion,
-        claim: active.claim,
-        status,
-        ...(result.status?.finalizers === undefined
-          ? {}
-          : { finalizers: result.status.finalizers }),
-        now: now.toISOString(),
-      });
-      active.store.recordEvent({
-        ...ref,
-        claim: active.claim,
-        type: "reconcile_finished",
-        payload: {
-          reconcileId: active.reconcileId,
-          result: result.kind,
-          generation: active.resource.metadata.generation,
-          durationMs: Math.max(0, now.getTime() - active.startedAt),
-          ...(result.kind === "requeue" && result.afterMs !== undefined
-            ? { requeueAfterMs: result.afterMs }
-            : {}),
-        },
-      });
-      if (
-        result.kind === "settled" &&
-        updated.metadata.deletionTimestamp !== undefined &&
-        updated.metadata.finalizers.length === 0
-      ) {
+    this.state.transaction(() => {
+      const now = new Date();
+      const ref = { resourceManager: active.claim.resourceManager, key: active.claim.key };
+      const status = applyStatusPatch(
+        active.resource.status,
+        result.status,
+        active.resource.metadata.generation,
+        now.toISOString(),
+      );
+      try {
+        const updated = active.store.updateStatus({
+          ref,
+          expectedResourceVersion: active.claim.resourceVersion,
+          claim: active.claim,
+          status,
+          ...(result.status?.finalizers === undefined
+            ? {}
+            : { finalizers: result.status.finalizers }),
+          now: now.toISOString(),
+        });
         active.store.recordEvent({
           ...ref,
           claim: active.claim,
-          type: "resource_deleted",
-          payload: { reconcileId: active.reconcileId },
+          type: "reconcile_finished",
+          payload: {
+            reconcileId: active.reconcileId,
+            result: result.kind,
+            generation: active.resource.metadata.generation,
+            durationMs: Math.max(0, now.getTime() - active.startedAt),
+            ...(result.kind === "requeue" && result.afterMs !== undefined
+              ? { requeueAfterMs: result.afterMs }
+              : {}),
+          },
         });
-        active.store.deleteResource(ref, active.claim.resourceVersion, active.claim);
-      } else if (result.kind === "settled") {
-        active.store.settleClaim(active.claim, now.toISOString());
-      } else {
-        active.store.requeueClaim(
-          active.claim,
-          { availableAt: new Date(now.getTime() + (result.afterMs ?? 0)).toISOString() },
-          now.toISOString(),
-        );
+        if (
+          result.kind === "settled" &&
+          updated.metadata.deletionTimestamp !== undefined &&
+          updated.metadata.finalizers.length === 0
+        ) {
+          active.store.recordEvent({
+            ...ref,
+            claim: active.claim,
+            type: "resource_deleted",
+            payload: { reconcileId: active.reconcileId },
+          });
+          active.store.deleteResource(ref, active.claim.resourceVersion, active.claim);
+        } else if (result.kind === "settled") {
+          active.store.settleClaim(active.claim, now.toISOString());
+        } else {
+          active.store.requeueClaim(
+            active.claim,
+            { availableAt: new Date(now.getTime() + (result.afterMs ?? 0)).toISOString() },
+            now.toISOString(),
+          );
+        }
+      } catch (error) {
+        if (error instanceof ManagedResourceConflictError) {
+          active.store.recordEvent({
+            ...ref,
+            claim: active.claim,
+            type: "reconcile_conflict",
+            payload: { reconcileId: active.reconcileId },
+          });
+          active.store.requeueClaim(
+            active.claim,
+            { availableAt: now.toISOString() },
+            now.toISOString(),
+          );
+          return;
+        }
+        throw error;
       }
-      active.settled = true;
-    } catch (error) {
-      if (error instanceof ManagedResourceConflictError) {
-        active.store.recordEvent({
-          ...ref,
-          claim: active.claim,
-          type: "reconcile_conflict",
-          payload: { reconcileId: active.reconcileId },
-        });
-        active.store.requeueClaim(
-          active.claim,
-          { availableAt: now.toISOString() },
-          now.toISOString(),
-        );
-        active.settled = true;
-        return;
-      }
-      throw error;
-    }
+    });
+    active.settled = true;
   }
 
   private finishResourceManagerFailure(active: ActiveResourceManager, failure: string): void {
     if (active.settled) return;
     const now = new Date();
     const delay = Math.min(60_000, 1_000 * 2 ** Math.min(active.claim.consecutiveErrors, 6));
-    const error = failure.slice(0, 8_192);
-    active.store.recordEvent({
-      resourceManager: active.claim.resourceManager,
-      key: active.claim.key,
-      claim: active.claim,
-      type: "reconcile_failed",
-      payload: {
-        reconcileId: active.reconcileId,
-        error,
-        durationMs: Math.max(0, now.getTime() - active.startedAt),
-        requeueAfterMs: delay,
-      },
+    this.state.transaction(() => {
+      // A replaced worker cannot record a failure or schedule another attempt.
+      if (
+        !active.store.renewClaim(active.claim, RESOURCE_MANAGER_CLAIM_LEASE_MS, now.toISOString())
+      )
+        return;
+      active.store.recordEvent({
+        resourceManager: active.claim.resourceManager,
+        key: active.claim.key,
+        claim: active.claim,
+        type: "reconcile_failed",
+        payload: {
+          reconcileId: active.reconcileId,
+          error: failure,
+          durationMs: Math.max(0, now.getTime() - active.startedAt),
+          requeueAfterMs: delay,
+        },
+      });
+      active.store.requeueClaim(
+        active.claim,
+        { availableAt: new Date(now.getTime() + delay).toISOString(), error: failure },
+        now.toISOString(),
+      );
     });
-    active.store.requeueClaim(
-      active.claim,
-      { availableAt: new Date(now.getTime() + delay).toISOString(), error },
-      now.toISOString(),
-    );
     active.settled = true;
   }
 

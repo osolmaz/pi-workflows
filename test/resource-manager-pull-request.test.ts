@@ -1,18 +1,19 @@
+import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import pullRequestResourceManager from "../examples/resource-managers/pull-request.resource-manager.js";
-import { ResourceManagerRuntime } from "../src/resource-managers/runtime.js";
+import { afterEach, describe, expect, it } from "vitest";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import type { ResourceManagerStore } from "../src/resource-managers/store.js";
-import type { ResourceManagerWorkflowScheduler } from "../src/resource-managers/workflows.js";
-import { makeTempDir } from "./helpers.js";
+import { WorkflowServer } from "../src/server/server.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
+import { makeTempDir, waitUntil } from "./helpers.js";
 
 const stores: ResourceManagerStore[] = [];
 const servers: http.Server[] = [];
+const hosts: WorkflowServer[] = [];
 
 afterEach(async () => {
-  vi.unstubAllEnvs();
+  await Promise.all(hosts.splice(0).map((host) => host.stop()));
   for (const store of stores.splice(0)) {
     store.close();
   }
@@ -31,32 +32,33 @@ afterEach(async () => {
 describe("pull request resource manager example", () => {
   it("runs child work and performs one exact-head merge", async () => {
     const github = await fakeGitHub({ head: "abc", checks: "success" });
-    const store = await makeStore();
-    const scheduledInputs: unknown[] = [];
-    const scheduler: ResourceManagerWorkflowScheduler = {
-      ensure: async (request) => {
-        scheduledInputs.push(request.input);
-        return { state: "succeeded", runId: "repair-run" };
-      },
-    };
-    const manager = new ResourceManagerRuntime({
-      store,
-      resourceManagers: [pullRequestResourceManager],
-      workflowScheduler: scheduler,
-    });
-    manager.putResource(pullRequestResourceManager, "owner/repo#1", {
+    const { store, queue, host } = await makeStore();
+    const spec = {
       apiBaseUrl: github.url,
       repository: "owner/repo",
       number: 1,
       expectedHeadSha: "abc",
       repairWorkflow: "repair",
       mergeApproved: true,
+    };
+    store.putResource({
+      resourceManager: "pull-request",
+      key: "owner/repo#1",
+      spec,
+      initialStatus: { phase: "observing" },
     });
     for (let index = 0; index < 9; index += 1) {
-      manager.enqueue({ resourceManager: "pull-request", key: "owner/repo#1" });
+      store.enqueue({ resourceManager: "pull-request", key: "owner/repo#1" });
     }
-
-    expect(await manager.runUntilIdle()).toBe(2);
+    await host.start();
+    await waitUntil(
+      () =>
+        store.getResource<unknown, { phase: string }>({
+          resourceManager: "pull-request",
+          key: "owner/repo#1",
+        })?.status.resourceManagerStatus?.phase === "merged",
+      30_000,
+    );
     const resource = store.getResource<unknown, { phase: string }>({
       resourceManager: "pull-request",
       key: "owner/repo#1",
@@ -67,45 +69,74 @@ describe("pull request resource manager example", () => {
       resourceManagerStatus: { phase: "merged", observedHeadSha: "abc" },
       conditions: [{ type: "Ready", status: true, reason: "Merged" }],
     });
+    const scheduledInputs = queue.listWorkflowRuns().map((run) => run.input);
     expect(scheduledInputs).toEqual([
       { repository: "owner/repo", number: 1, expectedHeadSha: "abc" },
     ]);
     expect(JSON.stringify(scheduledInputs)).not.toContain("token");
-  });
+  }, 45_000);
 
   it("blocks a changed head before scheduling or mutation", async () => {
     const github = await fakeGitHub({ head: "new-head", checks: "success" });
-    const store = await makeStore();
-    const ensure = vi.fn(async () => ({ state: "succeeded" as const, runId: "repair-run" }));
-    const manager = new ResourceManagerRuntime({
-      store,
-      resourceManagers: [pullRequestResourceManager],
-      workflowScheduler: { ensure },
-    });
-    manager.putResource(pullRequestResourceManager, "owner/repo#1", {
+    const { store, queue, host } = await makeStore();
+    const spec = {
       apiBaseUrl: github.url,
       repository: "owner/repo",
       number: 1,
       expectedHeadSha: "old-head",
       repairWorkflow: "repair",
       mergeApproved: true,
+    };
+    store.putResource({
+      resourceManager: "pull-request",
+      key: "owner/repo#1",
+      spec,
+      initialStatus: { phase: "observing" },
     });
-
-    await manager.runUntilIdle();
+    store.enqueue({ resourceManager: "pull-request", key: "owner/repo#1" });
+    await host.start();
+    await waitUntil(
+      () =>
+        store.getResource({ resourceManager: "pull-request", key: "owner/repo#1" })?.status
+          .observedGeneration === 1,
+      30_000,
+    );
     const resource = store.getResource({ resourceManager: "pull-request", key: "owner/repo#1" });
     expect(resource?.status.conditions).toMatchObject([
       { type: "Ready", status: false, reason: "HeadChanged" },
     ]);
-    expect(ensure).not.toHaveBeenCalled();
+    expect(queue.listWorkflowRuns()).toEqual([]);
     expect(github.mergeCalls()).toBe(0);
-  });
+  }, 45_000);
 });
 
-async function makeStore(): Promise<SqliteResourceManagerStore> {
+async function makeStore() {
   const dir = await makeTempDir("pi-resource-manager-pr");
-  const store = new SqliteResourceManagerStore(path.join(dir, "state.sqlite"));
+  const managerDir = path.join(dir, ".pi", "resource-managers");
+  const workflowDir = path.join(dir, ".pi", "workflows");
+  await fs.mkdir(managerDir, { recursive: true });
+  await fs.mkdir(workflowDir, { recursive: true });
+  await fs.writeFile(
+    path.join(managerDir, "pull-request.resource-manager.ts"),
+    `export { default } from ${JSON.stringify(path.resolve("examples/resource-managers/pull-request.resource-manager.ts"))};`,
+  );
+  await fs.writeFile(
+    path.join(workflowDir, "repair.workflow.ts"),
+    `import { compute, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "repair", startAt: "work", nodes: { work: compute({ run: ({ input }) => input }) }, edges: [] });`,
+  );
+  const databasePath = path.join(dir, "state.sqlite");
+  const store = new SqliteResourceManagerStore(databasePath, { projectPath: dir });
+  const queue = new WorkflowRunQueueStore(databasePath, { state: store.state, projectPath: dir });
+  const host = new WorkflowServer({
+    databasePath,
+    claimPollMs: 10,
+    maxWorkers: 1,
+    env: { GITHUB_TOKEN: "test-token" },
+  });
   stores.push(store);
-  return store;
+  hosts.push(host);
+  return { store, queue, host };
 }
 
 async function fakeGitHub(options: { head: string; checks: "pending" | "success" }) {
