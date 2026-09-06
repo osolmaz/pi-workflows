@@ -3976,7 +3976,7 @@ export class WorkflowServer {
         case "store.commitTransition": {
           const transition = payload.transition as WorkflowTransition;
           result = await this.runStore.commitTransition(message.runId, transition);
-          if (transition.kind === "finish" && transition.status !== "waiting") {
+          if (transition.kind === "finish") {
             this.tryEnsureTerminalWorkflowMessage(message.runId);
           }
           break;

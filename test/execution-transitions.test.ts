@@ -120,14 +120,32 @@ describe("host-owned execution transitions", () => {
     expect(current).toEqual(state());
   });
 
-  it("does not mark a waiting run as finished", () => {
-    const waiting = apply(state(), {
-      kind: "finish",
-      status: "waiting",
-      finalOutput: { question: "continue?" },
-      event: { scope: "run", type: "run_waiting", payload: {} },
-    });
+  it("parks a checkpoint without finishing its attempt", () => {
+    const active = apply(state(), start);
+    const request: WorkflowTransition = {
+      kind: "waitForInput",
+      requestId: "request-one",
+      requestKind: "checkpoint",
+      contract: { question: "continue?" },
+      event: {
+        scope: "node",
+        type: "checkpoint_requested",
+        nodeId: "work",
+        attemptId: "attempt-one",
+        payload: {},
+      },
+    };
+    expect(() => apply(active, request)).toThrow(/Only a checkpoint/);
+    const waiting = applyExecutionTransition(
+      active,
+      { ...definition, nodes: { work: { nodeType: "checkpoint" } } },
+      request,
+      now,
+    );
     expect(waiting.status).toBe("waiting");
     expect(waiting.finishedAt).toBeUndefined();
+    expect(waiting.currentAttemptId).toBe("attempt-one");
+    expect(waiting.currentNodeStartedAt).toBe(now);
+    expect(waiting.steps).toEqual([]);
   });
 });

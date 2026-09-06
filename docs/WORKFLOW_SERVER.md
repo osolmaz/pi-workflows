@@ -259,15 +259,16 @@ Each history page has both an item limit and an encoded byte budget. Oversized v
 
 The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
 
-The server computes effective status in this order:
+The server keeps execution status separate from worker and Pi activity:
 
-1. A durable ambiguous external effect that requires explicit review is `ambiguous`. An effect that is still applying under a live runner is not ambiguous.
-2. A live supervised runner or an exact active origin-session workflow turn is `running`.
-3. A durable terminal result keeps its terminal label after its presentation turn ends.
-4. A durable pause is `paused` after its active Pi turn ends.
-5. A pending interaction, decision, or presentation with no exact active turn is `waiting`.
-6. Parked resumable work with no pending interaction is `queued`.
-7. Admitted work that has not started is `queued`.
+1. A durable terminal result keeps its terminal label, including during reporting or cleanup. An unresolved external effect still exposes a review action.
+2. A nonterminal run with an ambiguous external effect is `ambiguous`.
+3. A durable pause is `paused`, even while its worker or Pi turn stops.
+4. A pending request is `waiting`. Its kind determines the response action: `submit` and `update` for an agent, `answer` for an ordinary checkpoint, `human-answer` for a protected decision, and no tool completion action for a visible-response request.
+5. Otherwise, active worker or Pi execution is `running`.
+6. Parked resumable work or admitted work that has not started is `queued`.
+
+`display.activity` reports the supervised worker or exact Pi turn independently. Waiting alone never permits an answer. Command handlers check the exact request again before they change state.
 
 Server connection failure is the client condition `unavailable`, not a `display.status` value. `paused` is never inferred from a parked queue, pending interaction, stale cursor, or missing activity report.
 

@@ -31,7 +31,7 @@ const base: WorkflowDisplayFacts = {
   ambiguous: false,
   runnerActive: false,
   originTurnActive: false,
-  pendingInteraction: true,
+  pendingRequestKind: "agent",
   errorMessage: null,
 };
 
@@ -48,32 +48,30 @@ describe("host workflow display reducer", () => {
         paused: true,
         runnerActive: true,
       }).status,
-    ).toBe("ambiguous");
+    ).toBe("completed");
     expect(display({ durableStatus: "failed", paused: true, runnerActive: true }).status).toBe(
-      "running",
+      "failed",
     );
-    expect(display({ paused: true, runnerActive: true }).status).toBe("running");
-    expect(display({ runnerActive: true }).status).toBe("running");
-    expect(display({ originTurnActive: true }).status).toBe("running");
+    expect(display({ paused: true, runnerActive: true }).status).toBe("paused");
+    expect(display({ runnerActive: true }).status).toBe("waiting");
+    expect(display({ originTurnActive: true }).status).toBe("waiting");
     expect(display({}).status).toBe("waiting");
     expect(
-      display({ durableStatus: "running", pendingInteraction: false, queueStatus: "parked" })
-        .status,
+      display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "parked" }).status,
     ).toBe("queued");
     expect(
-      display({ durableStatus: "running", pendingInteraction: false, queueStatus: "queued" })
-        .status,
+      display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "queued" }).status,
     ).toBe("queued");
   });
 
   it("reports exact activity and allowed controls", () => {
     expect(display({ runnerActive: true })).toMatchObject({
-      status: "running",
+      status: "waiting",
       activity: "supervised_runner",
-      controls: ["pause", "cancel"],
+      controls: ["pause", "cancel", "update", "submit"],
     });
     expect(display({ originTurnActive: true })).toMatchObject({
-      status: "running",
+      status: "waiting",
       activity: "origin_turn",
     });
     expect(display({ paused: true })).toMatchObject({
@@ -85,13 +83,13 @@ describe("host workflow display reducer", () => {
       controls: ["review"],
     });
     expect(
-      display({ durableStatus: "running", pendingInteraction: false, queueStatus: "queued" })
+      display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "queued" })
         .controls,
     ).toEqual(["cancel"]);
     expect(
       display({
         durableStatus: "running",
-        pendingInteraction: false,
+        pendingRequestKind: null,
         queueStatus: "parked",
         errorMessage: "The worker exited before it saved workflow progress.",
       }),
@@ -99,6 +97,26 @@ describe("host workflow display reducer", () => {
       status: "queued",
       reason: "The worker exited before it saved workflow progress.",
       controls: ["resume", "cancel"],
+    });
+  });
+
+  it("derives response controls from the exact request kind, not waiting status", () => {
+    expect(display({ pendingRequestKind: "checkpoint" }).controls).toEqual([
+      "pause",
+      "cancel",
+      "answer",
+    ]);
+    expect(display({ pendingRequestKind: "decision" }).controls).toEqual([
+      "pause",
+      "cancel",
+      "human-answer",
+    ]);
+    expect(display({ pendingRequestKind: "assistant" }).controls).toEqual(["pause", "cancel"]);
+    expect(display({ pendingRequestKind: null }).controls).toEqual(["pause", "cancel"]);
+    expect(display({ durableStatus: "completed", originTurnActive: true })).toMatchObject({
+      status: "completed",
+      activity: "origin_turn",
+      controls: [],
     });
   });
 
@@ -584,7 +602,7 @@ describe("host workflow display reducer", () => {
       display({
         queueStatus: "done",
         durableStatus: undefined,
-        pendingInteraction: false,
+        pendingRequestKind: null,
       }).status,
     ).toBe("completed");
   });
@@ -714,7 +732,7 @@ describe("host workflow display reducer", () => {
       now: Date.now() - 11_000,
     });
     expect(views.run("run-view")?.display).toMatchObject({
-      status: "running",
+      status: "waiting",
       activity: "origin_turn",
     });
     modelTurnActive = false;
@@ -725,12 +743,12 @@ describe("host workflow display reducer", () => {
     const runningList = views.list();
     expect(runningList.revision).not.toBe(initialList.revision);
     expect(runningList.items).toMatchObject([
-      { display: { status: "running", activity: "origin_turn" } },
+      { display: { status: "waiting", activity: "origin_turn" } },
     ]);
-    expect(views.run("run-view")?.display.status).toBe("running");
+    expect(views.run("run-view")?.display.status).toBe("waiting");
 
     state.connection.prepare("UPDATE runs SET paused = 1 WHERE run_id = ?").run("run-view");
-    expect(views.run("run-view")?.display.status).toBe("running");
+    expect(views.run("run-view")?.display.status).toBe("paused");
     serverState.workflowMessages.endTurn({
       workflowMessageId: message.workflowMessageId,
       workflowTurnId: "turn-view",
