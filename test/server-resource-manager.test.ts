@@ -219,7 +219,8 @@ export default defineResourceManager({
     });
     store.close();
 
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    // Reconciles and their child workflows share this one execution slot.
+    const host = new WorkflowServer({ databasePath, claimPollMs: 10, maxWorkers: 1 });
     await host.start();
     try {
       await waitUntil(() => {

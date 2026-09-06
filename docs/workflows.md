@@ -679,6 +679,12 @@ and resume later by running that wait again from the beginning.
 A monitor uses the session's single active workflow slot. It does not provide
 cron syntax, calendar scheduling, OS notifications, or a background service.
 
+## Worker capacity
+
+Workflow runs and resource-manager reconciles share one host scheduler. Start, restart, resume, result validation, and timeout recovery all wait for the same worker capacity. The default is four execution workers; set `PI_WORKFLOWS_MAX_WORKERS` before starting the host to change it. Waiting and paused requests keep their durable identity without occupying a worker. A submitted candidate stays durable until a worker can validate it. Cancellation does not wait for capacity.
+
+One unfinished interactive run reserves its origin Pi session, including while waiting or paused. Independent headless work does not reserve that session.
+
 ## The step contract
 
 Every `agent` prompt ends with a step contract block naming the workflow, the

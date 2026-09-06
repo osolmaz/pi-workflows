@@ -315,7 +315,6 @@ describe("SQLite delivery lifecycle", () => {
     expect(store.verifyWorkflowRunClaim({ runId: "run-a", claimToken: "wrong" })).toBe(false);
     expect(store.parkWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
     expect(store.deleteWorkflowRun({ runId: "run-a", claimToken: "wrong" })).toBe(false);
-    expect(store.setWorkflowRunOriginSession("run-b", "session-c")).toBe(true);
     store.close();
   });
 });

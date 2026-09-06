@@ -48,8 +48,6 @@ function runPreparation() {
     input: { task: "hello" },
     launchOptions: {},
     runnerId: "runner-1",
-    claimToken: "winner-token",
-    leaseMs: 30_000,
     originSessionId: "session-prepared",
   };
 }
@@ -85,27 +83,17 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("atomically prepares or adopts one compatible run", async () => {
+  it("atomically reserves or adopts one compatible run without a worker claim", async () => {
     const { store } = await setup();
-    reserve(store, "parent-1");
-    const parentClaim = store.claimWorkflowRun({
-      runId: "parent-1",
-      runnerId: "runner-1",
-      claimToken: "parent-token",
-      leaseMs: 30_000,
-    });
-    expect(parentClaim).toBeDefined();
-    expect(store.parkWorkflowRun({ runId: "parent-1", claimToken: "parent-token" })).toBe(true);
-
     const options = runPreparation();
-    const first = store.prepareOrAdoptWorkflowRun(options);
+    const first = store.reserveOrAdoptWorkflowRun(options);
     expect(first).toMatchObject({
-      state: "claimed",
+      state: "reserved",
       run: {
         runId: "prepared-1",
-        status: "starting",
-        claimToken: "winner-token",
-        claimGeneration: 1,
+        status: "queued",
+        claimToken: null,
+        claimGeneration: null,
       },
     });
     const before = store.getWorkflowRun("prepared-1");
@@ -119,14 +107,14 @@ describe("workflow run queue in canonical SQLite", () => {
       )
       .get("prepared-1");
 
-    const adopted = store.prepareOrAdoptWorkflowRun({ ...options, claimToken: "loser-token" });
+    const adopted = store.reserveOrAdoptWorkflowRun(options);
     expect(adopted).toMatchObject({
       state: "adopted",
       run: {
         runId: "prepared-1",
-        status: "starting",
+        status: "queued",
         claimToken: null,
-        claimGeneration: 1,
+        claimGeneration: null,
       },
     });
     expect(store.getWorkflowRun("prepared-1")).toEqual(before);
@@ -144,7 +132,7 @@ describe("workflow run queue in canonical SQLite", () => {
         .get("prepared-1"),
     ).toEqual(eventsBefore);
     expect(store.verifyWorkflowRunClaim({ runId: "prepared-1", claimToken: "winner-token" })).toBe(
-      true,
+      false,
     );
     expect(store.verifyWorkflowRunClaim({ runId: "prepared-1", claimToken: "loser-token" })).toBe(
       false,
@@ -166,26 +154,8 @@ describe("workflow run queue in canonical SQLite", () => {
 
   it("rejects incompatible run adoption without mutation", async () => {
     const { store } = await setup();
-    reserve(store, "parent-1");
-    const parent = store.claimWorkflowRun({
-      runId: "parent-1",
-      runnerId: "runner-1",
-      claimToken: "parent-token",
-      leaseMs: 30_000,
-    });
-    expect(parent).toBeDefined();
-    expect(store.parkWorkflowRun({ runId: "parent-1", claimToken: "parent-token" })).toBe(true);
-    reserve(store, "parent-2");
-    const secondParent = store.claimWorkflowRun({
-      runId: "parent-2",
-      runnerId: "runner-1",
-      claimToken: "parent-2-token",
-      leaseMs: 30_000,
-    });
-    expect(secondParent).toBeDefined();
-    expect(store.parkWorkflowRun({ runId: "parent-2", claimToken: "parent-2-token" })).toBe(true);
     const options = runPreparation();
-    store.prepareOrAdoptWorkflowRun(options);
+    store.reserveOrAdoptWorkflowRun(options);
     const before = store.getWorkflowRun("prepared-1");
     const conflicts = [
       { workflowName: "other" },
@@ -195,14 +165,13 @@ describe("workflow run queue in canonical SQLite", () => {
       { input: { task: "other" } },
       { launchOptions: { parentRunId: "other" } },
       { originSessionId: "session-2" },
-      { parentRunId: "parent-2" },
+      { parentRunId: "prepared-1" },
     ];
     for (const conflict of conflicts) {
       expect(() =>
-        store.prepareOrAdoptWorkflowRun({
+        store.reserveOrAdoptWorkflowRun({
           ...options,
           ...conflict,
-          claimToken: "loser-token",
         }),
       ).toThrow(/preparation conflicts/);
       expect(store.getWorkflowRun("prepared-1")).toEqual(before);
@@ -267,6 +236,30 @@ describe("workflow run queue in canonical SQLite", () => {
     reserve(store);
     expect(() => reserve(store)).toThrow(/already reserved/);
     expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "host",
+      claimToken: "park",
+      leaseMs: 10_000,
+    });
+    expect(store.parkWorkflowRun({ runId: "run-1", claimToken: "park" })).toBe(true);
+    expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
+    expect(store.getWorkflowRun("run-2")).toBeUndefined();
+    store.close();
+  });
+
+  it("does not reserve the Pi session for independent headless work", async () => {
+    const { store } = await setup();
+    const options = {
+      ...runPreparation(),
+      originSessionId: "session-1",
+      executionMode: "headless" as const,
+    };
+    store.reserveWorkflowRun({ ...options, runId: "headless-one" });
+    store.reserveWorkflowRun({ ...options, runId: "headless-two" });
+    reserve(store);
+    expect(store.listWorkflowRuns()).toHaveLength(3);
+    expect(store.findSessionReservation("session-1")?.runId).toBe("run-1");
     store.close();
   });
 
@@ -374,20 +367,17 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("keeps fresh interactive reservations out of host claims", async () => {
+  it("schedules fresh interactive reservations through the host", async () => {
     const { store } = await setup();
     reserve(store);
-    store.state.connection
-      .prepare("UPDATE run_queue SET affinity_runner_id = NULL WHERE run_id = 'run-1'")
-      .run();
     expect(
       store.claimNextWorkflowRun({
         runnerId: "host-worker",
         claimToken: "host-token",
         leaseMs: 10_000,
       }),
-    ).toBeUndefined();
-    expect(store.getWorkflowRun("run-1")?.status).toBe("queued");
+    ).toMatchObject({ runId: "run-1", originSessionId: "session-1", status: "starting" });
+    expect(store.getWorkflowRun("run-1")?.status).toBe("starting");
     store.close();
   });
 

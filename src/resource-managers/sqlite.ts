@@ -121,8 +121,8 @@ export type WorkflowRunQueueRecord = {
 
 export type WorkflowRunPreparationResult =
   | {
-      state: "claimed";
-      run: WorkflowRunQueueRecord & { claimToken: string };
+      state: "reserved";
+      run: WorkflowRunQueueRecord;
     }
   | {
       state: "adopted";
@@ -1199,12 +1199,19 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
              consecutive_errors, created_at, updated_at
            ) VALUES (?, 'queued', ?, ?, ?, 0, ?, ?)`,
       )
-      .run(options.runId, now, options.runnerId, options.originSessionId, now, now);
+      .run(
+        options.runId,
+        now,
+        options.runnerId,
+        options.executionMode === "headless" ? null : options.originSessionId,
+        now,
+        now,
+      );
     this.insertEvent(resourceId, 1, "run.queued", "session", options.originSessionId, {}, now);
     return this.requireWorkflowRun(options.runId);
   }
 
-  prepareOrAdoptWorkflowRun(options: WorkflowRunClaimOptions): WorkflowRunPreparationResult {
+  reserveOrAdoptWorkflowRun(options: WorkflowRunReservationOptions): WorkflowRunPreparationResult {
     validateRunId(options.runId);
     const now = epoch(validTimestamp(options.now));
     const definitionDigest = digestBuffer(options.definitionDigest);
@@ -1214,20 +1221,9 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
         this.assertWorkflowRunPreparationCompatible(existing, options, definitionDigest);
         return { state: "adopted", run: this.mapWorkflowRun(existing) };
       }
-      this.reserveWorkflowRunInTransaction(options, now, definitionDigest);
-      const claimed = this.claimRunInTransaction(
-        options.runId,
-        options.runnerId,
-        options.claimToken,
-        options.leaseMs,
-        now,
-      );
-      if (claimed === undefined) {
-        throw new Error(`Workflow run could not be claimed: ${options.runId}`);
-      }
       return {
-        state: "claimed",
-        run: claimed as WorkflowRunQueueRecord & { claimToken: string },
+        state: "reserved",
+        run: this.reserveWorkflowRunInTransaction(options, now, definitionDigest),
       };
     });
   }
@@ -1352,7 +1348,7 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
     const row = this.state.connection
       .prepare(
         workflowRunSelect(
-          "WHERE b.origin_session_id = ? AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
+          "WHERE b.origin_session_id = ? AND b.execution_mode = 'interactive' AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
         ),
       )
       .get(sessionId);
@@ -1361,7 +1357,7 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
 
   findSessionReservationView(sessionId: string): WorkflowRunQueueViewRecord | undefined {
     const row = this.workflowRunViewRows(
-      "WHERE b.origin_session_id = ? AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
+      "WHERE b.origin_session_id = ? AND b.execution_mode = 'interactive' AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
       [sessionId],
     )[0];
     return row === undefined ? undefined : workflowRunViewRecord(row);
@@ -1528,12 +1524,11 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
       "q.status IN ('queued', 'parked', 'starting', 'running')",
       "q.available_at <= ?",
       "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
-      "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
       "NOT (q.status = 'parked' AND (r.status = 'waiting' OR r.paused = 1))",
       "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status = 'pending')",
       "(q.error_code IS NULL OR q.error_code NOT IN ('workflowSourceChanged', 'runnerNoProgress'))",
     ];
-    const params: unknown[] = [now, now, options.runnerId, options.runnerId];
+    const params: unknown[] = [now, now, options.runnerId];
     if (this.projectId !== null) {
       clauses.unshift("r.project_id = ?");
       params.unshift(this.projectId);
@@ -1541,8 +1536,6 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
     if (options.sessionId !== undefined) {
       clauses.push("b.origin_session_id = ?");
       params.push(options.sessionId);
-    } else {
-      clauses.push("(b.execution_mode = 'headless' OR q.status <> 'queued')");
     }
     if (options.excludeRunIds !== undefined && options.excludeRunIds.length > 0) {
       clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
@@ -1798,6 +1791,48 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
         "control",
         null,
         { status: "waiting" },
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
+  }
+
+  requestWorkflowRunResume(options: { runId: string; now?: string }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) return false;
+      const lease = this.requireLease(row.resourceId);
+      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+      if (
+        this.state.connection
+          .prepare("SELECT 1 FROM interactive_requests WHERE run_id = ? AND status = 'pending'")
+          .get(options.runId) !== undefined
+      )
+        return false;
+      this.state.connection
+        .prepare("UPDATE runs SET paused = 0, updated_at = ? WHERE run_id = ?")
+        .run(now, options.runId);
+      this.state.connection
+        .prepare(
+          "UPDATE run_queue SET status = 'queued', error_code = NULL, error_hash = NULL, available_at = ?, updated_at = ? WHERE run_id = ?",
+        )
+        .run(now, now, options.runId);
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.resume_requested",
+        "control",
+        null,
+        { status: "queued" },
         now,
       );
       recordViewerDeltas(
@@ -2228,19 +2263,6 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
         );
       });
     }
-  }
-
-  setWorkflowRunOriginSession(runId: string, originSessionId: string): boolean {
-    const now = Date.now();
-    return (
-      this.state.connection
-        .prepare(
-          `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
-         VALUES (?, ?, 'interactive', ?)
-         ON CONFLICT(run_id) DO UPDATE SET origin_session_id = excluded.origin_session_id`,
-        )
-        .run(runId, originSessionId, now).changes === 1
-    );
   }
 
   private ensureProject(projectPath: string): string {

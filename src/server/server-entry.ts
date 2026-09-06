@@ -7,6 +7,9 @@ async function main(): Promise<void> {
   const databasePath = databaseIndex < 0 ? undefined : process.argv[databaseIndex + 1];
   const server = new WorkflowServer({
     ...(databasePath === undefined ? {} : { databasePath }),
+    ...(process.env.PI_WORKFLOWS_MAX_WORKERS === undefined
+      ? {}
+      : { maxWorkers: Number(process.env.PI_WORKFLOWS_MAX_WORKERS) }),
     onLog: (message) => process.stderr.write(`[pi-workflows server] ${message}\n`),
   });
   const shutdown = () => void server.stop();
