@@ -824,14 +824,18 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await waitForCondition(
       async () => {
         runView = await client.getRun(runId);
-        return runView?.display.status === "waiting" && runView.display.activity === "origin_turn";
+        return runView?.display.status === "running" && runView.display.activity === "origin_turn";
       },
       () => rpcDiagnostic(pi),
       10_000,
     );
     await client.close();
     if (runView === null) throw new Error("Multi-step widget run view disappeared");
-    expect(runView.display).toMatchObject({ status: "waiting", activity: "origin_turn" });
+    expect(runView.display).toMatchObject({
+      status: "running",
+      activity: "origin_turn",
+      controls: ["pause", "cancel", "update", "submit"],
+    });
     expect(runView.state).toMatchObject({
       status: "waiting",
       waitingOn: "second",
@@ -847,7 +851,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ["--import", "tsx", path.join(REPO_ROOT, "src", "viewer", "cli.ts"), "view", runId, "--once"],
       { cwd: REPO_ROOT, env: { ...process.env, ...piEnvironment() } },
     );
-    expect(piwOutput).toContain("waiting");
+    expect(piwOutput).toContain("running");
     expect(piwOutput).toContain("✓ first · ok");
     expect(piwOutput).not.toContain("● running");
 

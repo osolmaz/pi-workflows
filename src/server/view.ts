@@ -936,6 +936,11 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
   } else if (facts.paused) {
     status = "paused";
     reason = "The workflow is durably paused.";
+  } else if (activity !== null) {
+    status = "running";
+    reason = facts.originTurnActive
+      ? "The agent is working on the workflow step."
+      : "The workflow runner is working.";
   } else if (facts.pendingRequestKind !== null || facts.durableStatus === "waiting") {
     status = "waiting";
     reason =
@@ -949,11 +954,8 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
               ? "The workflow needs its assigned visible response."
               : "The workflow is waiting.";
     if (facts.pendingRequestKind === "agent" || facts.pendingRequestKind === "assistant") {
-      if (facts.originTurnActive) reason = "The agent is working on the workflow step.";
-      else if (!facts.requestDeliveryConfirmed) reason = "Workflow step delivery is not confirmed.";
+      if (!facts.requestDeliveryConfirmed) reason = "Workflow step delivery is not confirmed.";
     }
-  } else if (activity !== null) {
-    status = "running";
   } else if (facts.queueStatus === "parked" || facts.queueStatus === "queued") {
     status = "queued";
     reason =
@@ -976,7 +978,7 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     if (facts.queueStatus === "parked") controls.push("resume");
     controls.push("cancel");
   }
-  if (status === "waiting") {
+  if (status === "waiting" || status === "running") {
     if (facts.pendingRequestKind === "checkpoint") controls.push("answer");
     if (facts.pendingRequestKind === "decision") controls.push("human-answer");
     if (facts.pendingRequestKind === "agent") controls.push("update", "submit");

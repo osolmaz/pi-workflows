@@ -187,6 +187,13 @@ cancel an expired running row. Resume refuses changed workflow source.
 
 Sends a prompt to the model. `expectedOutput` selects one of two output forms.
 
+While the workflow-owned Pi turn or supervised runner is active, the visible run status is
+`running`. The durable agent request can still be waiting for its result. With no active work,
+a pending request displays `waiting`. Pause, ambiguity, and terminal outcomes retain precedence.
+The exact pending request determines response controls in both running and waiting displays:
+agent steps retain `submit` and `update`, checkpoints retain `answer`, and protected decisions
+retain only their human response path. Ordinary chat is not workflow activity.
+
 `allowedTools` optionally restricts a step to exact tool names, for example `allowedTools: ["read", "grep", "find", "ls"]`. Omit it for the normal tool set; use `[]` to permit only matching workflow `submit` and `update` calls. Do not include `workflow` in the list. Restrictions remain in composed child graphs, definition snapshots, and the durable step contract. Changing them requires a new run under the fixed-definition rule.
 
 The origin Pi extension blocks other calls through public `tool_call` before execution, including while delivery acknowledgment is pending. It applies the restriction only to the workflow-owned running turn, not later ordinary chat. This is an exact tool allowlist, not a filesystem sandbox: authors must trust the implementations of the tools they allow. No shell is implicitly read-only.
