@@ -207,7 +207,9 @@ function parseCheck(
   }
   if (
     record.baseEligible === true &&
-    batch.args.some((arg) => arg.includes(path.resolve(candidateRoot)))
+    batch.args.some((arg) =>
+      [arg, path.normalize(arg)].some((value) => value.includes(path.resolve(candidateRoot))),
+    )
   ) {
     throw new Error(
       `verification checks[${index}] base comparison arguments must not reference the prepared workspace`,

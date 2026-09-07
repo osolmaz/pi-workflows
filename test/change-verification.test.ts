@@ -251,7 +251,7 @@ describe("change verification", () => {
     expect(executor.requests.map((request) => request.contract.nodeId)).toEqual(["planChecks"]);
   });
 
-  it.each(["arguments", "executable"])(
+  it.each(["arguments", "normalized arguments", "executable"])(
     "rejects candidate-bound comparison %s before accepting a corrected plan",
     async (binding) => {
       const { repository, workspace } = await fixture("verification-plan-correction");
@@ -273,7 +273,7 @@ describe("change verification", () => {
                 "run",
                 "--rm",
                 "--mount",
-                `type=bind,src=${repository},dst=/workspace`,
+                `type=bind,src=${binding === "normalized arguments" ? `${path.dirname(repository)}/unused/../${path.basename(repository)}` : repository},dst=/workspace`,
                 "test-image",
                 "check",
               ],
