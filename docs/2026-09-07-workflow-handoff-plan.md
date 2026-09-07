@@ -56,7 +56,7 @@ issues must be identified, not silently repaired. Push before running
 
 ## Completion evidence
 
-Implemented in PR #85. Local validation passed with 1,211 unit tests, 13 real-Pi
+Implemented in PR #85. Local validation passed with 1,215 unit tests, 13 real-Pi
 mock-provider E2E tests, and 76 Rust tests. Slophammer, Clippy, and format checks
 passed. SimpleDoc reports the existing nine naming/frontmatter issues and 24
 reference updates.
@@ -67,7 +67,11 @@ allowance. It verified ordinary chat, a model tool start, exact submission,
 next-step completion, and saved conversation capture. The isolated Autoimplement
 test also verified actual temporary worktree creation before cancellation.
 
-The configured reviewer exited before review because its local provider
-configuration has an unknown field. Review, CI verification, and merge remain
-blocked; no alternate reviewer was substituted. Recovery of an installed live
-session is separate work and requires approval to update that installation.
+The first reviewer attempt stopped on an unsupported local provider configuration.
+After that configuration was repaired, the configured reviewer found a P1 recovery
+case: a delivered step without an active workflow turn could claim an ordinary
+chat response. Recovery now requires the recorded active turn and its exact
+message as the latest user or custom input. Regression tests cover missing turn
+records and later ordinary input. Final review and CI verification remain pending.
+Recovery of an installed live session is separate work and requires approval to
+update that installation.

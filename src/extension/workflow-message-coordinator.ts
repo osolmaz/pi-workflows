@@ -90,13 +90,19 @@ export class WorkflowMessageCoordinator {
       const branchEntries = branchWorkflowEntries(ctx.sessionManager.getBranch());
       if (this.turn === null && !ctx.isIdle()) {
         const candidate = this.turnCandidate();
-        if (candidate !== undefined && branchEntries.has(candidate.workflowMessageId)) {
-          const open = view.openWorkflowTurn;
-          const recovered = open?.workflowMessageId === candidate.workflowMessageId ? open : null;
+        const open = view.openWorkflowTurn;
+        if (
+          candidate !== undefined &&
+          open?.state === "started" &&
+          open.workflowMessageId === candidate.workflowMessageId &&
+          open.runId === candidate.runId &&
+          open.targetSessionId === view.sessionId &&
+          latestTurnInputIsWorkflow(ctx.sessionManager.getBranch(), candidate.workflowMessageId)
+        ) {
           this.turn = {
-            workflowTurnId: recovered?.workflowTurnId ?? `workflow-turn-${randomUUID()}`,
+            workflowTurnId: open.workflowTurnId,
             message: candidate,
-            startedReported: recovered !== null,
+            startedReported: true,
             phase: "running",
           };
         }
@@ -341,6 +347,27 @@ export function branchWorkflowEntries(entries: readonly unknown[]): Map<string, 
     if (typeof workflowMessageId === "string") found.set(workflowMessageId, value.id);
   }
   return found;
+}
+
+function latestTurnInputIsWorkflow(
+  entries: readonly unknown[],
+  workflowMessageId: string,
+): boolean {
+  for (const value of [...entries].reverse()) {
+    if (!isRecord(value)) continue;
+    if (
+      value.role === "user" ||
+      (value.type === "message" && isRecord(value.message) && value.message.role === "user")
+    ) {
+      return false;
+    }
+    if (value.type === "custom_message" || value.role === "custom") {
+      return (
+        isRecord(value.details) && value.details[WORKFLOW_MESSAGE_ID_FIELD] === workflowMessageId
+      );
+    }
+  }
+  return false;
 }
 
 export function responseEntryId(entries: readonly unknown[]): string | null {

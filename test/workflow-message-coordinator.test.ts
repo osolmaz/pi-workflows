@@ -400,6 +400,72 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(2);
   });
 
+  it.each([
+    { recordedTurn: false, laterInput: null },
+    { recordedTurn: true, laterInput: { type: "message", message: { role: "user" } } },
+    { recordedTurn: true, laterInput: { role: "user" } },
+    { recordedTurn: true, laterInput: { type: "custom_message", details: {} } },
+  ])(
+    "does not recover ordinary chat as an outstanding step: %j",
+    async ({ recordedTurn, laterInput }) => {
+      const message = followUpMessage("sent");
+      message.kind = "step";
+      const current = view(message);
+      current.openWorkflowMessageId = message.workflowMessageId;
+      if (recordedTurn) {
+        current.openWorkflowTurn = {
+          schema: WORKFLOW_TURN_SCHEMA,
+          workflowTurnId: "old-workflow-turn",
+          workflowMessageId: message.workflowMessageId,
+          runId: message.runId,
+          targetSessionId: message.targetSessionId,
+          state: "started",
+          stopReason: null,
+          responseSessionEntryId: null,
+          startedAt: "2026-09-02T00:00:00.000Z",
+          endedAt: null,
+        };
+      }
+      const branch: unknown[] = [
+        { type: "custom_message", id: "entry-1", details: message.content.details },
+        { type: "message", id: "old-response", message: { role: "assistant" } },
+      ];
+      if (laterInput !== null) branch.push(laterInput);
+      const coordinator = new WorkflowMessageCoordinator();
+      coordinator.updateView(current);
+      const sendMessage = vi.fn();
+      const beforeTurnEnd = vi.fn(async () => undefined);
+      const request = vi.fn(async (options: Record<string, unknown>) =>
+        acceptedServerRequest(options),
+      );
+      let idle = false;
+      const ctx = {
+        isIdle: () => idle,
+        hasPendingMessages: () => false,
+        sessionManager: { getBranch: () => branch },
+      } as never;
+      const sync = () =>
+        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+          beforeTurnEnd,
+        });
+      coordinator.startTurn();
+      await sync();
+      expect(coordinator.activeTurnMessage()).toBeUndefined();
+      coordinator.endTurn("completed", "ordinary-reply");
+      idle = true;
+      await sync();
+      expect(beforeTurnEnd).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(
+        request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
+      ).toEqual([]);
+      expect(current.openWorkflowMessageId).toBe(message.workflowMessageId);
+      expect(current.openWorkflowTurn?.workflowTurnId ?? null).toBe(
+        recordedTurn ? "old-workflow-turn" : null,
+      );
+    },
+  );
+
   it("keeps the accepted workflow turn through an automatic Pi retry", async () => {
     const message = followUpMessage("sent");
     const current = view(message);
