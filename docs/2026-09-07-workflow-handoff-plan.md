@@ -2,7 +2,7 @@
 title: Workflow handoff and fixed run definitions
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-07
-status: in-progress
+status: complete
 ---
 
 # Workflow handoff and fixed run definitions
@@ -54,7 +54,7 @@ Run SimpleDoc and relevant Rust viewer checks. Existing unrelated documentation
 issues must be identified, not silently repaired. Push before running
 `pi-reviewer --base main`; address P0/P1 findings before checking CI and merging.
 
-## Remaining display correction
+## Display correction
 
 The earlier completion claim was incomplete: active agent work still displayed `waiting`.
 Correct the shared display reducer without changing durable execution state. A nonterminal,
@@ -71,6 +71,43 @@ Update reducer, list, detail, widget, and real-Pi tests; retain assertions that 
 can remain waiting while the display says running. Run the required local checks, isolated
 low-cost live E2E, configured Pi Reviewer, and CI before merging. Release, installation, headless
 recovery, and detached-process control are not part of this correction.
+
+## Display correction completion evidence
+
+Completed in [PR #87](https://github.com/osolmaz/pi-workflows/pull/87), merged by rebase on
+2026-09-07. The merged tree matches tested head `aa8c6b35668b1884169632239d93254d7b823585`.
+The task branch was removed. This closes the earlier label, control, test, and documentation gap.
+Review also found and corrected list-cache invalidation on runner activity changes.
+
+Final checks passed:
+
+- `npm run check -- -- --maxWorkers=2`: 1,247 tests, 90.99% statement and 85.59% branch coverage.
+- `npm run test:e2e -- --maxWorkers=2`: 14 tests, including running header and active-node assertions.
+- `npx slophammer-ts@latest dry .`: zero candidates.
+- `npx slophammer-ts@latest check . --only ts.dependency-boundaries-required`.
+- `npx -y @simpledoc/simpledoc check`.
+- `CARGO_BUILD_JOBS=2 cargo test --manifest-path tui/Cargo.toml`: 76 tests.
+- `CARGO_BUILD_JOBS=2 cargo clippy --manifest-path tui/Cargo.toml --all-targets -- -D warnings`.
+- `cargo fmt --manifest-path tui/Cargo.toml -- --check`.
+- `pi-reviewer --base main`: no findings in the final review.
+
+The final live command passed:
+
+```bash
+npm run test:e2e:live -- --provider openrouter --model deepseek/deepseek-v4-flash --max-output-tokens 4096
+```
+
+Run `20260907T155549292Z-live-model-e2e-8cbdcf21`, on Pi 0.85.0 and the packed candidate
+package 0.16.7, verified visible running status, retained submit/update controls, exact delivery,
+timeout, preserved partial work, and recovery. An earlier probe used a model-selected 10-second
+tool timeout and did not complete the intended workflow timeout. The fixture now specifies
+180-second tool arguments explicitly. Only the completed final run counts as final validation.
+Temporary files were removed and the output credential check passed.
+
+All four [final CI jobs](https://github.com/osolmaz/pi-workflows/actions/runs/34140233315) passed:
+`check`, `e2e`, `installed-e2e`, and `tui`. There were no inline or issue comments to resolve.
+No package was released or installed into an active user profile. Live workflow state was not
+changed. Headless recovery and detached-process control remain outside this correction.
 
 ## Earlier completion evidence
 
