@@ -1288,7 +1288,9 @@ export class WorkflowServer {
           if (
             !this.queue.cancelWorkflowRun({
               runId: active.record.runId,
-              claimToken: active.claimToken,
+              // Handoff has already released this worker's claim. The queue's
+              // unclaimed path still rejects a different live owner atomically.
+              ...(active.control === "handoff" ? {} : { claimToken: active.claimToken }),
             })
           ) {
             return { outcome: "claimLost", error: "Run claim was lost before cancellation" };

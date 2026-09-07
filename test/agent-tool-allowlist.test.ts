@@ -12,14 +12,15 @@ import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 describe("agent tool allowlists", () => {
-  it.each(["read", [""], ["read", "read"], ["workflow"], ["read", 1], ["bash; rm"]])(
-    "rejects malformed or ambiguous names: %j",
-    (allowedTools) => {
-      expect(() => agent({ prompt: () => "Inspect", allowedTools: allowedTools as never })).toThrow(
-        /allowedTools/,
-      );
-    },
-  );
+  it.each(
+    ["read", [""], ["read", "read"], ["workflow"], ["read", 1], ["bash; rm"]].map(
+      (allowedTools) => ({ allowedTools }),
+    ),
+  )("rejects malformed or ambiguous names: $allowedTools", ({ allowedTools }) => {
+    expect(() => agent({ prompt: () => "Inspect", allowedTools: allowedTools as never })).toThrow(
+      /allowedTools/,
+    );
+  });
 
   it("passes the exact allowlist in the durable request and prompt", async () => {
     const executor = new ScriptedExecutor().respond("inspect", {

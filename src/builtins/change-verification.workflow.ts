@@ -194,6 +194,17 @@ function parseCheck(
   }
   if (record.baseEligible === true && record.readOnly !== true)
     throw new Error(`verification checks[${index}] base comparison requires readOnly=true`);
+  if (record.baseEligible === true && path.isAbsolute(batch.command)) {
+    const relative = path.relative(path.resolve(candidateRoot), path.resolve(batch.command));
+    if (
+      relative === "" ||
+      (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+    ) {
+      throw new Error(
+        `verification checks[${index}] base comparison executable must not reference the prepared workspace`,
+      );
+    }
+  }
   if (
     record.baseEligible === true &&
     batch.args.some((arg) => arg.includes(path.resolve(candidateRoot)))
