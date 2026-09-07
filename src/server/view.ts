@@ -69,7 +69,7 @@ export class ServerViewStore {
   private readonly runCache = new Map<string, { version: string; view: WorkflowRunView | null }>();
   private readonly sessionCache = new Map<string, { version: string; view: WorkflowSessionView }>();
   private contentBytes = 0;
-  private originActivityRevision = 0;
+  private activityRevision = 0;
   private readonly workflowMessages: WorkflowMessageStore;
 
   constructor(
@@ -83,8 +83,8 @@ export class ServerViewStore {
     this.workflowMessages = serverState.workflowMessages;
   }
 
-  noteOriginActivityChange(): void {
-    this.originActivityRevision += 1;
+  noteWorkflowActivityChange(): void {
+    this.activityRevision += 1;
   }
 
   list(cursor = 0, limit?: number): WorkflowRunListPage {
@@ -782,8 +782,8 @@ export class ServerViewStore {
     return isObjectRecord(row) &&
       typeof row.messageUpdatedAt === "number" &&
       typeof row.turnUpdatedAt === "number"
-      ? `${row.messageUpdatedAt}:${row.turnUpdatedAt}${this.originActivityRevision === 0 ? "" : `-${this.originActivityRevision}`}`
-      : `0:0${this.originActivityRevision === 0 ? "" : `-${this.originActivityRevision}`}`;
+      ? `${row.messageUpdatedAt}:${row.turnUpdatedAt}${this.activityRevision === 0 ? "" : `-${this.activityRevision}`}`
+      : `0:0${this.activityRevision === 0 ? "" : `-${this.activityRevision}`}`;
   }
 
   private display(
