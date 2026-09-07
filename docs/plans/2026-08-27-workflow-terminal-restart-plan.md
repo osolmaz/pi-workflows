@@ -261,7 +261,7 @@ After recovery, there must still be one terminal message and one successor run.
 
 **Where**
 
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - `docs/SQLITE_STATE.md`
 - Workflow tool reference and examples
 - Relevant README text

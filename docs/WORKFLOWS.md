@@ -620,9 +620,15 @@ Autoimplement runs independent commands through bounded command batches. A batch
 
 Autoimplement prepares the workspace before its first edit-capable node. `workspaceMode` accepts `auto`, `branch`, `worktree`, or `defaultBranch`. Auto mode adopts a current task branch, creates a model-named branch from a clean default branch, or creates a model-named standard sibling worktree when the default checkout has existing work. Program actions validate and apply names. Direct default-branch work requires explicit authority and does not imply commit, push, merge, or release authority. Every later stage uses the prepared absolute path.
 
-Autoimplement gives `implement` an eight-hour deadline. When a supported step fails or times out, one shared bounded recovery step inspects accepted outputs and durable repository or pull-request state. It adopts a completed effect or retries only a missing effect. Cancellation remains immediate and never enters recovery. Unsupported or uncertain effects create a qualified blocker claim before challenge.
+Autoimplement gives `implement` and the shared verifier's `semanticRepair` the same named eight-hour deadline. The engine default stays unchanged. When a supported step fails or times out, one shared bounded recovery step inspects accepted outputs and durable repository or pull-request state. It adopts a completed effect or retries only a missing effect. Cancellation remains immediate and never enters recovery. Unsupported or uncertain effects create a qualified blocker claim before challenge.
 
-Local verification uses the shared change-verification composition. Direct program actions run candidate checks and read-only base-eligible checks with the same command, arguments, timeout, and output limit. Results separate related, unrelated, fixed-baseline, unknown, and untested findings. Matching base failures do not block the candidate. Related failures enter a two-attempt mechanical or semantic repair loop. Unknown or incomplete evidence needs bounded judgment, and truncated, timed-out, cancelled, or spawn-failed output cannot pass.
+Local verification uses one shared change-verification planner. Autoimplement does not translate commands into implicitly read-only or base-eligible checks. Supplied checks and planner submissions use the same complete validator before acceptance. An invalid submission stays pending for correction on the same request and attempt; no command starts. Candidate-bound arguments, including Docker mounts, cannot be used for a base comparison. Candidate-only checks are valid, but their failures remain unknown without comparison evidence. Planned untested checks remain visible.
+
+Direct program actions run candidate checks and read-only base-eligible checks with the same command, arguments, timeout, and output limit. Results separate related, unrelated, fixed-baseline, unknown, and untested findings. Matching base failures do not block the candidate. Related failures enter a two-attempt mechanical or semantic repair loop. Unknown or incomplete evidence needs bounded judgment, and truncated, timed-out, cancelled, or spawn-failed output cannot pass.
+
+A failed or timed-out semantic repair enters `reconcileRepair`, not terminal failure. The recovery agent inspects saved edits, receipts, and command sessions without changing repository contents. It can verify completed work, request a bounded retry, or report a blocker. Verification or retry requires evidence that the previous commands have stopped. Failed and timed-out attempts count against the existing two-attempt repair bound. Intentional cancellation stays terminal. If reconciliation fails, times out, or cannot establish command state, it returns a blocker rather than starting more work.
+
+The extension aborts only the cancelled workflow-owned Pi turn through public `ctx.abort()`. The server retains that turn until Pi confirms settlement or an idle branch observation proves it lost. The next prompt cannot run before that boundary. Aborting Pi does not prove that third-party detached commands stopped: reconciliation must inspect those commands through their existing owner tools. There is no hidden model retry or new process-control protocol.
 
 Autoimplement uses batches for pi-reviewer and pending CI watches. It keeps model turns, fixes, pushes, comment changes, merges, and releases in their existing order. Reviewer commands are tied to the repository, base branch, pushed head, and relevant dependency fingerprint. A later review round includes only repositories whose head or dependency fingerprint changed. P0 or P1 work still requires another review. P2-only work can be addressed and verified without another reviewer run only because of that P2 work.
 
@@ -937,6 +943,8 @@ npm run test:e2e:live -- \
   --provider openai-codex \
   --model gpt-5.6-luna
 ```
+
+The real-model phase also saves partial work in a temporary directory, lets the agent step expire, and verifies that the owned Pi command stopped before a recovery step runs. The harness checks the process and durable workflow outcomes independently of the model's recovery claim.
 
 The profile and normal provider environment remain operator-owned. The runner
 does not read, copy, print, or save credentials. It uses one guarded temporary

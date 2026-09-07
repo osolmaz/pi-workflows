@@ -171,6 +171,10 @@ response ID pending. Once message and turn ownership are confirmed, the coordina
 submits that exact response before it reports the end. Later events cannot replace
 the pending turn or its response. Repeated reports adopt the saved result.
 
+The session view derives `cancelledWorkflowMessageIds` from cancelled agent requests and cancelled or removed follow-ups. It includes sent messages whose source was cancelled. This is a projection of existing records, not another durable state store. The coordinator calls public `ctx.abort()` once, only for its exact running owned turn. A rejected start acknowledgment follows the same stop-and-settle path. It never submits a result from the cancelled turn. Lost end acknowledgments retain that turn and its response without aborting later ordinary chat.
+
+A terminal workflow outcome cancels pending messages but does not fabricate Pi turn settlement. Any open workflow turn blocks the next delivery until an end report or a valid idle branch observation closes it.
+
 An aborted pending step pauses its run. Resume retains the request and attempt,
 advances the request revision, and creates one resumed step message when needed.
 A protected decision keeps its answer revision and decision message. A missing
@@ -258,6 +262,9 @@ Tests must prove:
 - a missing protected decision creates another decision message, not a step;
 - branch evidence changes a cancelled message to sent;
 - a follow-up-started workflow blocks the next follow-up through its session reservation;
+- cancelled owned turns abort once, and delayed acknowledgments cannot abort later ordinary chat;
+- an expired command preserves partial work, stops before recovery, and cannot submit late success;
+- terminal execution leaves an active Pi turn owned until actual settlement;
 - notifications and protected decisions do not start model turns;
 - the provider receives the complete step prompt but no workflow message ID or internal send state;
 - collapsed and expanded cards remain safe and complete;

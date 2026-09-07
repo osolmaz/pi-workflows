@@ -8,7 +8,7 @@ date: 2026-08-20
 
 Autoimplement must not stop only because one model says that work is blocked. A separate agent must challenge the claim and confirm that the blocker is real before the workflow uses its terminal blocked result.
 
-The canonical workflow behavior is in [Workflow authoring reference](../workflows.md#built-in-planning-and-implementation).
+The canonical workflow behavior is in [Workflow authoring reference](../WORKFLOWS.md#built-in-planning-and-implementation).
 
 ## Outcome
 
@@ -99,7 +99,7 @@ Keep compute nodes pure. Put the independent reasoning in the challenge agent no
 
 ## Documentation
 
-Update `docs/workflows.md` with the blocker-confirmation rule, hard-stop exceptions, and bounded routing. Keep the public behavior concise. Do not add internal details that users do not need.
+Update `docs/WORKFLOWS.md` with the blocker-confirmation rule, hard-stop exceptions, and bounded routing. Keep the public behavior concise. Do not add internal details that users do not need.
 
 ## Verification
 

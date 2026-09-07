@@ -166,6 +166,6 @@ The first implementation will not provide Kubernetes API compatibility, a distri
 
 ## Documentation updates
 
-Update [RESOURCE_MANAGERS.md](../RESOURCE_MANAGERS.md) whenever the public resource, queue, reconciliation, or effect contracts change. Add the shipped authoring surface to [workflows.md](../workflows.md), the source boundaries to [development.md](../development.md), and user-facing installation and commands to the root README after implementation.
+Update [RESOURCE_MANAGERS.md](../RESOURCE_MANAGERS.md) whenever the public resource, queue, reconciliation, or effect contracts change. Add the shipped authoring surface to [WORKFLOWS.md](../WORKFLOWS.md), the source boundaries to [DEVELOPMENT.md](../DEVELOPMENT.md), and user-facing installation and commands to the root README after implementation.
 
 Record any meaningful departure from this plan in this document before the implementation is considered complete.

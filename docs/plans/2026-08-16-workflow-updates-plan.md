@@ -354,9 +354,9 @@ Verification:
 Update:
 
 - `README.md`
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - `docs/SQLITE_STATE.md`
-- `docs/development.md`
+- `docs/DEVELOPMENT.md`
 - `docs/WORKFLOW_UPDATES.md`
 - `docs/WORKFLOW_STEP_MESSAGES.md`
 - `docs/MONITOR.md`

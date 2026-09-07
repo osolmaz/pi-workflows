@@ -877,9 +877,9 @@ After code behavior matches this plan:
 - replace [Run bundle format](../SQLITE_STATE.md) with the SQLite state specification or retire it in favor of `SQLITE_STATE.md`
 - update [Human decisions](../HUMAN_DECISIONS.md)
 - update [ResourceManager runtime specification](../RESOURCE_MANAGERS.md)
-- update [Workflow authoring reference](../workflows.md)
-- update [Rust TUI viewer](../tui-viewer.md)
-- update [Development guide](../development.md)
+- update [Workflow authoring reference](../WORKFLOWS.md)
+- update [Rust TUI viewer](../TUI_VIEWER.md)
+- update [Development guide](../DEVELOPMENT.md)
 - update [Design philosophy](../DESIGN_PHILOSOPHY.md)
 
 Do not describe the new database as shipped before the implementation passes verification.

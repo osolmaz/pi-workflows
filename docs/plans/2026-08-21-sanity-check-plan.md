@@ -210,7 +210,7 @@ Neither response uses `presentationPrompt`, and neither can change the verified 
 10. Add the ordered detailed assistant response and included plain summary, then return the original verified result from a final compute node.
 11. Change the built-in Sanity Check revision from 3 to 4 for the presentation graph change.
 12. Add temporary fixture extensions and full unit, integration, interactive Pi, and standalone host coverage.
-13. Update this plan and `docs/workflows.md` to match the shipped behavior.
+13. Update this plan and `docs/WORKFLOWS.md` to match the shipped behavior.
 14. Run the complete repository gate and inspect the full public diff.
 15. After mock-provider verification of the provider architecture, run one bounded real acceptance on OpenClaw pull request 126028 with `openai-codex/gpt-5.6-sol` and high thinking. Abort immediately if any child reports another provider or model. Do not modify OpenClaw.
 

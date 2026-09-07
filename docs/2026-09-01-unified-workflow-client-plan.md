@@ -277,7 +277,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### 7. Remove split paths and update documentation
 
-**Location:** old host/replay protocol code, obsolete viewer readers, `docs/WORKFLOW_SERVER.md`, `docs/SQLITE_STATE.md`, `docs/live-replay-protocol.md`, README usage, and package contents.
+**Location:** old host/replay protocol code, obsolete viewer readers, `docs/WORKFLOW_SERVER.md`, `docs/SQLITE_STATE.md`, `docs/LIVE_REPLAY_PROTOCOL.md`, README usage, and package contents.
 
 **Change:** Delete the superseded request/response and replay contracts, direct live readers, duplicated status reducers, and fallback flags. Update all user commands and architecture diagrams to show the one client stack. Keep inactive backup verification explicitly separate.
 

@@ -10,7 +10,7 @@ Autoimplement runs independent commands one after another today. This makes mult
 
 Add one public `runCommandBatch` helper. Use it for independent pi-reviewer commands, pending CI watches, and independent local verification commands. Keep model turns and commands that change repositories or remote systems in their current order.
 
-The canonical workflow behavior is in [Workflow authoring reference](../workflows.md#built-in-planning-and-implementation). Command progress follows [Workflow updates](../WORKFLOW_UPDATES.md#command-batch-updates).
+The canonical workflow behavior is in [Workflow authoring reference](../WORKFLOWS.md#built-in-planning-and-implementation). Command progress follows [Workflow updates](../WORKFLOW_UPDATES.md#command-batch-updates).
 
 ## Outcome
 

@@ -457,7 +457,7 @@ The later status work binds only to `workflow_messages`. Do not implement a temp
 
 ### Update reference documentation
 
-Update [Workflow server](WORKFLOW_SERVER.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](live-replay-protocol.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](session-event-journal.md), [Rust TUI viewer](tui-viewer.md), the earlier host plans, the authoring reference, and README to match the implementation.
+Update [Workflow server](WORKFLOW_SERVER.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](LIVE_REPLAY_PROTOCOL.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](SESSION_EVENT_JOURNAL.md), [Rust TUI viewer](TUI_VIEWER.md), the earlier host plans, the authoring reference, and README to match the implementation.
 
 Remove temporary current-version warnings only after live checks pass.
 

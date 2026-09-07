@@ -236,7 +236,7 @@ When implementation ships, update:
 
 - `docs/HUMAN_DECISIONS.md` for timeout responses, provenance, recovery, races, and channel behavior;
 - `docs/WORKFLOW_COMPOSITION.md` for the shared plan-change workflow;
-- `docs/workflows.md` for the public API and Autoimplement behavior;
+- `docs/WORKFLOWS.md` for the public API and Autoimplement behavior;
 - `docs/MONITOR.md` for repair-plan decisions;
 - `docs/SQLITE_STATE.md` for request, resolution, continuation, and snapshot fields;
 - Autoimplement and Monitor skill text and examples; and

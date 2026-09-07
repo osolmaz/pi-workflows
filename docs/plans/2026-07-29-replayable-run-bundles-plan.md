@@ -1,3 +1,9 @@
+---
+title: "Replayable run bundles: implementation plan"
+author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
+date: 2026-07-29
+---
+
 # Replayable run bundles — implementation plan
 
 Goal: make every workflow run bundle self-contained for replay, as specified

@@ -131,7 +131,7 @@ Make the feature in `osolmaz/pi-workflows`:
 - Update the RPC bridge submit contract.
 - Add built-in workflow discovery with project and global override precedence.
 - Add the built-in monitor workflow and focused tests.
-- Update `README.md` and `docs/workflows.md`.
+- Update `README.md` and `docs/WORKFLOWS.md`.
 
 After the upstream change is complete, update the pinned pi-workflows commit in OnurPi's thin `packages/workflows` wrapper. Do not add a new OnurPi extension or copy a monitor file into live global state.
 

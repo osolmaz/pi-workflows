@@ -1,3 +1,9 @@
+---
+title: "Rust TUI viewer: implementation plan"
+author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
+date: 2026-07-29
+---
+
 # Rust TUI viewer — implementation plan
 
 This is the historical plan for the first Rust viewer and its former run-bundle reader.
@@ -6,8 +12,8 @@ The selected replacement is the
 Use that plan for state revisions, paging, multiple clients, and graph sizing.
 
 Goal: `piw`, a Rust TUI in `tui/` for live viewing and replaying workflow
-runs, per [tui-viewer.md](../tui-viewer.md) and
-[live-replay-protocol.md](../live-replay-protocol.md).
+runs, per [TUI_VIEWER.md](../TUI_VIEWER.md) and
+[LIVE_REPLAY_PROTOCOL.md](../LIVE_REPLAY_PROTOCOL.md).
 
 ## Architecture
 

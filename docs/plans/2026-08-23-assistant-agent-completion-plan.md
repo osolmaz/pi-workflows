@@ -57,7 +57,7 @@ Define these rules:
 ### Where
 
 - New canonical plan under `docs/plans/`.
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - `docs/WORKFLOW_STEP_MESSAGES.md`
 - `docs/WORKFLOW_COMPOSITION.md`
 - `docs/SQLITE_STATE.md`
@@ -536,7 +536,7 @@ plainSummary: {
 
 - `src/builtins/autoplan.workflow.ts`
 - `test/builtin-autoplan.test.ts`
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - `skills/autoplan/SKILL.md`
 
 ### Verification
