@@ -851,9 +851,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ["--import", "tsx", path.join(REPO_ROOT, "src", "viewer", "cli.ts"), "view", runId, "--once"],
       { cwd: REPO_ROOT, env: { ...process.env, ...piEnvironment() } },
     );
-    expect(piwOutput).toContain("running");
+    expect(piwOutput).toContain("● running");
     expect(piwOutput).toContain("✓ first · ok");
-    expect(piwOutput).not.toContain("● running");
+    expect(piwOutput).not.toMatch(/first[^\n]*● running/);
 
     const store = new WorkflowRunStore(databasePath, { readOnly: true });
     try {
