@@ -327,8 +327,8 @@ fn status_glyph(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Queued => "·",
         RunStatus::Running => "◐",
-        RunStatus::Waiting => "⏸",
-        RunStatus::Paused => "Ⅱ",
+        RunStatus::Waiting => "○",
+        RunStatus::Paused => "⏸",
         RunStatus::Completed => "✓",
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",
@@ -353,6 +353,14 @@ fn status_color(status: RunStatus, palette: &Palette) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_and_paused_have_distinct_glyphs() {
+        assert_eq!(status_glyph(RunStatus::Waiting), "○");
+        assert_eq!(status_glyph(RunStatus::Paused), "⏸");
+        assert_eq!(super::super::status_glyph(RunStatus::Waiting), "○");
+        assert_eq!(super::super::status_glyph(RunStatus::Paused), "⏸");
+    }
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

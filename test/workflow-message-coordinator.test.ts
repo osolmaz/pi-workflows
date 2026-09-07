@@ -82,6 +82,175 @@ function view(message: WorkflowMessage): WorkflowSessionView {
 }
 
 describe("WorkflowMessageCoordinator", () => {
+  it.each(["before start", "during start"])(
+    "does not let normal chat block delivery %s",
+    async (timing) => {
+      const coordinator = new WorkflowMessageCoordinator();
+      const message = followUpMessage();
+      message.kind = "step";
+      const branch: Record<string, unknown>[] = [];
+      let idle = false;
+      const ctx = {
+        isIdle: () => idle,
+        hasPendingMessages: () => false,
+        sessionManager: { getBranch: () => branch },
+      } as never;
+      const sendMessage = vi.fn((entry: { details: unknown }) => {
+        branch.push({ type: "custom_message", id: "step-entry", details: entry.details });
+        idle = false;
+        coordinator.startTurn();
+      });
+      const request = vi.fn(async (options: Record<string, unknown>) =>
+        acceptedServerRequest(options),
+      );
+      const sync = () =>
+        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+      coordinator.startTurn();
+      if (timing === "during start") {
+        coordinator.updateView(view(message));
+        await sync();
+        expect(sendMessage).not.toHaveBeenCalled();
+      }
+      idle = true;
+      coordinator.endTurn("completed", "ordinary-reply");
+      coordinator.updateView(view(message));
+      await sync();
+      await sync();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
+      const beforeTurnEnd = vi.fn(async () => undefined);
+      idle = true;
+      coordinator.endTurn("completed", "workflow-reply");
+      await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        beforeTurnEnd,
+      });
+      expect(beforeTurnEnd).toHaveBeenCalledWith(message, {
+        stopReason: "completed",
+        responseSessionEntryId: "workflow-reply",
+      });
+      expect(
+        request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
+      ).toHaveLength(2);
+    },
+  );
+
+  it("does not resend an unconfirmed delivery while ordinary events arrive", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    coordinator.updateView(view(followUpMessage()));
+    const sendMessage = vi.fn();
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
+    const ctx = {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => [] },
+    } as never;
+    for (let count = 0; count < 3; count++) {
+      await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+      coordinator.endTurn("completed", "unrelated-reply");
+    }
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+    expect(request.mock.calls.every(([call]) => call.operation !== "workflowTurn.report")).toBe(
+      true,
+    );
+  });
+
+  it("retries a lost turn-end acknowledgment without replacing or redelivering the result", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    coordinator.updateView(view(message));
+    const branch: Record<string, unknown>[] = [];
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "step-entry", details: entry.details });
+      coordinator.startTurn();
+    });
+    let loseEnd = true;
+    const request = vi.fn(async (options: Record<string, unknown>) => {
+      if (
+        options.operation === "workflowTurn.report" &&
+        (options.payload as { state: string }).state === "ended" &&
+        loseEnd
+      ) {
+        loseEnd = false;
+        throw new Error("Lost end acknowledgment");
+      }
+      return acceptedServerRequest(options);
+    });
+    const ctx = {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const beforeTurnEnd = vi.fn(
+      async (_message: WorkflowMessage, _end: { responseSessionEntryId: string | null }) =>
+        undefined,
+    );
+    const sync = () =>
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        beforeTurnEnd,
+      });
+    await sync();
+    coordinator.endTurn("completed", "exact-reply");
+    await expect(sync()).rejects.toThrow("Lost end acknowledgment");
+    coordinator.startTurn();
+    coordinator.endTurn("error", "other-reply");
+    await sync();
+    const ends = request.mock.calls
+      .map(([call]) => call)
+      .filter(
+        (call) =>
+          call.operation === "workflowTurn.report" &&
+          (call.payload as { state: string }).state === "ended",
+      );
+    expect(ends).toHaveLength(2);
+    expect(ends[0]).toEqual(ends[1]);
+    expect(
+      beforeTurnEnd.mock.calls.every(([, end]) => end.responseSessionEntryId === "exact-reply"),
+    ).toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+  });
+
+  it("keeps a response that settles while the start acknowledgment is in flight", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    coordinator.updateView(view(message));
+    const branch: Record<string, unknown>[] = [];
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "prompt", details: entry.details });
+      coordinator.startTurn();
+    });
+    const request = vi.fn(async (options: Record<string, unknown>) => {
+      if (
+        options.operation === "workflowTurn.report" &&
+        (options.payload as { state: string }).state === "started"
+      ) {
+        await Promise.resolve();
+        coordinator.endTurn("completed", "response-during-ack");
+      }
+      return acceptedServerRequest(options);
+    });
+    const beforeTurnEnd = vi.fn(async () => undefined);
+    const ctx = {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      beforeTurnEnd,
+    });
+    expect(beforeTurnEnd).toHaveBeenCalledWith(message, {
+      stopReason: "completed",
+      responseSessionEntryId: "response-during-ack",
+    });
+    expect(
+      request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
+    ).toHaveLength(2);
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+  });
+
   it("finalizes a delivered terminal notice once, without starting a turn", async () => {
     const message = followUpMessage("sent");
     message.kind = "terminal";

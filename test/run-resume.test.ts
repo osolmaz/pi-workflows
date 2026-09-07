@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { agent, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
+import { WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeStateDatabasePath, waitUntil } from "./helpers.js";
 
 function workflow(counter: { count: number }) {
@@ -43,7 +44,7 @@ describe("WorkflowEngine.resumeRun SQLite", () => {
     expect(counter.count).toBe(1);
   });
 
-  it("rejects changed source unless force is explicit", async () => {
+  it("rejects changed source without changing the run, even with an obsolete force field", async () => {
     const databasePath = await makeStateDatabasePath("resume-source");
     const definition = workflow({ count: 0 });
     const executor = new ScriptedExecutor().respond("finish", { hang: true });
@@ -69,11 +70,51 @@ describe("WorkflowEngine.resumeRun SQLite", () => {
         workflowSource: { kind: "file", path: "/workflow.ts", hash: "new" },
       }),
     ).rejects.toThrow(WorkflowSourceChangedError);
-    const forced = await second.resumeRun(definition, "resume-source", {
-      workflowSource: { kind: "file", path: "/workflow.ts", hash: "new" },
-      force: true,
+    const store = new WorkflowRunStore(databasePath);
+    const before = store.readRun("resume-source", { includeTrace: true });
+    await expect(
+      second.resumeRun(definition, "resume-source", {
+        workflowSource: { kind: "file", path: "/workflow.ts", hash: "new" },
+        // @ts-expect-error force is no longer a supported resume option
+        force: true,
+      }),
+    ).rejects.toThrow(WorkflowSourceChangedError);
+    expect(store.readRun("resume-source", { includeTrace: true })).toEqual(before);
+    const resumed = await second.resumeRun(definition, "resume-source", {
+      workflowSource: { kind: "file", path: "/workflow.ts", hash: "old" },
     });
-    expect(forced.state.status).toBe("completed");
+    expect(resumed.state.status).toBe("completed");
+    store.close();
+  });
+
+  it("rejects a changed graph before dispatching or changing saved state", async () => {
+    const databasePath = await makeStateDatabasePath("resume-graph");
+    const definition = workflow({ count: 0 });
+    const executor = new ScriptedExecutor().respond("finish", { hang: true });
+    const first = new WorkflowEngine({ databasePath, executor });
+    const running = first.run(definition, {}, { runId: "resume-graph" });
+    await waitUntil(() => executor.requests.length === 1);
+    first.park();
+    await running;
+    const store = new WorkflowRunStore(databasePath);
+    const before = store.readRun("resume-graph", { includeTrace: true });
+    const nextExecutor = new ScriptedExecutor().respond("finish", { output: true });
+    const second = new WorkflowEngine({ store, executor: nextExecutor });
+    const changed = defineWorkflow({
+      ...definition,
+      nodes: { ...definition.nodes, added: compute({ run: () => "new work" }) },
+      edges: [
+        { from: "prepare", to: "finish" },
+        { from: "finish", to: "added" },
+      ],
+    });
+    await expect(second.resumeRun(changed, "resume-graph")).rejects.toThrow(
+      /explicitly start a new run/,
+    );
+    expect(store.readRun("resume-graph", { includeTrace: true })).toEqual(before);
+    expect(nextExecutor.requests).toHaveLength(0);
+    expect((await second.resumeRun(definition, "resume-graph")).state.status).toBe("completed");
+    store.close();
   });
 
   it("rejects a terminal run", async () => {

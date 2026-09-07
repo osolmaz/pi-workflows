@@ -120,6 +120,14 @@ Notifications keep the custom type `pi-workflows-notification` and use `triggerT
 
 The extension has one `WorkflowMessageCoordinator` for all message kinds. The server keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one, so two Pi processes cannot send for the same session.
 
+The coordinator retains only workflow-owned turns. Its local state is absent,
+delivering, running, or settled awaiting acknowledgment. An ordinary chat turn
+never creates an owned turn or blocks later workflow delivery. Recovery binds a
+running turn only to a server-owned message visible in the active Pi branch.
+A delayed acknowledgment retains the same message, turn ID, and exact response;
+it never creates another model attempt. Unconfirmed delivery stays visible as
+unconfirmed instead of being reported as a received step.
+
 The coordinator follows this sequence:
 
 1. After every server connection, wait for the complete origin-session view and report the active branch before any send or turn report.

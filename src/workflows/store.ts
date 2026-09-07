@@ -19,7 +19,7 @@ import {
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
 import { WorkflowMessageStore, workflowMessageIdFor } from "../state/workflow-messages.js";
-import { compositionMetadata } from "./composition.js";
+import { compileWorkflowDefinition, compositionMetadata } from "./composition.js";
 import { ClaimLostError } from "./errors.js";
 import { HumanDecisionStore } from "./human-decision.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
@@ -844,7 +844,7 @@ export class WorkflowRunStore {
     options: InitializeWorkflowRunOptions = {},
   ): Promise<string> {
     return await this.initializeRunFromSnapshot(
-      createDefinitionSnapshot(workflow),
+      createDefinitionSnapshot(compileWorkflowDefinition(workflow)),
       workflow.name,
       state,
       options,
@@ -3608,9 +3608,7 @@ export class WorkflowRunStore {
       ...(row.title === null ? {} : { runTitle: row.title }),
       ...(sources.root === undefined ? {} : { workflowSource: sources.root }),
       ...(sources.mounted.length === 0 ? {} : { workflowSources: sources.mounted }),
-      ...(sources.mounted.length !== 0 || snapshot.composition?.mounts.length
-        ? { definitionDigest: `sha256:${row.definitionDigest.toString("hex")}` }
-        : {}),
+      definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
       startedAt: new Date(row.createdAt).toISOString(),
       ...(row.finishedAt === null ? {} : { finishedAt: new Date(row.finishedAt).toISOString() }),
       updatedAt: new Date(row.updatedAt).toISOString(),

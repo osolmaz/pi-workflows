@@ -1614,8 +1614,8 @@ fn status_glyph(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Queued => "·",
         RunStatus::Running => "◐",
-        RunStatus::Waiting => "⏸",
-        RunStatus::Paused => "Ⅱ",
+        RunStatus::Waiting => "○",
+        RunStatus::Paused => "⏸",
         RunStatus::Completed => "✓",
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",

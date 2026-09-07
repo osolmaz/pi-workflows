@@ -48,7 +48,7 @@ const STATUS_GLYPHS: Record<NodeStatus, string> = {
   timed_out: "×",
   active: "◐",
   replay_focus: "◆",
-  waiting: "⏸",
+  waiting: "○",
   cancelled: "~",
   queued: "·",
 };

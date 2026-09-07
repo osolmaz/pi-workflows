@@ -264,7 +264,7 @@ describe("resolveWorkflowRef", () => {
     await fs.appendFile(file, "\n// changed\n");
     await expect(
       resolveWorkflowSource(resolved.source, builtinWorkflowCatalog, "stored-run"),
-    ).rejects.toThrow(/source changed/i);
+    ).rejects.toThrow(/source or definition changed/i);
     await expect(
       resolveWorkflowSource({ kind: "builtin", id: "plain-summary", revision: "3" }),
     ).rejects.toThrow("No built-in workflow catalog");

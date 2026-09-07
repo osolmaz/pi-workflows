@@ -55,8 +55,7 @@ describe("checkpoint recovery", () => {
       ).rejects.toThrow(WorkflowSourceChangedError);
       expect(store.readRun(waiting.runId, { includeTrace: true })).toEqual(before);
       const done = await engine.resumeRun(workflow, waiting.runId, {
-        workflowSource: { kind: "file", path: "/demo.ts", hash: "new" },
-        force: true,
+        workflowSource: { kind: "file", path: "/demo.ts", hash: "old" },
       });
       expect(done.state.status).toBe("completed");
     } finally {

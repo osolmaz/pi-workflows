@@ -43,7 +43,7 @@ impl NodeStatus {
             NodeStatus::TimedOut => '×',
             NodeStatus::Active => '◐',
             NodeStatus::ReplayFocus => '◆',
-            NodeStatus::Waiting => '⏸',
+            NodeStatus::Waiting => '○',
             NodeStatus::Cancelled => '~',
             NodeStatus::Queued => '·',
         }
