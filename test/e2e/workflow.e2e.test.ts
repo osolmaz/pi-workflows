@@ -638,7 +638,14 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ],
       { cwd: repository },
     );
+    const ordinaryChatStart = pi.stdoutLines.length;
     pi.send({ id: "ordinary-chat", type: "prompt", message: "Respond with a short greeting." });
+    await waitForCondition(
+      () =>
+        pi.stdoutLines.slice(ordinaryChatStart).some((line) => line.includes('"type":"agent_end"')),
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
     await waitForPiIdle(pi);
     pi.send({
       id: "tool-autoimplement-start",
