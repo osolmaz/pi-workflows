@@ -445,7 +445,7 @@ function validateProfile(profile) {
   });
 }
 
-async function findRun(client, workflowName) {
+async function findRun(client, workflowName, timeoutMs = 30_000, rpc) {
   return await waitFor(
     `server run ${workflowName}`,
     async () => {
@@ -456,7 +456,7 @@ async function findRun(client, workflowName) {
       if (!Array.isArray(response.receipt)) return false;
       return response.receipt.find((run) => run.workflowName === workflowName) ?? false;
     },
-    { timeoutMs: 30_000 },
+    { timeoutMs, rpc },
   );
 }
 
@@ -651,7 +651,7 @@ async function startPi(context) {
     "--no-themes",
     "--no-prompt-templates",
     "--no-context-files",
-    ...(context.options.runtimeOnly ? ["--no-builtin-tools"] : ["--tools", "bash"]),
+    ...(context.options.runtimeOnly ? ["--no-builtin-tools"] : ["--tools", "bash,read"]),
     "--offline",
     "--approve",
   ];
@@ -859,7 +859,7 @@ async function runModelWorkflow(context, rpc, client, api) {
   await rpc.request("prompt", {
     message: `Use the workflow tool to start ${workflowName} exactly once with this input: ${JSON.stringify({ directory: context.project })}. This is a workflow handoff and timeout-recovery test. After the start call, end your reply. Do not run commands or submit a step before its workflow message arrives.`,
   });
-  const run = await findRun(client, workflowName);
+  const run = await findRun(client, workflowName, MODEL_TIMEOUT_MS, rpc);
   const completed = await waitForRunDisplay(client, run.runId, "completed", MODEL_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "model workflow state");
   const expected = {

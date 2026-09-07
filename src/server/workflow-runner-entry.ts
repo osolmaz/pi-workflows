@@ -194,6 +194,7 @@ class StdioRunnerTransport implements WorkflowRunnerStoreTransport {
 }
 
 class InteractiveExecutor implements AgentStepExecutor {
+  readonly enforcesToolAllowlist = true;
   readonly assistantMessageMode = "visible" as const;
   readonly preservesActiveTimeBudget = true;
 

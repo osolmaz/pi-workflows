@@ -38,11 +38,25 @@ unchanged. In the child workflow, route a successful repair to verification and 
 repair to reconciliation. Intentional cancellation remains terminal.
 
 Reconciliation is read-only for repository contents. The agent inspects the existing work, receipts,
-and process sessions through normal tools. It may request safe termination of commands it owns,
-but cannot launch new repair commands. Its structured result must state the command disposition
+and process sessions through a narrow, enforced tool allowlist. It cannot edit, start commands,
+send process input, terminate processes, or start unrelated workflows. If a command still needs
+termination, it reports the exact blocker. Its structured result must state the command disposition
 and evidence. An uncertain or still-running command prevents another mutating attempt. Completed
 edits go to verification without being repeated. Interrupted repairs count against the existing
 repair bound; a timeout cannot reset that bound.
+
+## Review correction: enforced tool restrictions
+
+Pi Reviewer found that prompt instructions alone did not enforce read-only reconciliation. Add
+an optional exact `allowedTools` field to agent nodes and existing step contracts, preserved by
+composition and definition snapshots. The origin extension enforces it with public `tool_call`
+before any tool executes, including during delayed delivery acknowledgment. Matching submit/update
+calls remain allowed; ordinary chat has no workflow restriction. This is a tool allowlist, not an OS
+sandbox. Do not grant shell access as if it were read-only.
+
+Executors must declare that they enforce the restriction. Unsupported executors fail before model
+execution. The current headless RPC executor is unsupported; restricted recovery requires an origin
+Pi session. Do not add a second policy transport or silently run unrestricted headless recovery.
 
 ## Turn ownership
 

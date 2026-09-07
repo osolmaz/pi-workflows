@@ -187,6 +187,12 @@ cancel an expired running row. Resume refuses changed workflow source.
 
 Sends a prompt to the model. `expectedOutput` selects one of two output forms.
 
+`allowedTools` optionally restricts a step to exact tool names, for example `allowedTools: ["read", "grep", "find", "ls"]`. Omit it for the normal tool set; use `[]` to permit only matching workflow `submit` and `update` calls. Do not include `workflow` in the list. Restrictions remain in composed child graphs, definition snapshots, and the durable step contract. Changing them requires a new run under the fixed-definition rule.
+
+The origin Pi extension blocks other calls through public `tool_call` before execution, including while delivery acknowledgment is pending. It applies the restriction only to the workflow-owned running turn, not later ordinary chat. This is an exact tool allowlist, not a filesystem sandbox: authors must trust the implementations of the tools they allow. No shell is implicitly read-only.
+
+An executor must declare `enforcesToolAllowlist: true` only when it enforces that contract before every tool call. The current headless RPC executor does not support restricted steps. The engine rejects such a step before calling that executor rather than silently dropping its restriction; use an origin Pi session. Scripted executors that run no model tools can declare support.
+
 The existing string form waits for a `workflow submit` call:
 
 ```typescript
@@ -626,7 +632,7 @@ Local verification uses one shared change-verification planner. Autoimplement do
 
 Direct program actions run candidate checks and read-only base-eligible checks with the same command, arguments, timeout, and output limit. Results separate related, unrelated, fixed-baseline, unknown, and untested findings. Matching base failures do not block the candidate. Related failures enter a two-attempt mechanical or semantic repair loop. Unknown or incomplete evidence needs bounded judgment, and truncated, timed-out, cancelled, or spawn-failed output cannot pass.
 
-A failed or timed-out semantic repair enters `reconcileRepair`, not terminal failure. The recovery agent inspects saved edits, receipts, and command sessions without changing repository contents. It can verify completed work, request a bounded retry, or report a blocker. Verification or retry requires evidence that the previous commands have stopped. Failed and timed-out attempts count against the existing two-attempt repair bound. Intentional cancellation stays terminal. If reconciliation fails, times out, or cannot establish command state, it returns a blocker rather than starting more work.
+A failed or timed-out semantic repair enters `reconcileRepair`, not terminal failure. The recovery agent can use only `read`, `grep`, `find`, `ls`, `list_sessions`, and its exact workflow submit/update calls. Shells, edits, process input, process termination, and unrelated workflow controls are blocked. It inspects saved edits, receipts, and command sessions without changing repository contents. If a command still needs termination, it reports that exact blocker instead of receiving broader tools. It can verify completed work, request a bounded retry, or report a blocker. Verification or retry requires evidence that the previous commands have stopped. Failed and timed-out attempts count against the existing two-attempt repair bound. Intentional cancellation stays terminal. If reconciliation fails, times out, or cannot establish command state, it returns a blocker rather than starting more work.
 
 The extension aborts only the cancelled workflow-owned Pi turn through public `ctx.abort()`. The server retains that turn until Pi confirms settlement or an idle branch observation proves it lost. The next prompt cannot run before that boundary. Aborting Pi does not prove that third-party detached commands stopped: reconciliation must inspect those commands through their existing owner tools. There is no hidden model retry or new process-control protocol.
 

@@ -478,7 +478,8 @@
         "localNodeId": "reconcileRepair",
         "timeoutMs": 1800000,
         "statusDetail": "checking interrupted repair work and commands",
-        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }"
+        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }",
+        "allowedTools": ["read", "grep", "find", "ls", "list_sessions"]
       },
       "documentation/verification/judge": {
         "nodeType": "agent",
@@ -587,7 +588,8 @@
         "localNodeId": "reconcileRepair",
         "timeoutMs": 1800000,
         "statusDetail": "checking interrupted repair work and commands",
-        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }"
+        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }",
+        "allowedTools": ["read", "grep", "find", "ls", "list_sessions"]
       },
       "localVerification/judge": {
         "nodeType": "agent",
@@ -992,7 +994,8 @@
         "localNodeId": "reconcileRepair",
         "timeoutMs": 1800000,
         "statusDetail": "checking interrupted repair work and commands",
-        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }"
+        "expectedOutput": "{ \"route\": \"verify\", \"commandsSettled\": true, \"evidence\": [\"Exact command receipts and observed terminal outcomes\"], \"reason\": \"Existing edits can be verified\" }",
+        "allowedTools": ["read", "grep", "find", "ls", "list_sessions"]
       },
       "redesign/documentation/verification/judge": {
         "nodeType": "agent",

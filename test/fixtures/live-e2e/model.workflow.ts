@@ -42,11 +42,12 @@ export default defineWorkflow({
       },
     }),
     recover: agent({
+      allowedTools: ["read"],
       prompt: ({ input }) =>
         [
           "The prior test step timed out. Inspect its saved partial file and command PID in this directory:",
           (input as { directory: string }).directory,
-          "Confirm that the process recorded in live-timeout-command.pid no longer exists and that live-timeout-partial.txt contains saved repair. Do not restart it or edit either file.",
+          "Use read to inspect live-timeout-command.pid and live-timeout-partial.txt. Confirm that the partial file contains saved repair. On Linux, a read of /proc/<recorded PID>/stat should report that the file does not exist. Do not restart the process, edit files, or call bash; only read and matching workflow submit/update are allowed.",
           'Then call workflow submit with the exact requestId and { "recovered": true }. The validator independently checks process settlement.',
         ].join("\n"),
       expectedOutput: '{ "recovered": true }',

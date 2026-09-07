@@ -578,6 +578,71 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(2);
   });
 
+  it("enforces the owned turn allowlist before acknowledgment without restricting ordinary chat", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    const contract = {
+      requestId: "exact-request",
+      allowedTools: ["read", "list_sessions"] as string[] | string,
+    };
+    message.content.details = { workflowMessageId: message.workflowMessageId, contract };
+    coordinator.updateView(view(message));
+    expect(coordinator.toolCallBlockReason("bash", {})).toBeUndefined();
+    const branch: unknown[] = [];
+    let idle = true;
+    const ctx = {
+      isIdle: () => idle,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+      expect(coordinator.toolCallBlockReason("bash", {})).toContain("not allowed");
+    });
+    await coordinator.synchronize(
+      { sendMessage } as never,
+      { request: vi.fn(async (options) => acceptedServerRequest(options)) } as never,
+      ctx,
+    );
+    for (const tool of ["read", "list_sessions"])
+      expect(coordinator.toolCallBlockReason(tool, {})).toBeUndefined();
+    for (const tool of [
+      "bash",
+      "exec_command",
+      "write",
+      "edit",
+      "write_stdin",
+      "kill_session",
+      "custom_mutation",
+    ]) {
+      expect(coordinator.toolCallBlockReason(tool, {})).toContain("not allowed");
+    }
+    for (const action of ["submit", "update"]) {
+      expect(
+        coordinator.toolCallBlockReason("workflow", { action, requestId: "exact-request" }),
+      ).toBeUndefined();
+      expect(
+        coordinator.toolCallBlockReason("workflow", { action, requestId: "wrong-request" }),
+      ).toContain("not allowed");
+    }
+    expect(coordinator.toolCallBlockReason("workflow", { action: "start" })).toContain(
+      "not allowed",
+    );
+    contract.allowedTools = "read";
+    expect(coordinator.toolCallBlockReason("read", {})).toContain("invalid");
+    contract.allowedTools = ["read"];
+    coordinator.updateView({
+      ...view(message),
+      cancelledWorkflowMessageIds: [message.workflowMessageId],
+    });
+    expect(coordinator.toolCallBlockReason("read", {})).toContain("cancelled");
+    coordinator.endTurn("aborted", null);
+    expect(coordinator.toolCallBlockReason("bash", {})).toBeUndefined();
+  });
+
   it("aborts rejected turn ownership and retains it until settlement", async () => {
     const branch: Record<string, unknown>[] = [];
     const message = followUpMessage();

@@ -1125,14 +1125,15 @@ export const changeVerificationWorkflow = defineWorkflow({
       validate: parseSemanticRepair,
     }),
     reconcileRepair: agent({
+      allowedTools: ["read", "grep", "find", "ls", "list_sessions"],
       timeoutMs: 30 * 60_000,
       statusDetail: "checking interrupted repair work and commands",
       prompt: (context) =>
         [
           "A semantic repair failed or timed out. Reconcile the existing work before any replacement work.",
           "Do not edit repository files or launch repair, verification, publication, deployment, or paid work in this step.",
-          "Inspect the worktree, diff, saved receipts, and command sessions through the available tools. An interrupted tool wait or an aborted Pi turn does not prove its process stopped.",
-          "Identify every command from the interrupted attempt and establish that it finished or was safely stopped. You may request termination only for commands owned by that attempt and only within existing authority.",
+          "Inspect repository files, existing diff reports, saved receipts, and command sessions with read, grep, find, ls, or list_sessions. Other tools, including shells, edits, process input, and process termination, are blocked.",
+          "Identify every command from the interrupted attempt and establish that it finished or was safely stopped. An interrupted tool wait or an aborted Pi turn does not prove its process stopped. If an owned command still needs termination, report a blocker for that exact command rather than calling a mutation-capable tool.",
           "If command ownership or settlement cannot be established, return blocked with commandsSettled=false and the missing evidence. Do not infer that no output means no active process.",
           "Return verify when completed or partial edits can now be checked without repeating them. Return retry only when commands have settled and implementation work remains; the existing repair bound still applies.",
           "Evidence must identify checked command sessions or receipts and their terminal outcomes, or explain how the complete turn evidence proves no commands were launched.",
