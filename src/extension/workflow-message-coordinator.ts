@@ -27,6 +27,8 @@ type OwnedTurn = {
   workflowTurnId: string;
   message: WorkflowMessage;
   startedReported: boolean;
+  stopRequested: boolean;
+  abortSent: boolean;
 } & ({ phase: "delivering" | "running" } | { phase: "settled"; end: SettledTurn });
 
 /** Adds every server-owned workflow message to one Pi session through one public API path. */
@@ -41,6 +43,12 @@ export class WorkflowMessageCoordinator {
 
   updateView(view: WorkflowSessionView): void {
     this.view = view;
+    if (
+      this.turn !== null &&
+      view.cancelledWorkflowMessageIds.includes(this.turn.message.workflowMessageId)
+    ) {
+      this.turn.stopRequested = true;
+    }
     const visibleIds = new Set(view.workflowMessages.map((message) => message.workflowMessageId));
     for (const messageId of this.closedTurnMessages) {
       if (!visibleIds.has(messageId)) this.closedTurnMessages.delete(messageId);
@@ -79,7 +87,7 @@ export class WorkflowMessageCoordinator {
   async synchronize(
     pi: ExtensionAPI,
     client: WorkflowClient,
-    ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager">,
+    ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager" | "abort">,
     callbacks: DeliveryCallbacks = {},
   ): Promise<void> {
     if (this.synchronizing || this.view === null) return;
@@ -103,10 +111,13 @@ export class WorkflowMessageCoordinator {
             workflowTurnId: open.workflowTurnId,
             message: candidate,
             startedReported: true,
+            stopRequested: view.cancelledWorkflowMessageIds.includes(candidate.workflowMessageId),
+            abortSent: false,
             phase: "running",
           };
         }
       }
+      this.abortOwnedTurn(ctx);
       if (
         view.branchReportRequired ||
         this.lastBranchEpoch !== view.coordinatorEpoch ||
@@ -115,6 +126,7 @@ export class WorkflowMessageCoordinator {
         await this.reportBranch(client, ctx, view);
       }
       await this.flushTurn(client, view, callbacks.beforeTurnEnd);
+      this.abortOwnedTurn(ctx);
       if (this.turn !== null || !ctx.isIdle() || ctx.hasPendingMessages()) return;
       for (const message of view.workflowMessages) {
         if (
@@ -159,6 +171,8 @@ export class WorkflowMessageCoordinator {
           workflowTurnId: `workflow-turn-${randomUUID()}`,
           message,
           startedReported: false,
+          stopRequested: false,
+          abortSent: false,
           phase: "delivering",
         };
       }
@@ -184,6 +198,7 @@ export class WorkflowMessageCoordinator {
       }
       await this.reportBranch(client, ctx, view);
       await this.flushTurn(client, view, callbacks.beforeTurnEnd);
+      this.abortOwnedTurn(ctx);
     } finally {
       this.synchronizing = false;
     }
@@ -197,6 +212,22 @@ export class WorkflowMessageCoordinator {
     this.turn = null;
     this.lastBranchEpoch = null;
     this.synchronizing = false;
+  }
+
+  private abortOwnedTurn(ctx: Pick<ExtensionContext, "isIdle" | "abort">): void {
+    const turn = this.turn;
+    if (
+      !this.view?.coordinatorActive ||
+      turn === null ||
+      turn.phase !== "running" ||
+      !turn.stopRequested ||
+      turn.abortSent ||
+      ctx.isIdle()
+    )
+      return;
+    // Set before calling Pi: abort can cause lifecycle events immediately.
+    turn.abortSent = true;
+    ctx.abort();
   }
 
   private turnCandidate(): WorkflowMessage | undefined {
@@ -234,7 +265,7 @@ export class WorkflowMessageCoordinator {
       return;
     }
     let message = pending.message;
-    if (!pending.startedReported) {
+    if (!pending.startedReported && !pending.stopRequested) {
       const confirmed = messageById(view, message.workflowMessageId);
       if (confirmed?.status !== "sent") return;
       message = confirmed;
@@ -254,14 +285,15 @@ export class WorkflowMessageCoordinator {
         receipt.ownership !== "active" &&
         !(receipt.ownership === "settled" && pending.phase === "settled")
       ) {
-        this.turn = null;
+        // Rejected ownership must stop the delivered turn, not forget it.
+        pending.stopRequested = true;
         return;
       }
       pending.message = message;
       pending.startedReported = true;
     }
     if (pending.phase !== "settled") return;
-    await beforeTurnEnd?.(message, pending.end);
+    if (!pending.stopRequested) await beforeTurnEnd?.(message, pending.end);
     await reportTurn(client, {
       state: "ended",
       workflowMessageId: message.workflowMessageId,

@@ -5,7 +5,7 @@ import {
   parseCiCommand,
   parseCiInspectionBatch,
   parsePublishedRepositories,
-  parseVerificationCommandPlan,
+  validateVerificationCommandSafety,
   repositoryId,
   reviewerCommand,
 } from "../src/builtins/autoimplement-command-batches.js";
@@ -106,66 +106,22 @@ describe("autoimplement command batch contracts", () => {
     ).toThrow(/non-empty string/);
   });
 
-  it("accepts multiple verification commands per cwd and rejects mutation commands", async () => {
-    const first = await makeTempDir("verification-one");
-    const second = await makeTempDir("verification-two");
-    const command = (id: string, cwd: string) => ({
-      id,
-      command: process.execPath,
-      args: ["-e", "process.stdout.write('ok')"],
-      cwd,
-      timeoutMs: 60_000,
-      maxOutputChars: 100_000,
-    });
-    expect(
-      parseVerificationCommandPlan({
-        commands: [command("one", first), command("two", second)],
-        untested: [],
-      }),
-    ).toMatchObject({ commands: [{ id: "one" }, { id: "two" }] });
-    expect(() => parseVerificationCommandPlan({ commands: [] })).toThrow(/non-empty/);
-    expect(
-      parseVerificationCommandPlan({
-        commands: [command("one", first), command("two", first)],
-      }),
-    ).toMatchObject({
-      commands: [
-        { id: "one", cwd: first },
-        { id: "two", cwd: first },
-      ],
-    });
-    expect(() =>
-      parseVerificationCommandPlan({
-        commands: [{ ...command("bad", first), command: "git", args: ["push"] }],
-      }),
-    ).toThrow(/not allowed/);
-    expect(() =>
-      parseVerificationCommandPlan({
-        commands: [{ ...command("bad", first), command: "npm", args: ["publish"] }],
-      }),
-    ).toThrow(/mutation or publication/);
-    for (const wrapper of ["dash", "cmd.exe", "C:\\Windows\\System32\\PowerShell.exe"]) {
-      expect(() =>
-        parseVerificationCommandPlan({
-          commands: [{ ...command("wrapper", first), command: wrapper, args: ["-c", "git push"] }],
-        }),
-      ).toThrow(/not allowed/);
+  it("rejects unsafe verification executables and publication actions", () => {
+    for (const executable of [
+      "git",
+      "bash",
+      "dash",
+      "cmd.exe",
+      "C:\\Windows\\System32\\PowerShell.exe",
+    ]) {
+      expect(() => validateVerificationCommandSafety(executable, [], "check")).toThrow(
+        /not allowed/,
+      );
     }
-    expect(() =>
-      parseVerificationCommandPlan({
-        commands: [command("verify", first), command("verify", second)],
-      }),
-    ).toThrow(/duplicated/);
-    expect(() =>
-      parseVerificationCommandPlan({ commands: [command("invalid id", first)] }),
-    ).toThrow(/id is invalid/);
-    expect(() =>
-      parseVerificationCommandPlan({
-        commands: Array.from({ length: 65 }, (_, index) =>
-          command(`verify-${index}`, path.join(first, String(index))),
-        ),
-      }),
-    ).toThrow(/at most 64/);
+    expect(() => validateVerificationCommandSafety("npm", ["publish"], "check")).toThrow(
+      /mutation or publication/,
+    );
+    expect(() => validateVerificationCommandSafety("npm", ["test"], "check")).not.toThrow();
   });
 
   it("normalizes per-PR CI state and validates pending watch commands", async () => {

@@ -1395,6 +1395,8 @@ function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {
     typeof value.sessionId === "string" &&
     Array.isArray(value.pendingInteractions) &&
     Array.isArray(value.workflowMessages) &&
+    Array.isArray(value.cancelledWorkflowMessageIds) &&
+    value.cancelledWorkflowMessageIds.every((id) => typeof id === "string") &&
     typeof value.coordinatorEpoch === "string" &&
     typeof value.coordinatorActive === "boolean" &&
     typeof value.branchReportRequired === "boolean" &&

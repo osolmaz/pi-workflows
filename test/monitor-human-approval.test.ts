@@ -198,9 +198,9 @@ function completedRepairExecutor(rounds = 1): ScriptedExecutor {
     .respond("implementation/classifyImplementation", {
       output: { route: "verify", summary: "ready", evidence: "change" },
     })
-    .respond("implementation/planVerification", {
+    .respond("implementation/localVerification/planChecks", {
       output: {
-        commands: [
+        checks: [
           {
             id: "verify",
             command: process.execPath,
@@ -208,6 +208,10 @@ function completedRepairExecutor(rounds = 1): ScriptedExecutor {
             cwd: repository,
             timeoutMs: 60_000,
             maxOutputChars: 100_000,
+            readOnly: true,
+            baseEligible: true,
+            changedFileScope: false,
+            findingFormat: "text",
           },
         ],
         untested: [],

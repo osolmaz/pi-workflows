@@ -1,14 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import {
-  MAX_COMMAND_BATCH_ITEMS,
-  validateCommandBatchRequest,
-  type CommandBatchItem,
-} from "../workflows/command-batch.js";
+import { MAX_COMMAND_BATCH_ITEMS, type CommandBatchItem } from "../workflows/command-batch.js";
 
 export const REVIEW_TIMEOUT_MS = 10 * 60_000;
 export const CI_WATCH_TIMEOUT_MS = 5 * 60_000;
-export const VERIFICATION_TIMEOUT_MS = 45 * 60_000;
 export const AUTOIMPLEMENT_BATCH_MAX_OUTPUT_CHARS = 1_000_000;
 export const AUTOIMPLEMENT_MAX_CONCURRENCY = 8;
 
@@ -30,11 +25,6 @@ export type PublishedRepository = {
 
 export type PublishedRepositories = {
   repositories: PublishedRepository[];
-};
-
-export type VerificationCommandPlan = {
-  commands: CommandBatchItem[];
-  untested: string[];
 };
 
 export type CiTargetInspection = {
@@ -123,25 +113,6 @@ export function reviewerCommand(repository: PublishedRepository): CommandBatchIt
     cwd: repository.repository,
     timeoutMs: REVIEW_TIMEOUT_MS,
     maxOutputChars: AUTOIMPLEMENT_BATCH_MAX_OUTPUT_CHARS,
-  };
-}
-
-export function parseVerificationCommandPlan(value: unknown): VerificationCommandPlan {
-  const result = requireRecord(value, "verification command plan");
-  if (!Array.isArray(result.commands) || result.commands.length === 0) {
-    throw new Error("verification commands must be a non-empty array");
-  }
-  const commands = result.commands.map((entry, index) => {
-    const command = parseCommandItem(entry, `verification commands[${index}]`, {
-      maxTimeoutMs: VERIFICATION_TIMEOUT_MS,
-    });
-    validateVerificationCommand(command, index);
-    return command;
-  });
-  const validated = validateCommandBatchRequest({ items: commands, maxConcurrency: 1 });
-  return {
-    commands: validated.items,
-    untested: stringArray(result.untested ?? [], "verification untested"),
   };
 }
 
@@ -312,14 +283,6 @@ export function validateVerificationCommandSafety(
   if (/\b(publish|release|deploy|push|merge)\b/.test(joined)) {
     throw new Error(`${label} contains a mutation or publication action`);
   }
-}
-
-function validateVerificationCommand(command: CommandBatchItem, index: number): void {
-  validateVerificationCommandSafety(
-    command.command,
-    command.args,
-    `verification commands[${index}]`,
-  );
 }
 
 function concurrencyValue(value: unknown, field: string): number {

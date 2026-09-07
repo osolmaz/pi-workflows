@@ -1464,7 +1464,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       if (run.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent durable state`);
       }
-      this.settleWorkflowRunMessages(options.runId, now);
+      this.workflowMessages.cancelPendingForRun(options.runId, now);
       this.cancelWorkflowRunDependents(options.runId, controlId, errorHash, now);
 
       const released = this.state.connection
@@ -1960,7 +1960,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
            WHERE run_id = ?`,
         )
         .run(status, errorHash, now, now, runId);
-      this.settleWorkflowRunMessages(runId, now);
+      this.workflowMessages.cancelPendingForRun(runId, now);
       if (status === "cancelled") {
         this.cancelWorkflowRunDependents(
           runId,
@@ -1988,11 +1988,6 @@ export class WorkflowRunQueueStore extends ProjectStore {
       );
       return true;
     });
-  }
-
-  private settleWorkflowRunMessages(runId: string, now: number): void {
-    this.workflowMessages.settleOpenTurnsForRun(runId, "lost", now);
-    this.workflowMessages.cancelPendingForRun(runId, now);
   }
 
   private cancelWorkflowRunDependents(

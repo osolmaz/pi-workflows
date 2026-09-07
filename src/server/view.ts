@@ -330,16 +330,19 @@ export class ServerViewStore {
         this.projectRecordField(request.runId, request, "contract"),
       );
       const workflowMessages = this.workflowMessages.listSession(sessionId);
+      const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
       const eligible = workflowMessages.find((message) => this.isMessageEligible(message));
       const next =
-        coordinator === null || (coordinator.active && !coordinator.branchReportRequired)
+        openTurn === undefined &&
+        (coordinator === null || (coordinator.active && !coordinator.branchReportRequired))
           ? eligible
           : undefined;
-      const open = this.openWorkflowMessage(workflowMessages);
-      const openTurn =
-        open === undefined
-          ? undefined
-          : this.workflowMessages.openTurnForMessage(open.workflowMessageId);
+      const open =
+        openTurn === undefined
+          ? this.openWorkflowMessage(workflowMessages)
+          : workflowMessages.find(
+              (message) => message.workflowMessageId === openTurn.workflowMessageId,
+            );
       return {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
@@ -354,6 +357,9 @@ export class ServerViewStore {
         nextWorkflowMessageId: next?.workflowMessageId ?? null,
         openWorkflowMessageId: open?.workflowMessageId ?? null,
         openWorkflowTurn: openTurn ?? null,
+        cancelledWorkflowMessageIds: workflowMessages
+          .filter((message) => this.hasCancelledSource(message))
+          .map((message) => message.workflowMessageId),
         coordinatorEpoch: coordinator?.epoch ?? null,
         coordinatorActive: coordinator?.active ?? false,
         branchReportRequired: coordinator?.branchReportRequired ?? false,
@@ -647,6 +653,24 @@ export class ServerViewStore {
       if (Date.parse(message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now) return message.runId;
     }
     return undefined;
+  }
+
+  private hasCancelledSource(message: WorkflowMessage): boolean {
+    if (message.kind === "step") {
+      const request = this.state.connection
+        .prepare("SELECT status FROM interactive_requests WHERE request_id = ? AND run_id = ?")
+        .get(message.sourceId, message.runId);
+      return isObjectRecord(request) && request.status === "cancelled";
+    }
+    if (message.kind === "followUp") {
+      const source = this.state.connection
+        .prepare("SELECT status FROM workflow_follow_ups WHERE follow_up_id = ? AND run_id = ?")
+        .get(message.sourceId, message.runId);
+      return (
+        isObjectRecord(source) && (source.status === "cancelled" || source.status === "removed")
+      );
+    }
+    return false;
   }
 
   private isMessageEligible(message: WorkflowMessage): boolean {

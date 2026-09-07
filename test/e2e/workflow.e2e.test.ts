@@ -1,5 +1,6 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -78,6 +79,33 @@ export default defineWorkflow({
     }),
   },
   edges: [],
+});
+`;
+
+const TIMEOUT_RECOVERY_WORKFLOW = `import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+import { readFileSync } from "node:fs";
+export default defineWorkflow({
+  name: "timeout-recovery-e2e",
+  startAt: "work",
+  nodes: {
+    work: agent({ timeoutMs: 4000, prompt: () => "Save partial work, then run the timeout E2E command until aborted." }),
+    recover: agent({
+      prompt: () => "Inspect the stopped timeout command and preserve the saved partial repair.",
+      expectedOutput: '{ "commandsSettled": true }',
+      validate: (value) => { if (value.commandsSettled !== true) throw new Error("Command must settle first"); return value; },
+    }),
+    finish: compute({ run: ({ input }) => {
+      const pid = Number(readFileSync(input.pidPath, "utf8"));
+      let stopped = false;
+      try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") stopped = true; else throw error; }
+      if (!stopped) throw new Error("Previous command is still alive");
+      return { partial: readFileSync(input.partialPath, "utf8"), commandStopped: stopped };
+    } }),
+  },
+  edges: [
+    { from: "work", switch: { on: "$result.outcome", cases: { timed_out: "recover", failed: "recover", ok: "finish" } } },
+    { from: "recover", to: "finish" },
+  ],
 });
 `;
 
@@ -419,6 +447,21 @@ function latestStepContract(messages: Array<{ content?: unknown }>): {
       };
 }
 
+function commandHasStopped(pidPath: string): boolean {
+  try {
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    if (!Number.isSafeInteger(pid) || pid < 1) return false;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function rpcDiagnostic(pi: RpcHandle): string {
   const errors = pi.stdoutLines.filter((line) => line.includes('"notifyType":"error"'));
   return `pi stderr:\n${pi.stderr()}\npi errors:\n${errors.join("\n")}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`;
@@ -515,6 +558,27 @@ describe.sequential("out-of-process workflow server end to end", () => {
               : {}),
           };
         }
+        if (contract.workflow === "timeout-recovery-e2e") {
+          if (contract.step === "work") {
+            const source = `const fs = require('node:fs'); fs.writeFileSync('timeout-partial.txt', 'saved repair'); fs.writeFileSync('timeout-command.pid', String(process.pid)); setInterval(() => {}, 1000);`;
+            return {
+              kind: "tool",
+              toolName: "bash",
+              args: { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}` },
+            };
+          }
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              requestId: contract.requestId,
+              output: {
+                commandsSettled: commandHasStopped(path.join(projectDir, "timeout-command.pid")),
+              },
+            },
+          };
+        }
         if (contract.workflow === "pause-resume-e2e") {
           if (holdPauseSubmission) {
             return { kind: "text", text: "Waiting for the pause. ".repeat(500) };
@@ -571,6 +635,10 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "pause-resume-e2e.workflow.ts"),
       PAUSE_RESUME_WORKFLOW,
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "timeout-recovery-e2e.workflow.ts"),
+      TIMEOUT_RECOVERY_WORKFLOW,
     );
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "multi-step-widget-e2e.workflow.ts"),
@@ -880,6 +948,68 @@ describe.sequential("out-of-process workflow server end to end", () => {
       store.close();
     }
   }, 60_000);
+
+  it("aborts an expired Pi command, preserves partial work, and completes recovery", async () => {
+    await waitForPiIdle(pi);
+    const input = {
+      partialPath: path.join(projectDir, "timeout-partial.txt"),
+      pidPath: path.join(projectDir, "timeout-command.pid"),
+    };
+    pi.send({
+      id: "timeout-recovery-start",
+      type: "prompt",
+      message: `/workflow timeout-recovery-e2e --input-json ${JSON.stringify(input)}`,
+    });
+    const { state } = await waitForRun(
+      databasePath,
+      "timeout-recovery-e2e",
+      (candidate) => candidate.status === "completed",
+      () => rpcDiagnostic(pi),
+    );
+    expect(state.finalOutput).toEqual({ partial: "saved repair", commandStopped: true });
+    expect(
+      state.steps
+        .filter((step) => ["work", "recover"].includes(step.nodeId))
+        .map((step) => [step.nodeId, step.outcome]),
+    ).toEqual([
+      ["work", "timed_out"],
+      ["recover", "ok"],
+    ]);
+    await waitForPiIdle(pi);
+    const store = new ServerStateStore(databasePath, { readOnly: true });
+    try {
+      const messages = store.workflowMessages
+        .listRun(state.runId)
+        .filter((message) => message.kind === "step");
+      expect(messages).toHaveLength(2);
+      const firstTurn = store.workflowMessages.latestTurnForMessage(messages[0]!.workflowMessageId);
+      expect(firstTurn).toMatchObject({ state: "ended", stopReason: "aborted" });
+      const secondTurn = store.workflowMessages.latestTurnForMessage(
+        messages[1]!.workflowMessageId,
+      );
+      expect(secondTurn?.state).toBe("ended");
+      expect(Date.parse(secondTurn!.startedAt)).toBeGreaterThanOrEqual(
+        Date.parse(firstTurn!.endedAt!),
+      );
+      expect(store.getInteraction(messages[0]!.sourceId)?.status).toBe("cancelled");
+    } finally {
+      store.close();
+    }
+    const before = pi.stdoutLines.length;
+    pi.send({
+      id: "ordinary-after-timeout",
+      type: "prompt",
+      message: "Normal chat after timeout recovery.",
+    });
+    await waitForCondition(
+      () => pi.stdoutLines.slice(before).some((line) => line.includes('"type":"agent_end"')),
+      () => rpcDiagnostic(pi),
+    );
+    await waitForPiIdle(pi);
+    expect(
+      pi.stdoutLines.slice(before).some((line) => line.includes('"stopReason":"aborted"')),
+    ).toBe(false);
+  });
 
   it("starts a fresh origin-session turn after pause and resume", async () => {
     const requestStart = mock.requests.length;
