@@ -721,9 +721,10 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(
       new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
     ).toMatchObject({ status: "cancelled", error: "Workflow run cancelled" });
+    // Queue cancellation cannot attest that the origin Pi turn has stopped.
     expect(serverState.workflowMessages.requireTurn("cancel-turn")).toMatchObject({
-      state: "ended",
-      stopReason: "lost",
+      state: "started",
+      stopReason: null,
     });
     store.close();
   });

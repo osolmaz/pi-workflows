@@ -272,6 +272,7 @@ describe("built-in autodoc", () => {
 
   it("preserves qualified verification evidence on the blocked exit", async () => {
     const workspace = await prepared();
+    await fs.writeFile(path.join(workspace.repository, "broken-docs"), "candidate defect");
     const executor = new ScriptedExecutor()
       .respond("inspectDocumentation", {
         output: {
@@ -298,7 +299,13 @@ describe("built-in autodoc", () => {
       plan: { steps: ["one"] },
       repository: workspace.repository,
       preparedWorkspace: workspace,
-      verificationChecks: [check(workspace, false)],
+      verificationChecks: [
+        {
+          ...check(workspace, false),
+          args: ["-e", "process.exit(require('node:fs').existsSync('broken-docs') ? 1 : 0)"],
+          baseEligible: true,
+        },
+      ],
     });
     expect(state.finalOutput).toMatchObject({
       status: "blocked",

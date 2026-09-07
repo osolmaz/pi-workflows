@@ -90,6 +90,8 @@ export class WorkflowMessageCoordinator {
     ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager" | "abort">,
     callbacks: DeliveryCallbacks = {},
   ): Promise<void> {
+    // Cancellation must not wait behind an in-flight transport acknowledgment.
+    this.abortCancelledTurn(ctx);
     if (this.synchronizing || this.view === null) return;
     this.synchronizing = true;
     try {
@@ -117,7 +119,7 @@ export class WorkflowMessageCoordinator {
           };
         }
       }
-      this.abortOwnedTurn(ctx);
+      this.abortCancelledTurn(ctx);
       if (
         view.branchReportRequired ||
         this.lastBranchEpoch !== view.coordinatorEpoch ||
@@ -126,7 +128,7 @@ export class WorkflowMessageCoordinator {
         await this.reportBranch(client, ctx, view);
       }
       await this.flushTurn(client, view, callbacks.beforeTurnEnd);
-      this.abortOwnedTurn(ctx);
+      this.abortCancelledTurn(ctx);
       if (this.turn !== null || !ctx.isIdle() || ctx.hasPendingMessages()) return;
       for (const message of view.workflowMessages) {
         if (
@@ -198,7 +200,7 @@ export class WorkflowMessageCoordinator {
       }
       await this.reportBranch(client, ctx, view);
       await this.flushTurn(client, view, callbacks.beforeTurnEnd);
-      this.abortOwnedTurn(ctx);
+      this.abortCancelledTurn(ctx);
     } finally {
       this.synchronizing = false;
     }
@@ -214,7 +216,7 @@ export class WorkflowMessageCoordinator {
     this.synchronizing = false;
   }
 
-  private abortOwnedTurn(ctx: Pick<ExtensionContext, "isIdle" | "abort">): void {
+  abortCancelledTurn(ctx: Pick<ExtensionContext, "isIdle" | "abort">): void {
     const turn = this.turn;
     if (
       !this.view?.coordinatorActive ||
