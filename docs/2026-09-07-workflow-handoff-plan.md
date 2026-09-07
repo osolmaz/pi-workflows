@@ -56,5 +56,18 @@ issues must be identified, not silently repaired. Push before running
 
 ## Completion evidence
 
-Pending implementation and validation. Recovery of an installed live session is
-separate work and requires approval to update that installation.
+Implemented in PR #85. Local validation passed with 1,211 unit tests, 13 real-Pi
+mock-provider E2E tests, and 76 Rust tests. Slophammer, Clippy, and format checks
+passed. SimpleDoc reports the existing nine naming/frontmatter issues and 24
+reference updates.
+
+The final code commit passed the authenticated live test with
+`openrouter/deepseek/deepseek-v4-flash`, Pi 0.85.0, and a 4,096-token output
+allowance. It verified ordinary chat, a model tool start, exact submission,
+next-step completion, and saved conversation capture. The isolated Autoimplement
+test also verified actual temporary worktree creation before cancellation.
+
+The configured reviewer exited before review because its local provider
+configuration has an unknown field. Review, CI verification, and merge remain
+blocked; no alternate reviewer was substituted. Recovery of an installed live
+session is separate work and requires approval to update that installation.
