@@ -19,7 +19,7 @@ Related documents:
 - [Deferred workflow turns](../DEFERRED_TURNS.md)
 - [Make deferred workflow launches durable](../2026-08-20-durable-workflow-launch-plan.md)
 - [Route workflow reports to their starting session](2026-08-13-session-addressed-workflow-notifications-plan.md)
-- [Workflow authoring reference](../workflows.md)
+- [Workflow authoring reference](../WORKFLOWS.md)
 
 ## Goals
 

@@ -235,7 +235,7 @@ Retained runs still resume and render. Expired delivered terminal trees disappea
 
 - `docs/SQLITE_STATE.md`
 - `docs/WORKFLOW_SERVER.md`
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - CLI help where it describes state retention
 
 **Change**

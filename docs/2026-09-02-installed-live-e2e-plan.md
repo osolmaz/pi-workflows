@@ -226,7 +226,7 @@ Implementation will update:
 - `tui/src/main.rs`;
 - `tui/src/ui/mod.rs`;
 - Rust and TypeScript E2E tests;
-- `docs/workflows.md` and `docs/tui-viewer.md`.
+- `docs/WORKFLOWS.md` and `docs/TUI_VIEWER.md`.
 
 ## Contract impact
 

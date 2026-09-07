@@ -1,7 +1,7 @@
 # Development guide
 
 This document covers the standards for working on pi-workflows itself. For
-authoring workflows, see [workflows.md](workflows.md).
+authoring workflows, see [WORKFLOWS.md](WORKFLOWS.md).
 
 The viewer follows the [incremental and virtualized viewer plan](plans/2026-08-28-piw-incremental-viewer-plan.md). Durable writers create revisioned target patches. Rust reads small run-list rows, bounded replay pages, and one shared watched-run projection. Rust and TypeScript share graph fixtures and the same retained scene contract.
 
@@ -178,4 +178,4 @@ before publishing.
   [SQLITE_STATE.md](SQLITE_STATE.md). During alpha, a breaking shape changes the current contract in place and uses the clear reset failure. Do not add a compatibility path or `v2` only to preserve old alpha state.
 - Every exported API of the engine (`src/workflows/index.ts`) is covered by
   unit tests; new node types or edge semantics need tests in `test/` and a
-  section in [workflows.md](workflows.md).
+  section in [WORKFLOWS.md](WORKFLOWS.md).

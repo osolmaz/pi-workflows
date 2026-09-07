@@ -384,7 +384,7 @@ Land the pure contracts and tests first. Then land workspace preparation, Autodo
 
 Finish or cancel active runs that use the old built-in definitions before package reload. Old terminal runs remain readable. An active run with an incompatible source revision continues to use the existing revision guard and must restart rather than mixing graphs.
 
-After implementation, update [Workflow authoring reference](../workflows.md), [Workflow composition](../WORKFLOW_COMPOSITION.md), the Autoimplement and Autodoc skills, examples, and built-in revision records. Reload or restart Pi and verify discovery through the installed package path.
+After implementation, update [Workflow authoring reference](../WORKFLOWS.md), [Workflow composition](../WORKFLOW_COMPOSITION.md), the Autoimplement and Autodoc skills, examples, and built-in revision records. Reload or restart Pi and verify discovery through the installed package path.
 
 Do not release or deploy this change without separate authority.
 

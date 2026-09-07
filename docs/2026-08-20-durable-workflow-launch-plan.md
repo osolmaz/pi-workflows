@@ -360,7 +360,7 @@ surface.
 
 ### 8. Update documentation
 
-Update `docs/workflows.md` with the queued start contract, run ID, status, cancellation, failure
+Update `docs/WORKFLOWS.md` with the queued start contract, run ID, status, cancellation, failure
 follow-up, and model retry behavior. Update resource manager store documentation with the alpha reset rule.
 Do not document a v2 schema or migration path.
 

@@ -72,7 +72,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 
 ### Documentation and display
 
-- Add the authoring API to `docs/workflows.md`.
+- Add the authoring API to `docs/WORKFLOWS.md`.
 - Add human decision state to `docs/SQLITE_STATE.md`.
 - Add channel setup and recovery instructions.
 - Add a custom gate example and a composed plan approval example.

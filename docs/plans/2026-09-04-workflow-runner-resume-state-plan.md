@@ -203,7 +203,7 @@ A run with more than 2 MB of history resumes with a small state response. The sa
 
 - `src/server/view.ts`
 - `src/client/client.ts`
-- `docs/tui-viewer.md`
+- `docs/TUI_VIEWER.md`
 - Existing viewer protocol tests
 
 **Change**
@@ -271,7 +271,7 @@ A contract test exercises every operation with its largest supported result shap
 - Existing runner protocol and end-to-end test files
 - `docs/WORKFLOW_SERVER.md`
 - `docs/SQLITE_STATE.md`
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 
 **Change**
 

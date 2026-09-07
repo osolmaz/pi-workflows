@@ -1,10 +1,16 @@
+---
+title: "Session event replay implementation plan"
+author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
+date: 2026-07-30
+---
+
 # Session event replay implementation plan
 
 ## Objective
 
 Add live assistant streaming and deterministic temporal replay to PIW using the
 journal defined in
-[session-event-journal.md](../session-event-journal.md).
+[SESSION_EVENT_JOURNAL.md](../SESSION_EVENT_JOURNAL.md).
 
 A completed implementation records the documented Pi event stream in each
 session-bound run bundle, shows it while the run is active, and replays the same
@@ -292,7 +298,7 @@ failure or unverified capture must remain visible in the status area and Info
 inspector.
 
 Temporal state also fills the stable full node cards defined in
-[piw-viewer-experience-implementation-plan.md](piw-viewer-experience-implementation-plan.md).
+[2026-07-30-piw-viewer-experience-plan.md](2026-07-30-piw-viewer-experience-plan.md).
 A node card reserves slots for its status symbol and label plus its exact id
 and type. Separate slots hold start, branch, or terminal markers and every
 branch label. Attempt metadata and timing remain visible beside the short detail
@@ -313,7 +319,7 @@ every temporal cursor while their status and timing fields update.
 
 ### Live transport
 
-Extend the run view in `docs/live-replay-protocol.md` and the Rust protocol
+Extend the run view in `docs/LIVE_REPLAY_PROTOCOL.md` and the Rust protocol
 types:
 
 ```json
@@ -344,8 +350,8 @@ resnapshot.
 
 When code and tests pass, fold the target contract into
 `docs/SQLITE_STATE.md` and remove the target-status note from
-`docs/session-event-journal.md`. Update `docs/live-replay-protocol.md`,
-`docs/tui-viewer.md`, `docs/development.md`, and the README where users need new
+`docs/SESSION_EVENT_JOURNAL.md`. Update `docs/LIVE_REPLAY_PROTOCOL.md`,
+`docs/TUI_VIEWER.md`, `docs/DEVELOPMENT.md`, and the README where users need new
 commands or controls.
 
 Keep `pi-workflows.run-bundle.v1` and `pi-workflows.replay.v1` as directed by

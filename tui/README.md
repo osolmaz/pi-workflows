@@ -37,4 +37,4 @@ Connect another viewer to that server:
 piw --connect ws://127.0.0.1:9377/ws
 ```
 
-See the [piw viewer guide](https://github.com/osolmaz/pi-workflows/blob/main/docs/tui-viewer.md) for controls, themes, replay behavior, and remote viewing.
+See the [piw viewer guide](https://github.com/osolmaz/pi-workflows/blob/main/docs/TUI_VIEWER.md) for controls, themes, replay behavior, and remote viewing.

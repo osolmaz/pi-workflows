@@ -1,3 +1,9 @@
+---
+title: "PIW viewer experience implementation plan"
+author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
+date: 2026-07-30
+---
+
 # PIW viewer experience implementation plan
 
 This plan records the earlier viewer experience work. Its graph-wide card sizing and
@@ -582,8 +588,8 @@ tui/src/ui/graph.rs
 tui/src/ui/conversation.rs
 src/render/*                 # only for shared graph text/geometry changes
 fixtures/layout/*            # regenerated only when shared output changes
-docs/tui-viewer.md
-docs/development.md
+docs/TUI_VIEWER.md
+docs/DEVELOPMENT.md
 README.md
 ```
 

@@ -455,7 +455,7 @@ Update Autoimplement to expose future merge behavior and added instructions thro
 
 Update:
 
-- `docs/workflows.md`
+- `docs/WORKFLOWS.md`
 - `docs/WORKFLOW_COMPOSITION.md`
 - `docs/WORKFLOW_STEP_MESSAGES.md`
 - `docs/SQLITE_STATE.md`

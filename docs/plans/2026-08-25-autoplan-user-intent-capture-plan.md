@@ -81,7 +81,7 @@ Add `originalUserInstructions` to both ready and blocked result types and final 
 
 Document the mandatory capture step, the one-string contract, model authority, later prompt use, and final-output field in the built-in Autoplan section.
 
-**Where:** `docs/workflows.md`.
+**Where:** `docs/WORKFLOWS.md`.
 
 **Verify:** Documentation checks pass, and the reference agrees with the implementation and tests.
 

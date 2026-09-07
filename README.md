@@ -251,7 +251,7 @@ back to following the run live.
 The Rust `piw` viewer under `tui/` is the full interactive terminal UI, with
 selectable themes, detailed trace and conversation inspection, temporal
 replay, and reconnecting remote viewing. See
-[the piw guide](docs/tui-viewer.md).
+[the piw guide](docs/TUI_VIEWER.md).
 
 Inside Pi, a compact widget above the editor shows one line per workflow node,
 with glyphs for node status and type. Scroll it with `shift+↑` / `shift+↓`.
@@ -300,7 +300,7 @@ the model to pick from a fixed set of choices and validates the answer, and
 Running steps can publish durable [workflow updates](docs/WORKFLOW_UPDATES.md),
 including progress counts and ETA data.
 
-See [docs/workflows.md](docs/workflows.md) for the full authoring reference
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for the full authoring reference
 and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk run format.
 
 ## Resource managers
@@ -359,7 +359,7 @@ pi-workflows server run  # stay attached; stop with Ctrl-C
 These commands manage one server for the complete user database, not one server
 per project. They do not install an operating-system service. A new server reaps
 exact orphan process identities and resumes safe work from committed state. See
-[docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) and
+[docs/WORKFLOWS.md](docs/WORKFLOWS.md#durable-runs-parking-and-resume) and
 [docs/WORKFLOW_SERVER.md](docs/WORKFLOW_SERVER.md).
 
 ## Examples

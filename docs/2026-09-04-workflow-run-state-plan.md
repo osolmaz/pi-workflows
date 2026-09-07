@@ -258,7 +258,7 @@ Do not keep feature flags or fallback behavior.
 
 ### Update documentation
 
-Update `WORKFLOW_SERVER.md`, `SQLITE_STATE.md`, and `workflows.md` after implementation so they describe the shipped interfaces and recovery behavior. Keep this plan as the decision and implementation record.
+Update `WORKFLOW_SERVER.md`, `SQLITE_STATE.md`, and `WORKFLOWS.md` after implementation so they describe the shipped interfaces and recovery behavior. Keep this plan as the decision and implementation record.
 
 ## Tests
 

@@ -1,4 +1,4 @@
-//! The interactive TUI (see docs/tui-viewer.md): a runs sidebar, the graph
+//! The interactive TUI (see docs/TUI_VIEWER.md): a runs sidebar, the graph
 //! pane, an inspector with steps/trace/conversation/info tabs, and a replay
 //! transport. Works against a local runs directory, a single run, or a
 //! `piw serve` WebSocket server; all three feed the same view model.

@@ -82,7 +82,7 @@ Follow these rules:
 - Declare all model work in the graph. Use an assistant-message agent for a visible explanation. Terminal notices report saved facts and never start a model turn. Do not use `presentationPrompt` or add reminder loops outside the graph.
 - Preserve the single active workflow rule in one Pi session.
 
-Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/HUMAN_DECISIONS.md](../../docs/HUMAN_DECISIONS.md) before adding a human gate or channel. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
+Read [../../docs/WORKFLOWS.md](../../docs/WORKFLOWS.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/HUMAN_DECISIONS.md](../../docs/HUMAN_DECISIONS.md) before adding a human gate or channel. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
 
 ## Verify changes
 

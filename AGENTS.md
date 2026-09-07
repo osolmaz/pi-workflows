@@ -26,7 +26,7 @@ Repository rules:
   actions. The required real-model live E2E is a separate manual validation run.
 - Do not add arbitrary limits to user-visible output. Add a limit only when a named external
   interface requires it. Document that requirement and keep the complete result available.
-- New engine features need unit tests and a section in `docs/workflows.md`.
+- New engine features need unit tests and a section in `docs/WORKFLOWS.md`.
 
 ## Built-in workflow skill style
 
