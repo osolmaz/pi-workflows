@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeTempRoot,
   configureModelBudget,
+  isExpectedWorkflowAbort,
   parseArgs,
   RpcSession,
   withTemporaryRoot,
@@ -80,7 +81,116 @@ describe("installed live E2E script", () => {
           errorMessage: "402: output allowance exceeds credit",
         },
       });
-      expect(() => rpc.assertHealthy()).toThrow("402: output allowance exceeds credit");
+      await expect(rpc.assertHealthy()).rejects.toThrow("402: output allowance exceeds credit");
+    } finally {
+      await rpc.stop();
+    }
+  });
+
+  it("matches expected aborts only to the exact saved work attempt and durable timeout", () => {
+    const event = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "This operation was aborted",
+        timestamp: 1,
+      },
+    };
+    const input = {
+      type: "custom_message",
+      customType: "pi-workflows-step",
+      details: { contract: { runId: "run", nodeId: "work", attemptId: "attempt" } },
+    };
+    const response = { type: "message", message: event.message };
+    const entries = [input, response];
+    const state = {
+      runId: "run",
+      steps: [{ nodeId: "work", attemptId: "attempt", outcome: "timed_out" }],
+    };
+    expect(isExpectedWorkflowAbort(event, entries, state, "run")).toBe(true);
+    for (const outcome of ["pending", "ok", "failed"]) {
+      expect(
+        isExpectedWorkflowAbort(
+          event,
+          entries,
+          { ...state, steps: [{ ...state.steps[0], outcome }] },
+          "run",
+        ),
+      ).toBe(false);
+    }
+    expect(isExpectedWorkflowAbort(event, entries, state, "other-run")).toBe(false);
+    expect(isExpectedWorkflowAbort(event, entries, { ...state, runId: "other-run" }, "run")).toBe(
+      false,
+    );
+    expect(
+      isExpectedWorkflowAbort(
+        event,
+        entries,
+        { ...state, steps: [{ ...state.steps[0], attemptId: "other" }] },
+        "run",
+      ),
+    ).toBe(false);
+    expect(isExpectedWorkflowAbort(event, [input], state, "run")).toBe(false);
+    expect(
+      isExpectedWorkflowAbort(
+        event,
+        [input, { type: "message", message: { role: "user", content: "ordinary chat" } }, response],
+        state,
+        "run",
+      ),
+    ).toBe(false);
+    expect(
+      isExpectedWorkflowAbort(
+        event,
+        [
+          { ...input, details: { contract: { ...input.details.contract, nodeId: "recover" } } },
+          response,
+        ],
+        state,
+        "run",
+      ),
+    ).toBe(false);
+    expect(
+      isExpectedWorkflowAbort(
+        { ...event, message: { ...event.message, errorMessage: "402: no credit" } },
+        entries,
+        state,
+        "run",
+      ),
+    ).toBe(false);
+    expect(isExpectedWorkflowAbort(event, null, state, "run")).toBe(false);
+    expect(isExpectedWorkflowAbort(event, entries, null, "run")).toBe(false);
+  });
+
+  it("accepts a verified intentional abort without masking a later provider failure", async () => {
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const rpc = new RpcSession(child, { root: "/tmp/pi-workflows-live-e2e-expected-abort" });
+    const expected = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "This operation was aborted",
+      },
+    };
+    let checks = 0;
+    rpc.expectedModelAbort = async (event) => {
+      checks++;
+      return event === expected;
+    };
+    try {
+      rpc.events.push(expected);
+      await rpc.assertHealthy();
+      await rpc.assertHealthy();
+      expect(checks).toBe(1);
+      rpc.events.push({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "402: no credit" },
+      });
+      await expect(rpc.assertHealthy()).rejects.toThrow("402: no credit");
     } finally {
       await rpc.stop();
     }
@@ -106,7 +216,7 @@ describe("installed live E2E script", () => {
     });
     await once(child, "close");
 
-    expect(() => rpc.assertHealthy()).toThrow("Pi RPC exited with code 7");
+    await expect(rpc.assertHealthy()).rejects.toThrow("Pi RPC exited with code 7");
   });
 
   it("cleans the guarded root when the operation fails", async () => {
