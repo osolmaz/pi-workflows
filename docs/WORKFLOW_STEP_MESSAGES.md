@@ -122,8 +122,10 @@ The extension has one `WorkflowMessageCoordinator` for all message kinds. The se
 
 The coordinator retains only workflow-owned turns. Its local state is absent,
 delivering, running, or settled awaiting acknowledgment. An ordinary chat turn
-never creates an owned turn or blocks later workflow delivery. Recovery binds a
-running turn only to a server-owned message visible in the active Pi branch.
+never creates an owned turn or blocks later workflow delivery. Recovery requires
+an already recorded active workflow turn and its exact message as the latest
+user or custom input in the active Pi branch. A delivered step with no active
+workflow turn cannot claim a later ordinary chat response.
 A delayed acknowledgment retains the same message, turn ID, and exact response;
 it never creates another model attempt. Unconfirmed delivery stays visible as
 unconfirmed instead of being reported as a received step.
@@ -150,9 +152,10 @@ After Pi, the extension, or the server restarts, branch reporting runs before an
 ## Model-turn status
 
 `agent_start` has no message payload. A locally delivered prompt binds its start
-through the coordinator's saved message identity. Late binding and reconnect
-also require the exact message in the active branch. A session view alone does
-not prove that a message caused the current turn.
+through the coordinator's saved message identity. Reconnect requires the same
+recorded active turn, run, session, and message, with no later user or custom
+input in the active branch. Neither a session view nor an old branch entry alone
+proves that a message caused the current turn.
 
 Only pending, unpaused agent requests and explicit follow-ups can open model
 turns. Decisions, notifications, and terminal notices cannot. A stale start can
