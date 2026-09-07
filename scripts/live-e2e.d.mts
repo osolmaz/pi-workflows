@@ -14,10 +14,17 @@ export type LiveE2eOptions = {
 export class RpcSession {
   constructor(child: ChildProcessWithoutNullStreams, context: { profile?: string; root: string });
   events: Record<string, unknown>[];
-  assertHealthy(): void;
+  expectedModelAbort?: (event: Record<string, unknown>) => Promise<boolean>;
+  assertHealthy(): Promise<void>;
   stop(): Promise<void>;
 }
 
+export function isExpectedWorkflowAbort(
+  event: Record<string, unknown>,
+  entries: unknown,
+  state: unknown,
+  runId: string,
+): boolean;
 export function parseArgs(argv: string[]): LiveE2eOptions;
 export function configureModelBudget(profile: string, options: LiveE2eOptions): Promise<void>;
 export function assertSafeTempRoot(root: string, temporaryDirectory?: string): string;

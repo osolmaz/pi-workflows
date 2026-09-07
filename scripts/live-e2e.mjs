@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { isExpectedWorkflowAbort, workflowAbortAttempt } from "./live-e2e-abort.mjs";
+export { isExpectedWorkflowAbort } from "./live-e2e-abort.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMP_PREFIX = "pi-workflows-live-e2e-";
@@ -292,7 +294,10 @@ export class RpcSession {
     );
   }
 
-  assertHealthy() {
+  acceptedModelAborts = new Set();
+  expectedModelAbort;
+
+  async assertHealthy() {
     if (this.exitError !== undefined) throw this.exitError;
     const failure = this.events.find((event) => event.type === "extension_error");
     if (failure !== undefined) {
@@ -301,16 +306,21 @@ export class RpcSession {
       );
     }
     if (this.parseError !== undefined) throw this.parseError;
-    const modelFailure = this.events.find(
+    const modelFailures = this.events.filter(
       (event) =>
         event.type === "message_end" &&
         event.message?.role === "assistant" &&
-        event.message.stopReason === "error",
+        event.message.stopReason === "error" &&
+        !this.acceptedModelAborts.has(event),
     );
-    if (modelFailure !== undefined) {
-      throw new Error(
-        `Pi model request failed: ${modelFailure.message.errorMessage ?? "No error detail"}`,
-      );
+    for (const modelFailure of modelFailures) {
+      if (await this.expectedModelAbort?.(modelFailure)) {
+        this.acceptedModelAborts.add(modelFailure);
+      } else {
+        throw new Error(
+          `Pi model request failed: ${modelFailure.message.errorMessage ?? "No error detail"}\n${this.diagnostic()}`,
+        );
+      }
     }
   }
 
@@ -338,7 +348,7 @@ async function waitFor(description, check, options) {
   const deadline = Date.now() + options.timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
-    options.rpc?.assertHealthy();
+    await options.rpc?.assertHealthy();
     try {
       const result = await check();
       if (result !== false && result !== undefined && result !== null) return result;
@@ -786,7 +796,7 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     context.processOptions(context.project),
   );
   assertOneFrame(completedFrame.stdout, workflowName, "completed");
-  rpc.assertHealthy();
+  await rpc.assertHealthy();
   return runId;
 }
 
@@ -860,6 +870,23 @@ async function runModelWorkflow(context, rpc, client, api) {
     message: `Use the workflow tool to start ${workflowName} exactly once with this input: ${JSON.stringify({ directory: context.project })}. This is a workflow handoff and timeout-recovery test. After the start call, end your reply. Do not run commands or submit a step before its workflow message arrives.`,
   });
   const run = await findRun(client, workflowName, MODEL_TIMEOUT_MS, rpc);
+  rpc.expectedModelAbort = async (event) => {
+    const entries = await rpc.request("get_entries");
+    if (workflowAbortAttempt(event, entries?.entries, run.runId) === undefined) return false;
+    try {
+      // Cancellation can reach Pi before the runner records the timeout outcome.
+      return await waitFor(
+        "the exact aborted attempt's durable timeout",
+        async () => {
+          const view = await client.getRun(run.runId);
+          return isExpectedWorkflowAbort(event, entries?.entries, view?.state, run.runId);
+        },
+        { timeoutMs: RPC_TIMEOUT_MS },
+      );
+    } catch {
+      return false;
+    }
+  };
   const completed = await waitForRunDisplay(client, run.runId, "completed", MODEL_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "model workflow state");
   const expected = {
@@ -946,7 +973,7 @@ async function runModelWorkflow(context, rpc, client, api) {
     context.options.model,
     api,
   );
-  rpc.assertHealthy();
+  await rpc.assertHealthy();
   return { costUsd, runId: run.runId };
 }
 
@@ -1114,7 +1141,7 @@ async function execute(root, options) {
     if (serverReceipt.lifecycleContradictions !== 0 || serverReceipt.ambiguousEffects !== 0) {
       throw new Error(`Server ended with unsafe state: ${JSON.stringify(serverReceipt)}`);
     }
-    rpc.assertHealthy();
+    await rpc.assertHealthy();
     process.stdout.write(
       `${JSON.stringify({
         api: api ?? null,
