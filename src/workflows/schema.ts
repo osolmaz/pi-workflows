@@ -50,6 +50,19 @@ export function assertValidAgentNode(node: AgentNodeDefinition, nodeId = "agent"
   if (typeof node.prompt !== "function") {
     fail(`node ${nodeId} requires a prompt function`);
   }
+  if (
+    node.allowedTools !== undefined &&
+    (!Array.isArray(node.allowedTools) ||
+      node.allowedTools.some(
+        (name) =>
+          typeof name !== "string" ||
+          !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(name) ||
+          name === "workflow",
+      ) ||
+      new Set(node.allowedTools).size !== node.allowedTools.length)
+  ) {
+    fail(`node ${nodeId} allowedTools must contain unique exact tool names other than workflow`);
+  }
   if (node.expectedOutput !== undefined && typeof node.expectedOutput !== "string") {
     const output = node.expectedOutput as { kind?: unknown; maxChars?: unknown };
     if (output === null || typeof output !== "object" || output.kind !== "assistant-message") {

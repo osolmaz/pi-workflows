@@ -733,6 +733,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     activeRecorder?.handleToolEnd(event);
   });
 
+  pi.on("tool_call", (event) => {
+    const reason = workflowMessages.toolCallBlockReason(event.toolName, event.input);
+    if (reason !== undefined) return { block: true, reason };
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     activeRecorder?.settleAttempt();
     workflowMessages.endTurn(lastStopReason, responseEntryId(ctx.sessionManager.getBranch()));

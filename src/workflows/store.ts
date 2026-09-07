@@ -5095,8 +5095,9 @@ function snapshotNode(
       : {}),
     ...(node.statusDetail !== undefined ? { statusDetail: node.statusDetail } : {}),
   };
-  if (node.nodeType === "agent" && node.expectedOutput !== undefined) {
-    common.expectedOutput = node.expectedOutput;
+  if (node.nodeType === "agent") {
+    if (node.expectedOutput !== undefined) common.expectedOutput = node.expectedOutput;
+    if (node.allowedTools !== undefined) common.allowedTools = [...node.allowedTools];
   }
   if (node.nodeType === "compute" && node.settingsRoute === true) {
     common.settingsRoute = true;

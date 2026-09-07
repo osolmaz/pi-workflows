@@ -1313,6 +1313,11 @@ export class WorkflowEngine {
       }
     }
 
+    if (node.allowedTools !== undefined && this.executor.enforcesToolAllowlist !== true) {
+      throw new Error(
+        "This executor cannot enforce the agent tool allowlist; use an origin Pi session",
+      );
+    }
     const authoredPrompt = await node.prompt(context);
     const basePrompt = appendLiveControlInstructions(authoredPrompt, workflow, nodeId, context);
     if (signal.aborted) {
@@ -1328,6 +1333,7 @@ export class WorkflowEngine {
       nodeId,
       attemptId,
       completion: assistant === undefined ? "submit" : "assistant",
+      ...(node.allowedTools === undefined ? {} : { allowedTools: [...node.allowedTools] }),
       ...(typeof node.expectedOutput === "string" ? { expectedOutput: node.expectedOutput } : {}),
       ...(assistant?.maxChars !== undefined ? { maxOutputChars: assistant.maxChars } : {}),
     };
@@ -1885,6 +1891,9 @@ function settingsDefinitionForNode(
  */
 export function appendStepContract(prompt: string, contract: AgentStepContract): string {
   const { requestId, workflowName, nodeId, attemptId, expectedOutput } = contract;
+  if (contract.allowedTools !== undefined) {
+    prompt += `\nThis step permits only these tools: ${JSON.stringify(contract.allowedTools)}. Matching workflow submit/update calls remain allowed. Other tool calls are blocked before execution.`;
+  }
   if (contract.completion === "assistant") {
     return [
       prompt.trimEnd(),

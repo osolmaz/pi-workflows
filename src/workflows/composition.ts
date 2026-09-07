@@ -465,17 +465,21 @@ function wrapNode(
   };
   switch (node.nodeType) {
     case "agent": {
+      const agentCommon = {
+        ...common,
+        ...(node.allowedTools === undefined ? {} : { allowedTools: [...node.allowedTools] }),
+      };
       const prompt = (context: WorkflowNodeContext) => node.prompt(project(context));
       if (typeof node.expectedOutput === "object") {
         return {
-          ...common,
+          ...agentCommon,
           nodeType: "agent",
           prompt,
           expectedOutput: node.expectedOutput,
         };
       }
       return {
-        ...common,
+        ...agentCommon,
         nodeType: "agent",
         prompt,
         ...(node.expectedOutput !== undefined ? { expectedOutput: node.expectedOutput } : {}),

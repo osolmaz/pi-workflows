@@ -84,6 +84,33 @@ export class WorkflowMessageCoordinator {
     return this.turn.message ?? undefined;
   }
 
+  toolCallBlockReason(toolName: string, input: unknown): string | undefined {
+    const turn = this.turn;
+    if (turn === null || turn.phase !== "running") return undefined;
+    if (turn.stopRequested) return "The workflow-owned turn was cancelled; no more tools may run.";
+    const details = turn.message.content.details;
+    const contract = isRecord(details) && isRecord(details.contract) ? details.contract : undefined;
+    if (contract?.allowedTools === undefined) return undefined;
+    if (
+      !Array.isArray(contract.allowedTools) ||
+      contract.allowedTools.some((name) => typeof name !== "string")
+    ) {
+      return "The workflow tool allowlist is invalid; no tools may run.";
+    }
+    if (toolName === "workflow") {
+      if (
+        isRecord(input) &&
+        (input.action === "submit" || input.action === "update") &&
+        typeof contract.requestId === "string" &&
+        input.requestId === contract.requestId
+      )
+        return undefined;
+    } else if (contract.allowedTools.includes(toolName)) {
+      return undefined;
+    }
+    return `Tool ${toolName} is not allowed during this workflow step. Inspect with the allowed tools or report a blocker.`;
+  }
+
   async synchronize(
     pi: ExtensionAPI,
     client: WorkflowClient,

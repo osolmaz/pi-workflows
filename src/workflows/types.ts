@@ -133,6 +133,8 @@ export type AgentExpectedOutput = string | AssistantMessageOutput;
 
 type AgentNodeBase = WorkflowNodeCommon & {
   nodeType: "agent";
+  /** Optional exact tool allowlist. Matching workflow submit/update calls remain allowed. */
+  allowedTools?: string[];
   prompt: (context: WorkflowNodeContext) => MaybePromise<string>;
 };
 
@@ -705,6 +707,7 @@ export type WorkflowNodeSnapshot = {
   statusDetail?: string;
   summary?: string;
   expectedOutput?: AgentExpectedOutput;
+  allowedTools?: string[];
   settingsRoute?: true;
   actionExecution?: "function" | "shell";
   effect?: { type: string; recovery: WorkflowEffectRecovery };
@@ -851,6 +854,7 @@ export type AgentStepContract = {
   nodeId: string;
   attemptId: string;
   completion: AgentStepCompletion;
+  allowedTools?: string[];
   expectedOutput?: string;
   maxOutputChars?: number;
 };
@@ -901,6 +905,8 @@ export interface AgentStepExecutor {
   readonly assistantMessageMode?: "visible" | "park" | "unsupported";
   /** True when the host records active time while this executor parks and resumes an attempt. */
   readonly preservesActiveTimeBudget?: boolean;
+  /** Must enforce the exact contract allowlist before every tool executes. */
+  readonly enforcesToolAllowlist?: boolean;
   runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission>;
 }
 

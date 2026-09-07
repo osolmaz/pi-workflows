@@ -83,13 +83,14 @@ export default defineWorkflow({
 `;
 
 const TIMEOUT_RECOVERY_WORKFLOW = `import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 export default defineWorkflow({
   name: "timeout-recovery-e2e",
   startAt: "work",
   nodes: {
     work: agent({ timeoutMs: 4000, prompt: () => "Save partial work, then run the timeout E2E command until aborted." }),
     recover: agent({
+      allowedTools: ["read"],
       prompt: () => "Inspect the stopped timeout command and preserve the saved partial repair.",
       expectedOutput: '{ "commandsSettled": true }',
       validate: (value) => { if (value.commandsSettled !== true) throw new Error("Command must settle first"); return value; },
@@ -99,6 +100,7 @@ export default defineWorkflow({
       let stopped = false;
       try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") stopped = true; else throw error; }
       if (!stopped) throw new Error("Previous command is still alive");
+      if (existsSync("forbidden-recovery-write")) throw new Error("Reconciliation mutated the repository");
       return { partial: readFileSync(input.partialPath, "utf8"), commandStopped: stopped };
     } }),
   },
@@ -491,6 +493,25 @@ describe.sequential("out-of-process workflow server end to end", () => {
   beforeAll(async () => {
     mock = await startMockOpenAiServer(
       ({ messages, lastRole }) => {
+        const contract = latestStepContract(messages);
+        if (
+          contract?.workflow === "timeout-recovery-e2e" &&
+          contract.step === "recover" &&
+          lastRole === "tool" &&
+          JSON.stringify(messages.at(-1)).includes("not allowed")
+        ) {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              requestId: contract.requestId,
+              output: {
+                commandsSettled: commandHasStopped(path.join(projectDir, "timeout-command.pid")),
+              },
+            },
+          };
+        }
         if (lastRole === "tool") return { kind: "text", text: "Workflow tool result accepted." };
         if (JSON.stringify(messages.at(-1)?.content).includes("START_AUTOIMPLEMENT_HANDOFF_TEST")) {
           const repository = path.join(projectDir, "autoimplement-repo");
@@ -512,7 +533,6 @@ describe.sequential("out-of-process workflow server end to end", () => {
             },
           };
         }
-        const contract = latestStepContract(messages);
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
         if (contract.workflow === "autoimplement") {
           if (contract.step === "workspace/propose")
@@ -569,14 +589,8 @@ describe.sequential("out-of-process workflow server end to end", () => {
           }
           return {
             kind: "tool",
-            toolName: "workflow",
-            args: {
-              action: "submit",
-              requestId: contract.requestId,
-              output: {
-                commandsSettled: commandHasStopped(path.join(projectDir, "timeout-command.pid")),
-              },
-            },
+            toolName: "bash",
+            args: { command: "printf forbidden > forbidden-recovery-write" },
           };
         }
         if (contract.workflow === "pause-resume-e2e") {

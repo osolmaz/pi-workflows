@@ -153,6 +153,8 @@ export type ScriptedResponse =
  * repeated visits to the same node consume queued responses in order.
  */
 export class ScriptedExecutor implements AgentStepExecutor {
+  // Scripted tests execute no model tools.
+  readonly enforcesToolAllowlist = true;
   readonly assistantMessageMode = "visible" as const;
   readonly requests: AgentStepRequest[] = [];
   private readonly responses = new Map<string, ScriptedResponse[]>();
