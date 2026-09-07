@@ -224,6 +224,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   };
 
   const presentInOrder = async (ctx: ExtensionContext): Promise<void> => {
+    workflowMessages.abortCancelledTurn(ctx);
     const prior = presentationTail;
     let release: (() => void) | undefined;
     presentationTail = new Promise<void>((resolve) => {

@@ -701,6 +701,74 @@ describe("WorkflowMessageCoordinator", () => {
     expect(abort).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["branch", "start"])(
+    "aborts while the %s acknowledgment is delayed",
+    async (boundary) => {
+      const coordinator = new WorkflowMessageCoordinator();
+      const message = followUpMessage();
+      const current = view(message);
+      coordinator.updateView(current);
+      const branch: unknown[] = [];
+      let idle = true;
+      const abort = vi.fn();
+      const ctx = {
+        isIdle: () => idle,
+        abort,
+        hasPendingMessages: () => false,
+        sessionManager: { getBranch: () => branch },
+      } as never;
+      const sendMessage = vi.fn((entry: { details: unknown }) => {
+        branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+        idle = false;
+        coordinator.startTurn();
+      });
+      let release!: () => void;
+      const acknowledgment = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reached!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const request = vi.fn(async (options: Record<string, unknown>) => {
+        const isBoundary =
+          boundary === "branch"
+            ? options.operation === "workflowMessage.reportBranch" && branch.length > 0
+            : options.operation === "workflowTurn.report" &&
+              (options.payload as { state: string }).state === "started";
+        if (isBoundary) {
+          reached();
+          await acknowledgment;
+        }
+        return acceptedServerRequest(options);
+      });
+      const beforeTurnEnd = vi.fn(async () => undefined);
+      const sync = () =>
+        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+          beforeTurnEnd,
+        });
+      const delivery = sync();
+      await waiting;
+      coordinator.updateView({
+        ...current,
+        cancelledWorkflowMessageIds: [message.workflowMessageId],
+      });
+      // The extension invokes this before its serialized presentation queue.
+      coordinator.abortCancelledTurn(ctx);
+      await sync();
+      expect(abort).toHaveBeenCalledTimes(1);
+      coordinator.endTurn("aborted", "cancelled-response");
+      idle = true;
+      release();
+      await delivery;
+      await sync();
+      expect(beforeTurnEnd).not.toHaveBeenCalled();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(abort).toHaveBeenCalledTimes(1);
+      expect(coordinator.activeTurnMessage()).toBeUndefined();
+    },
+  );
+
   it("does not bind a later manual turn to a terminal message that was already reported", async () => {
     const branch: Record<string, unknown>[] = [];
     const message = followUpMessage();
