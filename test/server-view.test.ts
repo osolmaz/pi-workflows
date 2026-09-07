@@ -55,8 +55,8 @@ describe("host workflow display reducer", () => {
       "failed",
     );
     expect(display({ paused: true, runnerActive: true }).status).toBe("paused");
-    expect(display({ runnerActive: true }).status).toBe("waiting");
-    expect(display({ originTurnActive: true }).status).toBe("waiting");
+    expect(display({ runnerActive: true }).status).toBe("running");
+    expect(display({ originTurnActive: true }).status).toBe("running");
     expect(display({}).status).toBe("waiting");
     expect(
       display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "parked" }).status,
@@ -64,6 +64,31 @@ describe("host workflow display reducer", () => {
     expect(
       display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "queued" }).status,
     ).toBe("queued");
+  });
+
+  it.each([
+    { kind: "agent", responses: ["update", "submit"] },
+    { kind: "assistant", responses: [] },
+    { kind: "checkpoint", responses: ["answer"] },
+    { kind: "decision", responses: ["human-answer"] },
+    { kind: null, responses: [] },
+  ] as const)("keeps $kind controls correct across activity changes", ({ kind, responses }) => {
+    for (const active of [false, true]) {
+      for (const activity of ["runnerActive", "originTurnActive"] as const) {
+        expect(display({ pendingRequestKind: kind, [activity]: active })).toMatchObject({
+          status: active ? "running" : "waiting",
+          controls: ["pause", "cancel", ...responses],
+        });
+      }
+    }
+    for (const durableStatus of ["completed", "failed", "timed_out", "cancelled"] as const) {
+      expect(
+        display({ pendingRequestKind: kind, durableStatus, originTurnActive: true }).controls,
+      ).toEqual([]);
+    }
+    expect(
+      display({ pendingRequestKind: kind, paused: true, originTurnActive: true }).controls,
+    ).toEqual(["resume", "cancel"]);
   });
 
   it("distinguishes unconfirmed delivery, active work, required results, and pause", () => {
@@ -84,12 +109,12 @@ describe("host workflow display reducer", () => {
 
   it("reports exact activity and allowed controls", () => {
     expect(display({ runnerActive: true })).toMatchObject({
-      status: "waiting",
+      status: "running",
       activity: "supervised_runner",
       controls: ["pause", "cancel", "update", "submit"],
     });
     expect(display({ originTurnActive: true })).toMatchObject({
-      status: "waiting",
+      status: "running",
       activity: "origin_turn",
     });
     expect(display({ paused: true })).toMatchObject({
@@ -751,8 +776,9 @@ describe("host workflow display reducer", () => {
       now: Date.now() - 11_000,
     });
     expect(views.run("run-view")?.display).toMatchObject({
-      status: "waiting",
+      status: "running",
       activity: "origin_turn",
+      controls: ["pause", "cancel", "update", "submit"],
     });
     modelTurnActive = false;
     views.noteOriginActivityChange();
@@ -762,9 +788,9 @@ describe("host workflow display reducer", () => {
     const runningList = views.list();
     expect(runningList.revision).not.toBe(initialList.revision);
     expect(runningList.items).toMatchObject([
-      { display: { status: "waiting", activity: "origin_turn" } },
+      { display: { status: "running", activity: "origin_turn" } },
     ]);
-    expect(views.run("run-view")?.display.status).toBe("waiting");
+    expect(views.run("run-view")?.display.status).toBe("running");
 
     state.connection.prepare("UPDATE runs SET paused = 1 WHERE run_id = ?").run("run-view");
     expect(views.run("run-view")?.display.status).toBe("paused");

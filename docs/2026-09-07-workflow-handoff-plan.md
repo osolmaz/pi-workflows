@@ -2,7 +2,7 @@
 title: Workflow handoff and fixed run definitions
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-07
-status: complete
+status: in-progress
 ---
 
 # Workflow handoff and fixed run definitions
@@ -54,7 +54,23 @@ Run SimpleDoc and relevant Rust viewer checks. Existing unrelated documentation
 issues must be identified, not silently repaired. Push before running
 `pi-reviewer --base main`; address P0/P1 findings before checking CI and merging.
 
-## Completion evidence
+## Remaining display correction
+
+The earlier completion claim was incomplete: active agent work still displayed `waiting`.
+Correct the shared display reducer without changing durable execution state. A nonterminal,
+unpaused run with an active workflow-owned Pi turn or supervised runner displays `running`.
+With no active work, a pending request displays `waiting`. Terminal, ambiguous, and paused states
+retain precedence. Ordinary chat is not workflow activity.
+
+Derive response controls from the exact pending request in both running and waiting displays.
+Keep agent submit/update, ordinary checkpoint answer, and protected human decisions separate.
+Changing a label must not hide valid response controls or expose them on paused or terminal runs.
+Update reducer, list, detail, widget, and real-Pi tests; retain assertions that durable agent state
+can remain waiting while the display says running. Run the required local checks, isolated
+low-cost live E2E, configured Pi Reviewer, and CI before merging. Release, installation, headless
+recovery, and detached-process control are not part of this correction.
+
+## Earlier completion evidence
 
 Implemented in PR #85. Local validation passed with 1,215 unit tests, 13 real-Pi
 mock-provider E2E tests, and 76 Rust tests. Slophammer, Clippy, and format checks

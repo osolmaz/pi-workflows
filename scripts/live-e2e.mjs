@@ -887,6 +887,23 @@ async function runModelWorkflow(context, rpc, client, api) {
       return false;
     }
   };
+  const active = await waitFor(
+    "the live model's running workflow display",
+    async () => {
+      const view = await client.getRun(run.runId);
+      return view?.display?.activity === "origin_turn" ? view : false;
+    },
+    { rpc, timeoutMs: MODEL_TIMEOUT_MS },
+  );
+  if (
+    active.display.status !== "running" ||
+    !active.display.controls.includes("submit") ||
+    !active.display.controls.includes("update")
+  ) {
+    throw new Error(
+      `Active workflow display or response controls are incorrect: ${JSON.stringify(active.display)}`,
+    );
+  }
   const completed = await waitForRunDisplay(client, run.runId, "completed", MODEL_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "model workflow state");
   const expected = {

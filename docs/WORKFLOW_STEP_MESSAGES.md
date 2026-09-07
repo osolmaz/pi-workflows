@@ -180,9 +180,13 @@ advances the request revision, and creates one resumed step message when needed.
 A protected decision keeps its answer revision and decision message. A missing
 submission stays pending: the host adds no reminder turn or hidden retry limit.
 
-Execution status and Pi activity remain separate. A completed run remains
-completed during reporting or follow-up work. A waiting run can have an active
-origin-session turn without changing its execution status to running. Host
+Durable execution status and the visible status remain separate. A completed run remains
+completed during reporting or follow-up work. An agent request can remain durably waiting
+while its workflow-owned Pi turn is active; the visible status is `running` during that work.
+An active supervised runner also displays `running`. Without active workflow work, a pending
+request displays `waiting`. Paused, ambiguous, and terminal states retain precedence. Ordinary
+chat does not count as workflow activity. Response controls follow the exact pending request
+in both running and waiting displays, not the visible label alone. Host
 recovery closes active-time intervals at their last durable samples, not the Pi
 turn itself. Only an idle-session branch report can prove an unended turn lost.
 
