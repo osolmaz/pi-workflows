@@ -651,7 +651,7 @@ async function startPi(context) {
     "--no-themes",
     "--no-prompt-templates",
     "--no-context-files",
-    ...(context.options.runtimeOnly ? ["--no-builtin-tools"] : ["--tools", "bash,read"]),
+    ...(context.options.runtimeOnly ? ["--no-builtin-tools"] : ["--tools", "bash,read,workflow"]),
     "--offline",
     "--approve",
   ];
