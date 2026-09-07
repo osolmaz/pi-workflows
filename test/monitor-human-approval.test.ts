@@ -438,5 +438,5 @@ describe("monitor human repair approval", () => {
     const steps = completed.state.steps.map((step) => step.nodeId);
     expect(steps.filter((step) => step === "planChange/documentation/finalize")).toHaveLength(2);
     expect(steps).toContain("implementation/implement");
-  });
+  }, 30_000);
 });

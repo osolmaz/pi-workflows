@@ -648,7 +648,8 @@ describe.sequential("out-of-process workflow server end to end", () => {
     const run = await waitForRun(
       databasePath,
       "autoimplement",
-      (state) => state.results["workspace/ready"]?.outcome === "ok",
+      (state) =>
+        state.steps.some((step) => step.nodeId === "workspace/ready" && step.outcome === "ok"),
       () => rpcDiagnostic(pi),
     );
     await waitForPiIdle(pi);
@@ -656,7 +657,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
     let worktreePath: string;
     try {
       const saved = store.readRun(run.runId);
-      const workspace = saved?.state.outputs["workspace/ready"];
+      const workspace = saved?.state.steps.find(
+        (step) => step.nodeId === "workspace/ready" && step.outcome === "ok",
+      )?.output;
       if (!isRecord(workspace) || typeof workspace.worktreePath !== "string")
         throw new Error("Autoimplement did not save its worktree");
       worktreePath = workspace.worktreePath;
