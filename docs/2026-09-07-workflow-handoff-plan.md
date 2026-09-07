@@ -2,7 +2,7 @@
 title: Workflow handoff and fixed run definitions
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-07
-status: in-progress
+status: complete
 ---
 
 # Workflow handoff and fixed run definitions
@@ -72,6 +72,13 @@ After that configuration was repaired, the configured reviewer found a P1 recove
 case: a delivered step without an active workflow turn could claim an ordinary
 chat response. Recovery now requires the recorded active turn and its exact
 message as the latest user or custom input. Regression tests cover missing turn
-records and later ordinary input. Final review and CI verification remain pending.
-Recovery of an installed live session is separate work and requires approval to
-update that installation.
+records and later ordinary input. The configured reviewer then completed with no
+findings. All four CI jobs passed; the check job needed an unchanged retry after
+a lease-renewal test timed out. That test also passed locally in the full suite
+and a focused run.
+
+[PR #85](https://github.com/osolmaz/pi-workflows/pull/85) was rebase-merged on
+2026-09-07. The branch was removed. The final live-model run was
+`20260907T033236999Z-live-model-e2e-8c53326e`, with reported cost $0.0004163409.
+No Pi Workflows installation or live run was changed. Recovery of an installed
+live session is separate work and requires approval to update that installation.
