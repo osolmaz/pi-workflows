@@ -65,6 +65,8 @@ retain precedence. Ordinary chat is not workflow activity.
 Derive response controls from the exact pending request in both running and waiting displays.
 Keep agent submit/update, ordinary checkpoint answer, and protected human decisions separate.
 Changing a label must not hide valid response controls or expose them on paused or terminal runs.
+Invalidate cached list/session views when supervised runner activity starts or ends, as well as
+when origin Pi activity changes. A cached running status must return to waiting after handoff.
 Update reducer, list, detail, widget, and real-Pi tests; retain assertions that durable agent state
 can remain waiting while the display says running. Run the required local checks, isolated
 low-cost live E2E, configured Pi Reviewer, and CI before merging. Release, installation, headless
