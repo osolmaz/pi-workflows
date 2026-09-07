@@ -854,7 +854,11 @@ async function runModelWorkflow(context, rpc, client, api) {
   stage(
     `running the real-model workflow through ${context.options.provider}/${context.options.model}`,
   );
-  await rpc.request("prompt", { message: `/workflow ${workflowName}` });
+  await rpc.request("prompt", { message: "Reply READY without using tools." });
+  await waitForPiIdle(rpc, MODEL_TIMEOUT_MS);
+  await rpc.request("prompt", {
+    message: `Use the workflow tool to start ${workflowName} exactly once with empty input. This is a workflow handoff test. After the start call, end your reply. Do not run commands or submit a step before its workflow message arrives.`,
+  });
   const run = await findRun(client, workflowName);
   const completed = await waitForRunDisplay(client, run.runId, "completed", MODEL_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "model workflow state");
@@ -864,8 +868,8 @@ async function runModelWorkflow(context, rpc, client, api) {
       `Model workflow returned the wrong output: ${JSON.stringify(state.finalOutput)}`,
     );
   }
-  if (!Array.isArray(state.steps) || state.steps.length !== 1) {
-    throw new Error(`Model workflow recorded ${String(state.steps?.length)} steps instead of one`);
+  if (!Array.isArray(state.steps) || state.steps.length !== 2) {
+    throw new Error(`Model workflow recorded ${String(state.steps?.length)} steps instead of two`);
   }
   const step = requireObject(state.steps[0], "model workflow step");
   if (typeof step.attemptId !== "string" || step.outcome !== "ok") {
@@ -877,6 +881,19 @@ async function runModelWorkflow(context, rpc, client, api) {
 
   const entriesData = requireObject(await rpc.request("get_entries"), "Pi entries response");
   if (!Array.isArray(entriesData.entries)) throw new Error("Pi returned no session entries");
+  const starts = entriesData.entries.flatMap((entry) =>
+    entry.message?.role === "assistant" && Array.isArray(entry.message.content)
+      ? entry.message.content.filter(
+          (item) =>
+            item.type === "toolCall" &&
+            item.name === "workflow" &&
+            item.arguments?.action === "start" &&
+            item.arguments?.workflow === workflowName,
+        )
+      : [],
+  );
+  if (starts.length !== 1)
+    throw new Error(`Expected one model workflow start call, observed ${starts.length}`);
   const deliveries = entriesData.entries.filter(
     (entry) =>
       entry.type === "custom_message" &&

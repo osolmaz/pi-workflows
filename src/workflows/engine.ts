@@ -329,7 +329,6 @@ export class WorkflowEngine {
     runId: string,
     options: {
       workflowSource?: WorkflowSource;
-      force?: boolean;
       resumeInteractionAttemptId?: string;
     } = {},
   ): Promise<WorkflowRunResult> {
@@ -343,7 +342,7 @@ export class WorkflowEngine {
     const stored = await this.store.readRunState(runId);
     if (stored === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
     const sourceMismatch = workflowIdentityMismatch(stored, workflow, options.workflowSource);
-    if (sourceMismatch && options.force !== true) {
+    if (sourceMismatch) {
       throw new WorkflowSourceChangedError(runId);
     }
     const state = await this.store.prepareRunResume(runId);
@@ -395,7 +394,6 @@ export class WorkflowEngine {
         ...(point.nodeId !== null ? { resumeAt: point.nodeId } : {}),
         ...(resumedAttempt !== undefined ? { resumedAttemptId: resumedAttempt.attemptId } : {}),
         replayedSteps: state.steps.length,
-        ...(sourceMismatch ? { workflowSourceMismatch: true, forced: true } : {}),
       },
     });
     await this.onRunStarted?.(runId, state);
@@ -533,9 +531,7 @@ export class WorkflowEngine {
       ...(await this.resolveTitleBounded(workflow, input)),
       ...(workflowSource !== undefined ? { workflowSource } : {}),
       ...(composition?.sources.length ? { workflowSources: composition.sources } : {}),
-      ...(composition?.snapshot.mounts.length
-        ? { definitionDigest: definitionDigest(workflow) }
-        : {}),
+      definitionDigest: definitionDigest(workflow),
       startedAt: now,
       updatedAt: now,
       status: "running",
@@ -1778,8 +1774,7 @@ export function workflowIdentityMismatch(
   const metadata = compositionMetadata(workflow);
   const currentSources = metadata?.sources ?? [];
   if (!isDeepStrictEqual(state.workflowSources ?? [], currentSources)) return true;
-  const currentDigest = metadata?.snapshot.mounts.length ? definitionDigest(workflow) : undefined;
-  return state.definitionDigest !== currentDigest;
+  return state.definitionDigest !== definitionDigest(workflow);
 }
 
 function definitionDigest(workflow: WorkflowDefinition): string {

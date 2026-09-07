@@ -204,7 +204,7 @@
         " ▶ ✓ first [checkpoint] 1 attempt · 1.0s",
         "                     │",
         "                     ▼",
-        "  ⏸ second [checkpoint] 1 attempt · 1.0s ■"
+        "  ○ second [checkpoint] 1 attempt · 1.0s ■"
       ]
     },
     {
@@ -223,7 +223,7 @@
         "  ┌─────────────────────────────┐",
         "  │           second            │ ■",
         "  ├─────────────────────────────┤",
-        "  │ ◆ checkpoint      ⏸ waiting │",
+        "  │ ◆ checkpoint      ○ waiting │",
         "  │ ↻ 1                  ◷ 1.0s │",
         "  │ … human decision · reviewer │",
         "  └─────────────────────────────┘"

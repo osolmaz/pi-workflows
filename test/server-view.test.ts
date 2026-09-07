@@ -33,6 +33,7 @@ const base: WorkflowDisplayFacts = {
   runnerActive: false,
   originTurnActive: false,
   pendingRequestKind: "agent",
+  requestDeliveryConfirmed: true,
   errorMessage: null,
 };
 
@@ -63,6 +64,22 @@ describe("host workflow display reducer", () => {
     expect(
       display({ durableStatus: "running", pendingRequestKind: null, queueStatus: "queued" }).status,
     ).toBe("queued");
+  });
+
+  it("distinguishes unconfirmed delivery, active work, required results, and pause", () => {
+    expect(display({ requestDeliveryConfirmed: false }).reason).toBe(
+      "Workflow step delivery is not confirmed.",
+    );
+    expect(display({ originTurnActive: true }).reason).toBe(
+      "The agent is working on the workflow step.",
+    );
+    expect(display({}).reason).toBe("The workflow needs its assigned agent result.");
+    expect(display({ pendingRequestKind: "assistant" }).reason).toBe(
+      "The workflow needs its assigned visible response.",
+    );
+    expect(display({ paused: true, requestDeliveryConfirmed: false }).reason).toBe(
+      "The workflow is durably paused.",
+    );
   });
 
   it("reports exact activity and allowed controls", () => {

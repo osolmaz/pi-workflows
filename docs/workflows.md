@@ -5,6 +5,23 @@ covers the file format, every node type, edge routing, the step contract the
 model sees, and how runs behave at runtime. For durable state, see
 [SQLITE_STATE.md](SQLITE_STATE.md).
 
+## Starting and resuming runs
+
+A successful start call confirms that a run was created. Wait for the delivered
+step contract before submitting an agent result. Report worktree creation or
+implementation progress only after the corresponding recorded steps succeed.
+The status view distinguishes unconfirmed step delivery, active agent work,
+required results, and a durable pause. Waiting uses a different glyph from pause.
+
+Resume uses the run's original source and graph, including ordinary workflows
+without included workflows. Source and graph checks run before any durable
+mutation. `WorkflowEngine.resumeRun` has no `force` option. Restore the original
+source to resume its accepted work, or explicitly start a new run for changed
+code. A new run does not inherit outputs, approvals, or effect receipts.
+File and built-in source identities verify code; callers of the direct engine
+API must supply source identity to detect callback-body changes that leave the
+structural graph unchanged.
+
 ## Workflow files
 
 A workflow is a TypeScript module whose default export is `defineWorkflow(...)`.

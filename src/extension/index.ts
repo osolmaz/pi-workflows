@@ -850,7 +850,7 @@ async function executeCommand(
         },
       });
       return {
-        message: `Started hosted workflow ${resolved.workflowName} as ${runId}.`,
+        message: `Created hosted workflow ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract.`,
         details: { action: "start", runId, response: response.receipt ?? null },
       };
     }

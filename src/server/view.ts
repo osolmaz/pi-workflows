@@ -774,6 +774,7 @@ export class ServerViewStore {
       runnerActive: this.hasLiveRunner(queue.runId),
       originTurnActive: this.hasActivity(queue.runId),
       pendingRequestKind: this.pendingRequestKind(queue.runId),
+      requestDeliveryConfirmed: this.requestDeliveryConfirmed(queue.runId),
       errorMessage: state?.error ?? queue.errorMessage,
     });
   }
@@ -801,6 +802,18 @@ export class ServerViewStore {
       | { kind: Exclude<WorkflowDisplayFacts["pendingRequestKind"], null> }
       | undefined;
     return row?.kind ?? null;
+  }
+
+  private requestDeliveryConfirmed(runId: string): boolean {
+    const row = this.state.connection
+      .prepare(
+        `SELECT m.status FROM interactive_requests i
+       JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+       WHERE i.run_id = ? AND i.status = 'pending'
+       ORDER BY m.order_number DESC LIMIT 1`,
+      )
+      .get(runId) as { status: string } | undefined;
+    return row?.status === "sent";
   }
 
   private hasAmbiguousEffect(runId: string): boolean {
@@ -836,6 +849,7 @@ export class ServerViewStore {
       this.hasLiveRunner(runId),
       this.hasActivity(runId),
       this.pendingRequestKind(runId),
+      this.requestDeliveryConfirmed(runId),
       this.hasAmbiguousEffect(runId),
     ].join(":");
   }
@@ -869,6 +883,7 @@ export type WorkflowDisplayFacts = {
   runnerActive: boolean;
   originTurnActive: boolean;
   pendingRequestKind: "agent" | "assistant" | "checkpoint" | "decision" | null;
+  requestDeliveryConfirmed: boolean;
   errorMessage: string | null;
 };
 
@@ -909,6 +924,10 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
             : facts.pendingRequestKind === "assistant"
               ? "The workflow needs its assigned visible response."
               : "The workflow is waiting.";
+    if (facts.pendingRequestKind === "agent" || facts.pendingRequestKind === "assistant") {
+      if (facts.originTurnActive) reason = "The agent is working on the workflow step.";
+      else if (!facts.requestDeliveryConfirmed) reason = "Workflow step delivery is not confirmed.";
+    }
   } else if (activity !== null) {
     status = "running";
   } else if (facts.queueStatus === "parked" || facts.queueStatus === "queued") {

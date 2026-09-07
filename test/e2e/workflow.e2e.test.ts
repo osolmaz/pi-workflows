@@ -9,7 +9,7 @@ import { buildWidgetView } from "../../src/extension/widget.js";
 import { branchWorkflowEntries } from "../../src/extension/workflow-message-coordinator.js";
 import { SqliteResourceManagerStore } from "../../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../../src/server/state.js";
-import { workflowStatePath } from "../../src/state/database.js";
+import { StateDatabase, workflowStatePath } from "../../src/state/database.js";
 import { parseJson, type JsonValue } from "../../src/state/json.js";
 import { WorkflowRunQueueStore } from "../../src/workflows/queue.js";
 import type { InteractiveRequestRecord } from "../../src/workflows/requests.js";
@@ -449,8 +449,44 @@ describe.sequential("out-of-process workflow server end to end", () => {
     mock = await startMockOpenAiServer(
       ({ messages, lastRole }) => {
         if (lastRole === "tool") return { kind: "text", text: "Workflow tool result accepted." };
+        if (JSON.stringify(messages.at(-1)?.content).includes("START_AUTOIMPLEMENT_HANDOFF_TEST")) {
+          const repository = path.join(projectDir, "autoimplement-repo");
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "start",
+              workflow: "autoimplement",
+              input: {
+                task: "Verify workspace preparation in this temporary test repository.",
+                plan: { summary: "Prepare a temporary worktree, then stop for test cancellation." },
+                repository,
+                baseBranch: "main",
+                workspaceMode: "worktree",
+                merge: false,
+                scope: `Only inspect and create a local task worktree in ${repository}. Do not implement, push, open a pull request, merge, release, deploy, or touch another repository.`,
+              },
+            },
+          };
+        }
         const contract = latestStepContract(messages);
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
+        if (contract.workflow === "autoimplement") {
+          if (contract.step === "workspace/propose")
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: {
+                action: "submit",
+                requestId: contract.requestId,
+                output: { branchName: "test/handoff", reason: "Temporary workflow handoff test." },
+              },
+            };
+          return {
+            kind: "text",
+            text: "The workspace test is complete. Await cancellation without further work.",
+          };
+        }
         if (contract.workflow === "assistant-e2e" && contract.step === "prepare") {
           return {
             kind: "tool",
@@ -584,6 +620,89 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await mock?.close();
   });
 
+  it("starts Autoimplement from normal chat and submits its first delivered step", async () => {
+    const repository = path.join(projectDir, "autoimplement-repo");
+    await fs.mkdir(repository);
+    await execFileAsync("git", ["init", "-b", "main", repository]);
+    await execFileAsync(
+      "git",
+      [
+        "-c",
+        "user.name=Workflow Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "test: initialize workspace",
+      ],
+      { cwd: repository },
+    );
+    pi.send({ id: "ordinary-chat", type: "prompt", message: "Respond with a short greeting." });
+    await waitForPiIdle(pi);
+    pi.send({
+      id: "tool-autoimplement-start",
+      type: "prompt",
+      message: "START_AUTOIMPLEMENT_HANDOFF_TEST",
+    });
+    const run = await waitForRun(
+      databasePath,
+      "autoimplement",
+      (state) => state.results["workspace/ready"]?.outcome === "ok",
+      () => rpcDiagnostic(pi),
+    );
+    await waitForPiIdle(pi);
+    const store = new WorkflowRunStore(databasePath, { readOnly: true });
+    let worktreePath: string;
+    try {
+      const saved = store.readRun(run.runId);
+      const workspace = saved?.state.outputs["workspace/ready"];
+      if (!isRecord(workspace) || typeof workspace.worktreePath !== "string")
+        throw new Error("Autoimplement did not save its worktree");
+      worktreePath = workspace.worktreePath;
+      await fs.stat(worktreePath);
+      expect(saved?.state.steps.filter((step) => step.nodeId === "workspace/propose")).toHaveLength(
+        1,
+      );
+      const state = new StateDatabase({ filePath: databasePath, mode: "read-only" });
+      try {
+        const rows = state.connection
+          .prepare(`SELECT i.status, i.consumed_at AS consumedAt, m.status AS deliveryStatus,
+          (SELECT COUNT(*) FROM interactive_submissions s WHERE s.request_id = i.request_id AND s.outcome = 'accepted') AS accepted
+          FROM interactive_requests i JOIN node_attempts a ON a.attempt_id = i.attempt_id
+          JOIN workflow_messages m ON m.source_id = i.request_id
+          WHERE i.run_id = ? AND a.node_id = 'workspace/propose'`)
+          .all(run.runId);
+        expect(rows).toEqual([
+          {
+            status: "settled",
+            consumedAt: expect.any(Number),
+            deliveryStatus: "sent",
+            accepted: 1,
+          },
+        ]);
+      } finally {
+        state.close();
+      }
+    } finally {
+      store.close();
+    }
+    pi.send({
+      id: "cancel-autoimplement-test",
+      type: "prompt",
+      message: `/workflow cancel ${run.runId}`,
+    });
+    await waitForRun(
+      databasePath,
+      "autoimplement",
+      (state) => state.status === "cancelled",
+      () => rpcDiagnostic(pi),
+    );
+    await waitForPiIdle(pi);
+    await execFileAsync("git", ["worktree", "remove", worktreePath], { cwd: repository });
+    await execFileAsync("git", ["branch", "-D", "test/handoff"], { cwd: repository });
+  });
+
   it("marks a completed agent node done while the next agent turn runs", async () => {
     const requestStart = mock.requests.length;
     pi.send({
@@ -665,7 +784,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
         runView.display.status,
       ).lines;
       expect(lines.find((line) => line.includes("first"))).toContain("✓");
-      expect(lines.find((line) => line.includes("second"))).toContain("⏸");
+      expect(lines.find((line) => line.includes("second"))).toContain("○");
       expect(lines.join("\n")).toContain("second · waiting");
     } finally {
       store.close();

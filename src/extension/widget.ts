@@ -54,7 +54,7 @@ export function nodeGlyph(
     return "◐";
   }
   if (state.waitingOn === nodeId) {
-    return "⏸";
+    return displayStatus === "paused" || state.paused === true ? "⏸" : "○";
   }
   const result = state.results[nodeId];
   if (!result) {

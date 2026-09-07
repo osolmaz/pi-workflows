@@ -54,12 +54,14 @@ export function isRunParkedError(error: unknown): error is RunParkedError {
   return error instanceof RunParkedError;
 }
 
-/** The workflow source changed after the run started; resume needs force. */
+/** A run can resume only with its original workflow source and definition. */
 export class WorkflowSourceChangedError extends Error {
   readonly runId: string;
 
   constructor(runId: string) {
-    super(`Workflow source changed since run ${runId} started; pass force to resume anyway`);
+    super(
+      `Workflow source or definition changed since run ${runId} started; restore the original definition to resume, or explicitly start a new run`,
+    );
     this.name = "WorkflowSourceChangedError";
     this.runId = runId;
   }
