@@ -738,12 +738,13 @@ describe("host workflow display reducer", () => {
       },
     });
     let modelTurnActive = true;
+    let runnerActive = false;
     const views = new ServerViewStore(
       state,
       queue,
       serverState,
       runs,
-      () => false,
+      () => runnerActive,
       () => modelTurnActive,
     );
     const readRun = vi.spyOn(runs, "readRun");
@@ -761,6 +762,23 @@ describe("host workflow display reducer", () => {
         workflowSource: { kind: "builtin", id: "echo", revision: "test" },
       },
     });
+    const waitingRevision = views.list().revision;
+    runnerActive = true;
+    views.noteWorkflowActivityChange();
+    const runnerList = views.list();
+    expect(runnerList.revision).not.toBe(waitingRevision);
+    expect(runnerList.items[0]?.display).toMatchObject({
+      status: "running",
+      activity: "supervised_runner",
+    });
+    expect(views.run("run-view")?.display.status).toBe("running");
+    runnerActive = false;
+    views.noteWorkflowActivityChange();
+    const parkedList = views.list();
+    expect(parkedList.revision).not.toBe(runnerList.revision);
+    expect(parkedList.items[0]?.display).toMatchObject({ status: "waiting", activity: null });
+    expect(views.run("run-view")?.display.status).toBe("waiting");
+
     const message = serverState.workflowMessages.listSession("session-view")[0];
     if (message === undefined) throw new Error("workflow message missing");
     serverState.workflowMessages.adoptBranch(
@@ -781,10 +799,10 @@ describe("host workflow display reducer", () => {
       controls: ["pause", "cancel", "update", "submit"],
     });
     modelTurnActive = false;
-    views.noteOriginActivityChange();
+    views.noteWorkflowActivityChange();
     expect(views.run("run-view")?.display.status).toBe("waiting");
     modelTurnActive = true;
-    views.noteOriginActivityChange();
+    views.noteWorkflowActivityChange();
     const runningList = views.list();
     expect(runningList.revision).not.toBe(initialList.revision);
     expect(runningList.items).toMatchObject([

@@ -621,7 +621,7 @@ export class WorkflowServer {
       this.sessionCoordinators.delete(sessionId);
       changed = true;
     }
-    if (changed) this.views.noteOriginActivityChange();
+    if (changed) this.views.noteWorkflowActivityChange();
   }
 
   private async handleClientRequest(
@@ -693,7 +693,7 @@ export class WorkflowServer {
               needsTimerResume: true,
             } satisfies SessionCoordinator;
             this.sessionCoordinators.set(sessionId, coordinator);
-            this.views.noteOriginActivityChange();
+            this.views.noteWorkflowActivityChange();
             this.publishViews();
             return clientResponse(request.requestId, "accepted", {
               subscribed: true,
@@ -1017,7 +1017,7 @@ export class WorkflowServer {
       coordinator.needsTimerResume = false;
     });
     for (const runId of reconciledRunIds) this.tryEnsureTerminalWorkflowMessage(runId);
-    this.views.noteOriginActivityChange();
+    this.views.noteWorkflowActivityChange();
     this.publishViews();
     return clientResponse(request.requestId, "accepted", {
       recorded: true,
@@ -1108,7 +1108,7 @@ export class WorkflowServer {
       return workflowTurnReceipt("active", this.serverState.workflowMessages.startTurn(report));
     });
     coordinator.modelTurnActive = receipt.ownership === "active";
-    this.views.noteOriginActivityChange();
+    this.views.noteWorkflowActivityChange();
     this.publishViews();
     if (receipt.ownership === "settled") this.tryEnsureTerminalWorkflowMessage(report.runId);
     return clientResponse(request.requestId, outcome, receipt as unknown as JsonValue);
@@ -3773,6 +3773,7 @@ export class WorkflowServer {
       contentDigests: new Set(),
     };
     this.activeRuns.set(runId, active);
+    this.views.noteWorkflowActivityChange();
     this.clearPendingStart(runId, claimToken);
     try {
       this.runStore.synchronizeRevision(runId);
@@ -3825,6 +3826,7 @@ export class WorkflowServer {
     } finally {
       this.reapRunnerDescendants(envelope.runnerEpoch);
       this.activeRuns.delete(runId);
+      this.views.noteWorkflowActivityChange();
       this.requestAutomaticStatePrune();
     }
   }
