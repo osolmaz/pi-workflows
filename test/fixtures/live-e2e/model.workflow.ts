@@ -36,8 +36,11 @@ export default defineWorkflow({
         const source = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(path.join(directory, "live-timeout-partial.txt"))}, 'saved repair'); fs.writeFileSync(${JSON.stringify(path.join(directory, "live-timeout-command.pid"))}, String(process.pid)); setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 180000);`;
         return [
           "This is an intentional timeout and cancellation test in an isolated temporary directory.",
-          "Call bash exactly once with the command below. It saves partial work and waits. Do not submit a workflow result or shorten the wait. The workflow will abort this command and deliver a recovery step.",
-          `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`,
+          "Call bash exactly once with the exact JSON arguments below, including timeout: 180 (seconds). Do not use a 10-second or other shorter tool timeout. The command saves partial work and waits. Do not submit a workflow result. The workflow will abort this command after its 60-second active-work deadline and deliver a recovery step.",
+          JSON.stringify({
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`,
+            timeout: 180,
+          }),
         ].join("\n");
       },
     }),
