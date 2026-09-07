@@ -880,8 +880,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
         runView.display.status,
       ).lines;
       expect(lines.find((line) => line.includes("first"))).toContain("✓");
-      expect(lines.find((line) => line.includes("second"))).toContain("○");
-      expect(lines.join("\n")).toContain("second · waiting");
+      expect(lines.find((line) => line.includes("second"))).toContain("◐");
+      expect(lines.join("\n")).not.toContain("second · waiting");
+      expect(lines[0]).toContain("[running]");
     } finally {
       store.close();
     }
