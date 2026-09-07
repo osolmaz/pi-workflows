@@ -135,6 +135,8 @@ export type WorkflowSessionView = {
   nextWorkflowMessageId: string | null;
   openWorkflowMessageId: string | null;
   openWorkflowTurn: WorkflowTurn | null;
+  /** Source requests cancelled by timeout or lifecycle control; delivery can still be sent. */
+  cancelledWorkflowMessageIds: string[];
   coordinatorEpoch: string | null;
   coordinatorActive: boolean;
   branchReportRequired: boolean;

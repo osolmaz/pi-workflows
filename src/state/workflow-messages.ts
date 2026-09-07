@@ -345,33 +345,6 @@ export class WorkflowMessageStore {
     });
   }
 
-  settleOpenTurnsForRun(
-    runId: string,
-    stopReason: WorkflowTurnStopReason = "lost",
-    now: number = Date.now(),
-  ): WorkflowTurn[] {
-    return this.state.transaction(() => {
-      const open = this.state.connection
-        .prepare(
-          `SELECT workflow_turn_id AS workflowTurnId, workflow_message_id AS workflowMessageId,
-                  run_id AS runId, target_session_id AS targetSessionId, state,
-                  stop_reason AS stopReason, response_session_entry_id AS responseSessionEntryId,
-                  started_at AS startedAt, ended_at AS endedAt
-           FROM workflow_turns WHERE run_id = ? AND state = 'started' ORDER BY started_at`,
-        )
-        .all(runId)
-        .filter(isWorkflowTurnRow)
-        .map(mapTurn);
-      this.state.connection
-        .prepare(
-          `UPDATE workflow_turns SET state = 'ended', stop_reason = ?, ended_at = ?
-           WHERE run_id = ? AND state = 'started'`,
-        )
-        .run(stopReason, now, runId);
-      return open.map((turn) => this.requireTurn(turn.workflowTurnId));
-    });
-  }
-
   cancelPendingForRun(
     runId: string,
     now: number = Date.now(),

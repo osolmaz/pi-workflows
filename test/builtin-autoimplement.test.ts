@@ -155,6 +155,26 @@ function summaryExecutor(): ScriptedExecutor {
     }));
 }
 
+function verificationPlan(id = "verify") {
+  return {
+    checks: [
+      {
+        id,
+        command: process.execPath,
+        args: ["-e", "process.stdout.write('passed')"],
+        cwd: repository,
+        timeoutMs: 60_000,
+        maxOutputChars: 100_000,
+        readOnly: true,
+        baseEligible: true,
+        changedFileScope: false,
+        findingFormat: "text",
+      },
+    ],
+    untested: [],
+  };
+}
+
 function commonExecutor(publication: unknown = published()): ScriptedExecutor {
   return summaryExecutor()
     .respond("implement", {
@@ -169,21 +189,7 @@ function commonExecutor(publication: unknown = published()): ScriptedExecutor {
     .respond("classifyImplementation", {
       output: { route: "verify", summary: "ready", evidence: "implementation complete" },
     })
-    .respond("planVerification", {
-      output: {
-        commands: [
-          {
-            id: "verify",
-            command: process.execPath,
-            args: ["-e", "process.stdout.write('passed')"],
-            cwd: repository,
-            timeoutMs: 60_000,
-            maxOutputChars: 100_000,
-          },
-        ],
-        untested: [],
-      },
-    })
+    .respond("localVerification/planChecks", { output: verificationPlan() })
     .respond("verify", {
       output: {
         passed: true,
@@ -308,7 +314,7 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
     .respond("redesign/documentation/inspectDocumentation", {
       output: {
         route: "current",
-        files: ["docs/workflows.md"],
+        files: ["docs/WORKFLOWS.md"],
         digests: {},
         reason: "The revised plan is documented.",
         evidence: "checked",
@@ -944,70 +950,6 @@ describe("built-in autoimplement", () => {
     ).rejects.toThrow("relatedFailures must be an array");
 
     await expect(
-      validate("planVerification", {
-        commands: [
-          {
-            id: "unsafe",
-            command: "bash",
-            args: ["-c", "npm test"],
-            cwd: repository,
-            timeoutMs: 1_000,
-            maxOutputChars: 1_000,
-          },
-        ],
-        untested: [],
-      }),
-    ).rejects.toThrow("not allowed");
-    const safeVerification = {
-      commands: [
-        {
-          id: "verify",
-          command: process.execPath,
-          args: ["-e", "process.stdout.write('ok')"],
-          cwd: repository,
-          timeoutMs: 1_000,
-          maxOutputChars: 1_000,
-        },
-      ],
-      untested: [],
-    };
-    await expect(
-      validate("planVerification", safeVerification, {
-        input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
-        outputs: { implement: { repositories: "bad" } },
-      }),
-    ).resolves.toMatchObject({ commands: [{ id: "verify" }] });
-    await expect(
-      validate(
-        "planVerification",
-        {
-          ...safeVerification,
-          commands: [{ ...safeVerification.commands[0]!, cwd: path.join(repository, "other") }],
-        },
-        {
-          input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
-        },
-      ),
-    ).rejects.toThrow("must match the prepared workspace");
-    await expect(
-      validate(
-        "planVerification",
-        {
-          ...safeVerification,
-          commands: [
-            safeVerification.commands[0]!,
-            {
-              ...safeVerification.commands[0]!,
-              id: "verify-second",
-            },
-          ],
-        },
-        {
-          input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
-        },
-      ),
-    ).resolves.toMatchObject({ commands: [{ id: "verify" }, { id: "verify-second" }] });
-    await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
     ).rejects.toThrow("one of retry, blocked");
     await expect(validate("repairCiCommand", { route: "unknown", reason: "bad" })).rejects.toThrow(
@@ -1368,21 +1310,7 @@ describe("built-in autoimplement", () => {
           "Revise the rollout plan and deploy the supported artifact with rollback ready.",
         ),
       })
-      .respond("planVerification", {
-        output: {
-          commands: [
-            {
-              id: "verify-cutover",
-              command: process.execPath,
-              args: ["-e", "process.stdout.write('passed')"],
-              cwd: repository,
-              timeoutMs: 60_000,
-              maxOutputChars: 100_000,
-            },
-          ],
-          untested: [],
-        },
-      })
+      .respond("localVerification/planChecks", { output: verificationPlan("verify-cutover") })
       .respond("verify", {
         output: {
           passed: true,
@@ -2037,21 +1965,7 @@ describe("built-in autoimplement", () => {
       .respond("classifyImplementation", {
         output: { route: "verify", summary: "ready", evidence: "implementation complete" },
       })
-      .respond("planVerification", {
-        output: {
-          commands: [
-            {
-              id: "verify",
-              command: process.execPath,
-              args: ["-e", "process.stdout.write('passed')"],
-              cwd: repository,
-              timeoutMs: 60_000,
-              maxOutputChars: 100_000,
-            },
-          ],
-          untested: [],
-        },
-      })
+      .respond("localVerification/planChecks", { output: verificationPlan() })
       .respond("verify", {
         output: {
           passed: true,
@@ -2321,11 +2235,8 @@ describe("built-in autoimplement", () => {
       .respond("classifyImplementation", {
         output: { route: "verify", summary: "ready", evidence: "done" },
       })
-      .respond("planVerification", {
-        output: {
-          commands: [verificationCheck],
-          untested: [],
-        },
+      .respond("localVerification/planChecks", {
+        output: { checks: [verificationCheck], untested: [] },
       })
       .respond(
         "finalizeDefaultBranch",
@@ -2370,7 +2281,9 @@ describe("built-in autoimplement", () => {
     });
     expect(executor.requests.some((request) => request.contract.nodeId === "publish")).toBe(false);
     expect(
-      executor.requests.some((request) => request.contract.nodeId === "planVerification"),
+      executor.requests.some(
+        (request) => request.contract.nodeId === "localVerification/planChecks",
+      ),
     ).toBe(false);
     expect(
       state.steps
@@ -2388,7 +2301,6 @@ describe("built-in autoimplement", () => {
     ).toMatchObject({ switch: { cases: { blocked: "createBlockerClaim" } } });
     for (const nodeId of [
       "implement",
-      "planVerification",
       "fix",
       "publish",
       "addressP2",

@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   runCommandBatch,
+  MAX_COMMAND_BATCH_ITEMS,
   validateCommandBatchRequest,
   type CommandBatchItem,
   type CommandBatchItemResult,
@@ -13,6 +14,7 @@ import {
 } from "../workflows/command-batch.js";
 import { action, agent, compute, defineWorkflow, manualEffect } from "../workflows/definition.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
+import { IMPLEMENTATION_TIMEOUT_MS } from "./agent-timeouts.js";
 import { validateVerificationCommandSafety } from "./autoimplement-command-batches.js";
 import {
   parsePreparedWorkspace,
@@ -88,6 +90,14 @@ export type ChangeVerificationInput = {
   untested?: string[];
   plan?: unknown;
   maxConcurrency?: number;
+};
+
+type VerificationPlan = { checks: VerificationCheck[]; untested: string[] };
+type RepairReconciliation = {
+  route: "verify" | "retry" | "blocked";
+  commandsSettled: boolean;
+  evidence: string[];
+  reason: string;
 };
 
 type ExecutionState = {
@@ -220,6 +230,9 @@ export function parseChangeVerificationInput(value: unknown): ChangeVerification
   const checks = (record.checks as unknown[] | undefined)?.map((check, index) =>
     parseCheck(check, workspace, index),
   );
+  if (checks !== undefined && checks.length > MAX_COMMAND_BATCH_ITEMS) {
+    throw new Error(`verification checks must contain at most ${MAX_COMMAND_BATCH_ITEMS} entries`);
+  }
   const ids = new Set<string>();
   for (const check of checks ?? []) {
     if (ids.has(check.id)) throw new Error(`verification check id is duplicated: ${check.id}`);
@@ -243,12 +256,16 @@ export function parseChangeVerificationInput(value: unknown): ChangeVerification
   };
 }
 
-function parsePlannedChecks(value: unknown, context: WorkflowNodeContext): VerificationCheck[] {
+function parsePlannedChecks(value: unknown, context: WorkflowNodeContext): VerificationPlan {
   const record = requireRecord(value, "verification command plan");
   if (!Array.isArray(record.checks) || record.checks.length === 0)
     throw new Error("verification command plan checks must be a non-empty array");
-  const input = context.input as ChangeVerificationInput;
-  return record.checks.map((check, index) => parseCheck(check, input.workspace, index));
+  const input = parseChangeVerificationInput({
+    ...(context.input as ChangeVerificationInput),
+    checks: record.checks,
+    untested: record.untested,
+  });
+  return { checks: input.checks!, untested: input.untested ?? [] };
 }
 
 async function runBatch(
@@ -489,17 +506,28 @@ function finding(
 }
 
 function previousRepairAttempts(context: WorkflowNodeContext): RepairAttempt[] {
-  return context.state.steps.flatMap((step) => {
-    if (
-      (step.nodeId !== "mechanicalRepair" &&
-        step.nodeId !== "semanticRepair" &&
-        step.nodeId !== "judge") ||
-      step.outcome !== "ok"
-    )
-      return [];
-    const output = step.output as RepairAttempt;
-    return output?.attempt === undefined ? [] : [output];
-  });
+  const attempts: RepairAttempt[] = [];
+  let fingerprint = "";
+  for (const step of context.state.steps) {
+    if (step.nodeId === "repairGuard" && step.outcome === "ok") {
+      const guard = step.output as { fingerprint?: string };
+      fingerprint = guard.fingerprint ?? fingerprint;
+    }
+    if (step.nodeId !== "mechanicalRepair" && step.nodeId !== "semanticRepair") continue;
+    if (step.outcome === "ok") {
+      const output = step.output as RepairAttempt;
+      if (output?.attempt !== undefined) attempts.push(output);
+    } else if (step.outcome === "timed_out" || step.outcome === "failed") {
+      attempts.push({
+        attempt: attempts.length + 1,
+        kind: step.nodeId === "semanticRepair" ? "semantic" : "mechanical",
+        fingerprint,
+        changedFiles: [],
+        result: `${step.nodeId} ended with ${step.outcome}; inspect existing work before retrying.`,
+      });
+    }
+  }
+  return attempts;
 }
 
 export function classifyVerification(
@@ -534,11 +562,11 @@ export function classifyVerification(
     }
     if (!check.baseEligible || !check.readOnly) {
       if (!resultPassed(candidateResult))
-        related.push(
+        unknown.push(
           finding(
             check,
-            "related",
-            "Candidate-only check failed.",
+            "unknown",
+            "Candidate-only check failed; base comparison is unavailable.",
             candidateFingerprint,
             candidateResult,
           ),
@@ -682,7 +710,9 @@ export function classifyVerification(
 
 function checksForContext(context: WorkflowNodeContext): VerificationCheck[] {
   const input = context.input as ChangeVerificationInput;
-  return input.checks ?? (context.outputs.planChecks as VerificationCheck[]);
+  return input.checks?.length
+    ? input.checks
+    : (context.outputs.planChecks as VerificationPlan).checks;
 }
 
 function latestExecution(context: WorkflowNodeContext): ExecutionState {
@@ -704,7 +734,12 @@ function latestExecution(context: WorkflowNodeContext): ExecutionState {
 }
 
 function latestClassification(context: WorkflowNodeContext): ChangeVerificationResult {
-  return classifyVerification(context.input as ChangeVerificationInput, latestExecution(context));
+  const input = context.input as ChangeVerificationInput;
+  const plan = context.outputs.planChecks as VerificationPlan | undefined;
+  return classifyVerification(
+    { ...input, untested: [...(input.untested ?? []), ...(plan?.untested ?? [])] },
+    latestExecution(context),
+  );
 }
 
 function statusPaths(output: string): string[] {
@@ -952,8 +987,11 @@ function parseSemanticRepair(value: unknown, context: WorkflowNodeContext): Repa
 function repairGuard(context: WorkflowNodeContext): Record<string, unknown> {
   const classification = latestClassification(context);
   const attempts = previousRepairAttempts(context);
-  const repeated = attempts.some(
-    (attempt) => attempt.fingerprint === classification.failureFingerprint,
+  const repeated = context.state.steps.some(
+    (step) =>
+      (step.nodeId === "semanticRepair" || step.nodeId === "mechanicalRepair") &&
+      step.outcome === "ok" &&
+      (step.output as RepairAttempt)?.fingerprint === classification.failureFingerprint,
   );
   if (attempts.length >= MAX_REPAIR_ATTEMPTS || repeated) {
     return {
@@ -979,6 +1017,27 @@ function repairGuard(context: WorkflowNodeContext): Record<string, unknown> {
     route: mechanical ? "mechanical" : "semantic",
     attempt: attempts.length + 1,
     fingerprint: classification.failureFingerprint,
+  };
+}
+
+function parseRepairReconciliation(value: unknown): RepairReconciliation {
+  const record = requireRecord(value, "repair reconciliation");
+  if (record.route !== "verify" && record.route !== "retry" && record.route !== "blocked")
+    throw new Error("repair reconciliation route must be verify, retry, or blocked");
+  if (typeof record.commandsSettled !== "boolean")
+    throw new Error("repair reconciliation commandsSettled must be a boolean");
+  if (record.route !== "blocked" && !record.commandsSettled)
+    throw new Error("Repair cannot continue until previous commands have settled");
+  const evidence = stringArray(record.evidence, "repair reconciliation evidence").map((item) =>
+    requireString(item, "repair reconciliation evidence item"),
+  );
+  if (evidence.length === 0)
+    throw new Error("repair reconciliation needs command disposition evidence");
+  return {
+    route: record.route,
+    commandsSettled: record.commandsSettled,
+    evidence,
+    reason: requireString(record.reason, "repair reconciliation reason"),
   };
 }
 
@@ -1012,18 +1071,22 @@ export const changeVerificationWorkflow = defineWorkflow({
       }),
     }),
     planChecks: agent({
+      statusDetail: "planning independent verification commands",
       prompt: ({ input }) => {
         const request = input as ChangeVerificationInput;
         return [
           "Propose the required direct verification commands because no complete program command list was supplied.",
           "Do not run commands. Use no shell wrapper, stdin, environment override, Git mutation, publication, merge, release, or deployment.",
           "Each check needs id, executable, argument array, exact prepared cwd, timeout, output limit, readOnly, baseEligible, changedFileScope, and findingFormat.",
+          "Set readOnly only when the command does not modify repository source. Set baseEligible only when the same executable and arguments safely test a separate base checkout by changing cwd alone.",
+          "Candidate-bound paths, including absolute Docker bind mounts, require baseEligible=false. Do not claim base-comparison evidence for candidate-only checks.",
+          "List checks that cannot run locally under untested. Do not omit required remote checks or mark them completed.",
           `Prepared workspace: ${JSON.stringify(request.workspace)}`,
           `Changed files: ${JSON.stringify(request.changedFiles ?? [])}`,
         ].join("\n");
       },
       expectedOutput:
-        '{ "checks": [{ "id": "stable", "command": "npm", "args": ["run", "check"], "cwd": "/absolute/workspace", "timeoutMs": 2700000, "maxOutputChars": 1000000, "readOnly": true, "baseEligible": true, "changedFileScope": false, "findingFormat": "text" }] }',
+        '{ "checks": [{ "id": "stable", "command": "npm", "args": ["run", "check"], "cwd": "/absolute/workspace", "timeoutMs": 2700000, "maxOutputChars": 1000000, "readOnly": true, "baseEligible": true, "changedFileScope": false, "findingFormat": "text" }], "untested": [] }',
       validate: parsePlannedChecks,
     }),
     runCandidate: action({
@@ -1037,12 +1100,14 @@ export const changeVerificationWorkflow = defineWorkflow({
         await runBase(context, checksForContext(context as unknown as WorkflowNodeContext)),
     }),
     classify: compute({ run: latestClassification }),
+    routeRepairReconciliation: compute({ run: ({ outputs }) => outputs.reconcileRepair }),
     repairGuard: compute({ run: repairGuard }),
     mechanicalRepair: action({
       effect: manualEffect("pi-workflows.change-verification.mechanical-repair"),
       run: runMechanicalRepair,
     }),
     semanticRepair: agent({
+      timeoutMs: IMPLEMENTATION_TIMEOUT_MS,
       prompt: (context) => {
         const input = context.input as ChangeVerificationInput;
         const result = latestClassification(context);
@@ -1058,6 +1123,26 @@ export const changeVerificationWorkflow = defineWorkflow({
       },
       expectedOutput: '{ "changedFiles": ["file"], "result": "repair made" }',
       validate: parseSemanticRepair,
+    }),
+    reconcileRepair: agent({
+      timeoutMs: 30 * 60_000,
+      statusDetail: "checking interrupted repair work and commands",
+      prompt: (context) =>
+        [
+          "A semantic repair failed or timed out. Reconcile the existing work before any replacement work.",
+          "Do not edit repository files or launch repair, verification, publication, deployment, or paid work in this step.",
+          "Inspect the worktree, diff, saved receipts, and command sessions through the available tools. An interrupted tool wait or an aborted Pi turn does not prove its process stopped.",
+          "Identify every command from the interrupted attempt and establish that it finished or was safely stopped. You may request termination only for commands owned by that attempt and only within existing authority.",
+          "If command ownership or settlement cannot be established, return blocked with commandsSettled=false and the missing evidence. Do not infer that no output means no active process.",
+          "Return verify when completed or partial edits can now be checked without repeating them. Return retry only when commands have settled and implementation work remains; the existing repair bound still applies.",
+          "Evidence must identify checked command sessions or receipts and their terminal outcomes, or explain how the complete turn evidence proves no commands were launched.",
+          `Workspace: ${JSON.stringify((context.input as ChangeVerificationInput).workspace)}`,
+          `Repair attempts: ${JSON.stringify(previousRepairAttempts(context))}`,
+          `Verification: ${JSON.stringify(latestClassification(context))}`,
+        ].join("\n"),
+      expectedOutput:
+        '{ "route": "verify", "commandsSettled": true, "evidence": ["Exact command receipts and observed terminal outcomes"], "reason": "Existing edits can be verified" }',
+      validate: parseRepairReconciliation,
     }),
     judge: agent({
       prompt: (context) =>
@@ -1097,11 +1182,30 @@ export const changeVerificationWorkflow = defineWorkflow({
           | { reason?: string; evidence?: string[] }
           | undefined;
         const result = guard?.result ?? latestClassification(context);
+        const reconciliationStep = context.state.steps
+          .filter((step) => step.nodeId === "reconcileRepair")
+          .at(-1);
+        const reconciliation =
+          reconciliationStep?.outcome === "ok"
+            ? (reconciliationStep.output as RepairReconciliation)
+            : undefined;
+        const recoveryFailed =
+          reconciliationStep !== undefined && reconciliationStep.outcome !== "ok";
         return {
           ...result,
           route: "blocked",
-          reason: judgment?.reason ?? result.reason,
-          evidence: [...result.evidence, ...(judgment?.evidence ?? [])],
+          reason:
+            guard?.result?.reason ??
+            (recoveryFailed
+              ? "Repair reconciliation did not establish safe command settlement."
+              : reconciliation?.route === "blocked"
+                ? reconciliation.reason
+                : (judgment?.reason ?? result.reason)),
+          evidence: [
+            ...result.evidence,
+            ...(judgment?.evidence ?? []),
+            ...(reconciliation?.evidence ?? []),
+          ],
         };
       },
     }),
@@ -1134,7 +1238,27 @@ export const changeVerificationWorkflow = defineWorkflow({
       },
     },
     { from: "mechanicalRepair", to: "runCandidate" },
-    { from: "semanticRepair", to: "runCandidate" },
+    {
+      from: "semanticRepair",
+      switch: {
+        on: "$result.outcome",
+        cases: { ok: "runCandidate", timed_out: "reconcileRepair", failed: "reconcileRepair" },
+      },
+    },
+    {
+      from: "reconcileRepair",
+      switch: {
+        on: "$result.outcome",
+        cases: { ok: "routeRepairReconciliation", timed_out: "blocked", failed: "blocked" },
+      },
+    },
+    {
+      from: "routeRepairReconciliation",
+      switch: {
+        on: "$.route",
+        cases: { verify: "runCandidate", retry: "repairGuard", blocked: "blocked" },
+      },
+    },
     {
       from: "judge",
       switch: {

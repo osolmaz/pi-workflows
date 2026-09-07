@@ -251,6 +251,331 @@ describe("change verification", () => {
     expect(executor.requests.map((request) => request.contract.nodeId)).toEqual(["planChecks"]);
   });
 
+  it("rejects candidate-bound comparison before accepting a corrected plan", async () => {
+    const { repository, workspace } = await fixture("verification-plan-correction");
+    const directory = await makeTempDir("verification-fake-docker");
+    const executable = path.join(directory, "docker");
+    const calls = path.join(directory, "calls");
+    await fs.writeFile(
+      executable,
+      `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ') + '\\n'); console.log('candidate checked');\n`,
+      { mode: 0o755 },
+    );
+    const candidate = {
+      ...check(repository, ""),
+      command: executable,
+      args: [
+        "run",
+        "--rm",
+        "--mount",
+        `type=bind,src=${repository},dst=/workspace`,
+        "test-image",
+        "check",
+      ],
+    };
+    const input = { originatingWorkflow: "autoimplement", qualifiedNode: "verify", workspace };
+    const executor = new ScriptedExecutor().respond("planChecks", async (request) => {
+      const identity = { ...request.contract };
+      expect(await request.accept({ checks: [candidate] })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("must not reference the prepared workspace"),
+      });
+      expect(() => parseChangeVerificationInput({ ...input, checks: [candidate] })).toThrow(
+        "must not reference the prepared workspace",
+      );
+      await expect(fs.access(calls)).rejects.toThrow();
+      expect(request.contract).toEqual(identity);
+      const corrected = { checks: [{ ...candidate, baseEligible: false }], untested: [] };
+      expect(parseChangeVerificationInput({ ...input, ...corrected }).checks).toMatchObject([
+        { baseEligible: false },
+      ]);
+      const accepted = await request.accept(corrected);
+      if (!accepted.ok) throw new Error(accepted.error);
+      return { output: accepted.value };
+    });
+    const { state } = await run(input, executor);
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ route: "ready", baseCommands: { items: [] } });
+    expect(executor.requests).toHaveLength(1);
+    expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1);
+  });
+
+  it("validates planned check identities, working directories, and batch limits before acceptance", async () => {
+    const { repository, workspace } = await fixture("verification-plan-validation");
+    const candidate = check(repository, "process.exit(0)");
+    const executor = new ScriptedExecutor()
+      .respond("planChecks", async (request) => {
+        for (const checks of [
+          [],
+          [candidate, candidate],
+          [{ ...candidate, id: "invalid id" }],
+          [{ ...candidate, cwd: path.join(repository, "other") }],
+          [{ ...candidate, readOnly: false }],
+          Array.from({ length: 65 }, (_, index) => ({ ...candidate, id: `check-${index}` })),
+        ]) {
+          expect(await request.accept({ checks })).toMatchObject({ ok: false });
+        }
+        const accepted = await request.accept({
+          checks: [candidate],
+          untested: ["Remote probe still required"],
+        });
+        if (!accepted.ok) throw new Error(accepted.error);
+        return { output: accepted.value };
+      })
+      .respond("judge", {
+        output: {
+          route: "blocked",
+          reason: "Remote evidence is missing",
+          evidence: ["Remote probe still required"],
+        },
+      });
+    const { state } = await run(
+      { originatingWorkflow: "autoimplement", qualifiedNode: "verify", workspace },
+      executor,
+    );
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      untestedChecks: [{ summary: "Remote probe still required" }],
+    });
+  });
+
+  it("keeps a candidate-only failure unknown instead of calling it unrelated", async () => {
+    const { repository, workspace } = await fixture("verification-candidate-only-failure");
+    const executor = new ScriptedExecutor().respond("judge", {
+      output: {
+        route: "blocked",
+        reason: "No base comparison is available",
+        evidence: ["Candidate-only check failed"],
+      },
+    });
+    const { state } = await run(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...check(repository, "process.exit(1)"), baseEligible: false }],
+      },
+      executor,
+    );
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      unrelatedFailures: [],
+      unknownFailures: [{ checkId: "docs" }],
+      baseCommands: { items: [] },
+    });
+  });
+
+  it("verifies completed edits after a semantic repair timeout without repeating the repair", async () => {
+    const { repository, workspace } = await fixture("verification-repair-timeout");
+    await fs.writeFile(path.join(repository, "README.md"), "broken\n");
+    const executor = new ScriptedExecutor()
+      .respond("semanticRepair", async () => {
+        await fs.writeFile(path.join(repository, "README.md"), "fixed\n");
+        return new Promise<never>(() => undefined);
+      })
+      .respond("reconcileRepair", async (request) => {
+        expect(await fs.readFile(path.join(repository, "README.md"), "utf8")).toBe("fixed\n");
+        expect(
+          await request.accept({
+            route: "retry",
+            commandsSettled: false,
+            evidence: ["Process still active"],
+            reason: "retry",
+          }),
+        ).toMatchObject({ ok: false });
+        expect(
+          await request.accept({
+            route: "verify",
+            commandsSettled: true,
+            evidence: [],
+            reason: "verify",
+          }),
+        ).toMatchObject({ ok: false });
+        const accepted = await request.accept({
+          route: "verify",
+          commandsSettled: true,
+          evidence: ["Test executor completed its file write and launched no subprocess"],
+          reason: "Saved edits are ready for verification",
+        });
+        if (!accepted.ok) throw new Error(accepted.error);
+        return { output: accepted.value };
+      });
+    const workflow = {
+      ...changeVerificationWorkflow,
+      nodes: {
+        ...changeVerificationWorkflow.nodes,
+        semanticRepair: { ...changeVerificationWorkflow.nodes.semanticRepair!, timeoutMs: 200 },
+      },
+    };
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("repair-timeout-recovery"),
+    });
+    const { state } = await engine.run(workflow, {
+      originatingWorkflow: "autoimplement",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(
+          repository,
+          "process.exit(require('node:fs').readFileSync('README.md','utf8').includes('broken') ? 1 : 0)",
+        ),
+      ],
+    });
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      route: "ready",
+      repairAttempts: [{ attempt: 1, result: expect.stringContaining("timed_out") }],
+    });
+    expect(executor.requests.map((request) => request.contract.nodeId)).toEqual([
+      "semanticRepair",
+      "reconcileRepair",
+    ]);
+    expect(
+      state.steps.filter((step) => step.nodeId === "semanticRepair").map((step) => step.outcome),
+    ).toEqual(["timed_out"]);
+  });
+
+  it("counts failed repairs against the existing bound even when reconciliation requests retries", async () => {
+    const { repository, workspace } = await fixture("verification-repair-bound");
+    await fs.writeFile(path.join(repository, "README.md"), "broken\n");
+    const executor = new ScriptedExecutor()
+      .respond("semanticRepair", { error: "temporary repair failure" })
+      .respond("reconcileRepair", {
+        output: {
+          route: "retry",
+          commandsSettled: true,
+          evidence: ["Executor failed before any command or mutation"],
+          reason: "Safe to retry within the bound",
+        },
+      });
+    const { state } = await run(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [
+          check(
+            repository,
+            "process.exit(require('node:fs').readFileSync('README.md','utf8').includes('broken') ? 1 : 0)",
+          ),
+        ],
+      },
+      executor,
+    );
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      reason: "The repair attempt limit was reached.",
+      repairAttempts: [{ attempt: 1 }, { attempt: 2 }],
+    });
+    expect(
+      executor.requests.filter((request) => request.contract.nodeId === "semanticRepair"),
+    ).toHaveLength(2);
+  });
+
+  it("blocks recovery when command settlement remains unknown", async () => {
+    const { repository, workspace } = await fixture("verification-repair-unknown-command");
+    await fs.writeFile(path.join(repository, "README.md"), "broken\n");
+    const executor = new ScriptedExecutor()
+      .respond("semanticRepair", { error: "tool wait interrupted" })
+      .respond("reconcileRepair", {
+        output: {
+          route: "blocked",
+          commandsSettled: false,
+          evidence: ["The command owner cannot expose a terminal receipt"],
+          reason: "Command settlement is unknown",
+        },
+      });
+    const { state } = await run(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [
+          check(
+            repository,
+            "process.exit(require('node:fs').readFileSync('README.md','utf8').includes('broken') ? 1 : 0)",
+          ),
+        ],
+      },
+      executor,
+    );
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      reason: "Command settlement is unknown",
+      evidence: expect.arrayContaining(["The command owner cannot expose a terminal receipt"]),
+    });
+    expect(state.steps.filter((step) => step.nodeId === "runCandidate")).toHaveLength(1);
+    expect(
+      executor.requests.filter((request) => request.contract.nodeId === "semanticRepair"),
+    ).toHaveLength(1);
+  });
+
+  it("reports a blocked result when reconciliation also times out", async () => {
+    const { repository, workspace } = await fixture("verification-reconciliation-timeout");
+    await fs.writeFile(path.join(repository, "README.md"), "broken\n");
+    const executor = new ScriptedExecutor()
+      .respond("semanticRepair", { error: "interrupted" })
+      .respond("reconcileRepair", { hang: true });
+    const workflow = {
+      ...changeVerificationWorkflow,
+      nodes: {
+        ...changeVerificationWorkflow.nodes,
+        reconcileRepair: { ...changeVerificationWorkflow.nodes.reconcileRepair!, timeoutMs: 30 },
+      },
+    };
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("reconciliation-timeout"),
+    });
+    const { state } = await engine.run(workflow, {
+      originatingWorkflow: "autoimplement",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(
+          repository,
+          "process.exit(require('node:fs').readFileSync('README.md','utf8').includes('broken') ? 1 : 0)",
+        ),
+      ],
+    });
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      reason: "Repair reconciliation did not establish safe command settlement.",
+    });
+  });
+
+  it("keeps intentional cancellation terminal rather than starting reconciliation", async () => {
+    const { repository, workspace } = await fixture("verification-repair-cancel");
+    await fs.writeFile(path.join(repository, "README.md"), "broken\n");
+    let engine: WorkflowEngine;
+    const executor = new ScriptedExecutor().respond("semanticRepair", async () => {
+      engine.cancel();
+      return new Promise<never>(() => undefined);
+    });
+    engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("repair-cancel"),
+    });
+    const { state } = await engine.run(changeVerificationWorkflow, {
+      originatingWorkflow: "autoimplement",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(
+          repository,
+          "process.exit(require('node:fs').readFileSync('README.md','utf8').includes('broken') ? 1 : 0)",
+        ),
+      ],
+    });
+    expect(state.status).toBe("cancelled");
+    expect(executor.requests.some((request) => request.contract.nodeId === "reconcileRepair")).toBe(
+      false,
+    );
+  });
+
   it("reports the same candidate and base backlog as unrelated and continues", async () => {
     const { repository, workspace } = await fixture("change-verification-baseline");
     const { state } = await run({

@@ -75,6 +75,7 @@ function view(message: WorkflowMessage): WorkflowSessionView {
     nextWorkflowMessageId: message.status === "pending" ? message.workflowMessageId : null,
     openWorkflowMessageId: null,
     openWorkflowTurn: null,
+    cancelledWorkflowMessageIds: [],
     coordinatorEpoch: "epoch-1",
     coordinatorActive: true,
     branchReportRequired: false,
@@ -577,7 +578,7 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(2);
   });
 
-  it("clears local ownership when the host says that no workflow owns the turn", async () => {
+  it("aborts rejected turn ownership and retains it until settlement", async () => {
     const branch: Record<string, unknown>[] = [];
     const message = followUpMessage();
     const coordinator = new WorkflowMessageCoordinator();
@@ -593,22 +594,111 @@ describe("WorkflowMessageCoordinator", () => {
         },
       };
     });
+    let idle = true;
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+      idle = false;
       coordinator.startTurn();
     });
-
-    await coordinator.synchronize(
-      { sendMessage } as never,
-      { request } as never,
-      {
-        isIdle: () => true,
-        hasPendingMessages: () => false,
-        sessionManager: { getBranch: () => branch },
-      } as never,
-    );
-
+    const abort = vi.fn();
+    const ctx = {
+      isIdle: () => idle,
+      abort,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const beforeTurnEnd = vi.fn(async () => undefined);
+    const sync = () =>
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        beforeTurnEnd,
+      });
+    await sync();
+    await sync();
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    coordinator.endTurn("aborted", "aborted-response");
+    idle = true;
+    await sync();
+    expect(beforeTurnEnd).not.toHaveBeenCalled();
     expect(coordinator.activeTurnMessage()).toBeUndefined();
+    idle = false;
+    coordinator.startTurn();
+    await sync();
+    expect(abort).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts an expired owned turn once and waits for its exact settlement receipt", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    const current = view(message);
+    coordinator.updateView(current);
+    const branch: unknown[] = [];
+    let idle = true;
+    const abort = vi.fn();
+    const ctx = {
+      isIdle: () => idle,
+      abort,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+    });
+    let loseEndAck = true;
+    const request = vi.fn(async (options: Record<string, unknown>) => {
+      if (
+        options.operation === "workflowTurn.report" &&
+        (options.payload as { state: string }).state === "ended" &&
+        loseEndAck
+      ) {
+        loseEndAck = false;
+        throw new Error("lost end acknowledgment");
+      }
+      return acceptedServerRequest(options);
+    });
+    const beforeTurnEnd = vi.fn(async () => undefined);
+    const sync = () =>
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        beforeTurnEnd,
+      });
+    await sync();
+    coordinator.updateView({
+      ...current,
+      cancelledWorkflowMessageIds: [message.workflowMessageId],
+    });
+    await sync();
+    await sync();
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(
+      request.mock.calls.filter(([call]) => (call.payload as { state?: string }).state === "ended"),
+    ).toHaveLength(0);
+    coordinator.endTurn("aborted", "expired-response");
+    idle = true;
+    await expect(sync()).rejects.toThrow("lost end acknowledgment");
+    idle = false;
+    coordinator.startTurn();
+    coordinator.endTurn("completed", "ordinary-response");
+    await sync();
+    expect(beforeTurnEnd).not.toHaveBeenCalled();
+    expect(abort).toHaveBeenCalledTimes(1);
+    const ends = request.mock.calls.filter(
+      ([call]) => (call.payload as { state?: string }).state === "ended",
+    );
+    expect(ends).toHaveLength(2);
+    expect(ends[0]![0].payload).toEqual(ends[1]![0].payload);
+    expect(ends[1]![0].payload).toMatchObject({
+      stopReason: "aborted",
+      responseSessionEntryId: "expired-response",
+    });
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+    coordinator.startTurn();
+    await sync();
+    expect(abort).toHaveBeenCalledTimes(1);
   });
 
   it("does not bind a later manual turn to a terminal message that was already reported", async () => {

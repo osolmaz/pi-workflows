@@ -277,14 +277,15 @@ describe("server durable state", () => {
       runId: interaction.runId,
       targetSessionId: interaction.targetSessionId,
     });
-    expect(server.workflowMessages.settleOpenTurnsForRun(interaction.runId)).toEqual([
-      expect.objectContaining({
+    expect(
+      server.workflowMessages.endTurn({
+        workflowMessageId: message.workflowMessageId,
         workflowTurnId: "turn-lost",
-        state: "ended",
+        runId: interaction.runId,
+        targetSessionId: interaction.targetSessionId,
         stopReason: "lost",
       }),
-    ]);
-    expect(server.workflowMessages.settleOpenTurnsForRun(interaction.runId)).toEqual([]);
+    ).toMatchObject({ workflowTurnId: "turn-lost", state: "ended", stopReason: "lost" });
     const validating = server.beginInteractionValidation({
       requestId: interaction.requestId,
       submissionId: "submission-rejected",

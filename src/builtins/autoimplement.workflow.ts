@@ -17,18 +17,17 @@ import {
 import { digest } from "../workflows/human-decision.js";
 import { allowSettingsPath, workflowSettings } from "../workflows/settings.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
+import { IMPLEMENTATION_TIMEOUT_MS } from "./agent-timeouts.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
 import {
   parseAutoimplementConcurrency,
   parseCiInspectionBatch,
   parsePublishedRepositories,
-  parseVerificationCommandPlan,
   reviewerCommand,
   type AutoimplementConcurrency,
   type CiInspectionBatch,
   type PublishedRepositories,
   type PublishedRepository,
-  type VerificationCommandPlan,
 } from "./autoimplement-command-batches.js";
 import changeVerificationWorkflow, {
   type ChangeVerificationInput,
@@ -172,7 +171,6 @@ const MAX_TIMEOUT_FALLBACKS = 3;
 const MAX_TIMEOUT_FALLBACK_EVIDENCE = 8;
 const TIMEOUT_FALLBACK_SOURCES = [
   "implement",
-  "planVerification",
   "verify",
   "fix",
   "publish",
@@ -192,7 +190,6 @@ type TimeoutFallbackRoute = "retry" | "verify" | "review" | "ci" | "deliver" | "
 
 const TIMEOUT_FALLBACK_ROUTES: Record<TimeoutFallbackSource, readonly TimeoutFallbackRoute[]> = {
   implement: ["retry", "replan", "blocked"],
-  planVerification: ["retry", "verify", "replan", "blocked"],
   verify: ["retry", "verify", "replan", "blocked"],
   fix: ["retry", "replan", "blocked"],
   publish: ["retry", "replan", "blocked"],
@@ -363,7 +360,7 @@ function timeoutFallbackTarget(context: WorkflowNodeContext): { route: string } 
   const fallback = context.outputs.timeoutFallback as TimeoutFallbackResult;
   if (fallback.route !== "retry") {
     const routes: Record<Exclude<TimeoutFallbackRoute, "retry">, string> = {
-      verify: "selectVerificationPath",
+      verify: "localVerification",
       review: "selectReviewCommands",
       ci: "inspectCi",
       deliver: "finalizeDelivery",
@@ -875,20 +872,6 @@ function parseFinding(value: unknown, severity: ReviewFinding["severity"]): Revi
     kind: finding.kind,
     summary: requireString(finding.summary, `${severity} finding summary`),
   };
-}
-
-function parseVerificationForContext(
-  value: unknown,
-  context: WorkflowNodeContext,
-): VerificationCommandPlan {
-  const plan = parseVerificationCommandPlan(value);
-  const root = preparedWorkspace(context).worktreePath ?? preparedWorkspace(context).repository;
-  for (const command of plan.commands) {
-    if (path.resolve(command.cwd) !== path.resolve(root)) {
-      throw new Error(`verification command cwd must match the prepared workspace: ${root}`);
-    }
-  }
-  return plan;
 }
 
 function parsePublishedForContext(
@@ -1415,28 +1398,17 @@ export const autoimplementWorkflow = defineWorkflow({
     localVerification: includeWorkflow(changeVerificationWorkflow, {
       input: (context): ChangeVerificationInput => {
         const request = context.input as AutoimplementInput;
-        const plan =
-          request.verificationChecks === undefined
-            ? latestOutput<VerificationCommandPlan>(context, ["planVerification"])
-            : { commands: [], untested: [] };
         const implementation = latestOutput<Record<string, unknown>>(context, ["implement"]);
         return {
           originatingWorkflow: "autoimplement",
           qualifiedNode: "autoimplement/localVerification",
           workspace: preparedWorkspace(context),
-          checks:
-            request.verificationChecks ??
-            plan.commands.map((command) => ({
-              ...command,
-              readOnly: true,
-              baseEligible: true,
-              changedFileScope: false,
-              findingFormat: "text" as const,
-            })),
+          ...(request.verificationChecks === undefined
+            ? {}
+            : { checks: request.verificationChecks }),
           changedFiles: Array.isArray(implementation.files)
             ? implementation.files.filter((file): file is string => typeof file === "string")
             : [],
-          untested: plan.untested,
           plan: currentPlan(context),
           maxConcurrency: concurrency(context).verification,
         };
@@ -1590,7 +1562,7 @@ export const autoimplementWorkflow = defineWorkflow({
       run: ({ outputs }) => outputs.finalizeDelivery,
     }),
     implement: agent({
-      timeoutMs: 8 * 60 * 60_000,
+      timeoutMs: IMPLEMENTATION_TIMEOUT_MS,
       statusDetail: "implementing",
       prompt: (context) => {
         const request = context.input as AutoimplementInput;
@@ -1688,26 +1660,6 @@ export const autoimplementWorkflow = defineWorkflow({
       validate: parseBlockerChallenge,
     }),
     routeChallenge: compute({ run: challengeTarget }),
-    selectVerificationPath: compute({
-      run: ({ input }) => ({
-        route: (input as AutoimplementInput).verificationChecks === undefined ? "plan" : "verify",
-      }),
-    }),
-    planVerification: agent({
-      timeoutMs: 15 * 60_000,
-      statusDetail: "planning independent verification commands",
-      prompt: (context) =>
-        [
-          "Select all required local verification commands for the implementation.",
-          "Return one or more commands for the prepared repository workspace.",
-          "Use exact executables and argument arrays without shell wrappers, environment overrides, stdin, Git or GitHub mutations, package publication, deployment, merge, or release commands.",
-          "Use the prepared absolute workspace path as cwd for every command, explicit timeouts no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
-          "List checks that cannot run locally under untested.",
-          `Prepared workspace: ${JSON.stringify(preparedWorkspace(context))}`,
-        ].join("\n"),
-      expectedOutput: `{ "commands": [{ "id": "stable-id", "command": "npm", "args": ["run", "check"], "cwd": "/absolute/repository", "timeoutMs": 2700000, "maxOutputChars": 1000000 }], "untested": ["remaining check"] }`,
-      validate: parseVerificationForContext,
-    }),
     routeVerifiedWorkspace: compute({
       run: (context) => ({
         route:
@@ -2098,7 +2050,7 @@ export const autoimplementWorkflow = defineWorkflow({
         on: "$.route",
         cases: {
           implement: "implement",
-          planVerification: "planVerification",
+          localVerification: "localVerification",
           fix: "fix",
           publish: "publish",
           addressP2: "addressP2",
@@ -2130,7 +2082,7 @@ export const autoimplementWorkflow = defineWorkflow({
       switch: {
         on: "$.route",
         cases: {
-          verify: "selectVerificationPath",
+          verify: "localVerification",
           redesign: "redesign",
           fix: "fix",
           blocked: "createBlockerClaim",
@@ -2174,21 +2126,6 @@ export const autoimplementWorkflow = defineWorkflow({
         },
       },
     },
-    {
-      from: "selectVerificationPath",
-      switch: { on: "$.route", cases: { plan: "planVerification", verify: "localVerification" } },
-    },
-    {
-      from: "planVerification",
-      switch: {
-        on: "$result.outcome",
-        cases: {
-          ok: "localVerification",
-          timed_out: "timeoutFallbackGuard",
-          failed: "timeoutFallbackGuard",
-        },
-      },
-    },
     { from: "localVerification.ready", to: "routeVerifiedWorkspace" },
     { from: "localVerification.blocked", to: "createBlockerClaim" },
     {
@@ -2221,7 +2158,7 @@ export const autoimplementWorkflow = defineWorkflow({
       switch: {
         on: "$result.outcome",
         cases: {
-          ok: "selectVerificationPath",
+          ok: "localVerification",
           timed_out: "timeoutFallbackGuard",
           failed: "timeoutFallbackGuard",
         },

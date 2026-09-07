@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -442,20 +443,35 @@ export default defineWorkflow({
   return workflowPath;
 }
 
-async function writeBlockingWorkflow(cwd: string, waitMs = 900): Promise<string> {
+async function writeBlockingWorkflow(
+  cwd: string,
+  waitMs = 900,
+  gateDirectory?: string,
+): Promise<string> {
   const workflowPath = path.join(cwd, "blocking.workflow.ts");
   await fs.writeFile(
     workflowPath,
     `import { compute, defineWorkflow } from ${JSON.stringify(
       path.resolve("src/workflows/index.ts"),
     )};
+import { existsSync, writeFileSync } from "node:fs";
 export default defineWorkflow({
   name: "host-blocking",
   startAt: "work",
   nodes: {
     work: compute({
       run: () => {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${waitMs});
+        const gate = ${JSON.stringify(gateDirectory ?? null)};
+        if (gate !== null) {
+          writeFileSync(gate + "/entered", "entered");
+          const deadline = Date.now() + 30000;
+          while (!existsSync(gate + "/release")) {
+            if (Date.now() > deadline) throw new Error("Test did not release the blocked worker");
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+          }
+        } else {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${waitMs});
+        }
         return { finished: true };
       },
     }),
@@ -2392,7 +2408,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
-  it("adopts a late turn end after terminal cleanup settles the turn", async () => {
+  it("keeps a cancelled turn active until Pi confirms settlement", async () => {
     const cwd = await makeTempDir("host-late-turn-project");
     const databasePath = path.join(await makeTempDir("host-late-turn-state"), "state.sqlite");
     const workflowPath = await writeInteractiveWorkflow(cwd);
@@ -2490,6 +2506,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         outcome: "accepted",
         receipt: { runId: "late-turn-run", status: "cancelled" },
       });
+      let cancelled: unknown;
+      const stopWatching = await client.watchSession("host-test-session", (event) => {
+        cancelled = event.payload;
+      });
+      await waitUntil(() => cancelled !== undefined);
+      expect(cancelled).toMatchObject({
+        openWorkflowTurn: { workflowTurnId: "late-turn-1", state: "started" },
+        cancelledWorkflowMessageIds: [message.workflowMessageId],
+        nextWorkflowMessageId: null,
+      });
+      await stopWatching();
       await expect(
         client.request({
           operation: "workflowTurn.report",
@@ -2502,10 +2529,10 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           },
         }),
       ).resolves.toMatchObject({
-        outcome: "adopted",
+        outcome: "accepted",
         receipt: {
           ownership: "settled",
-          turn: { state: "ended", stopReason: "lost" },
+          turn: { state: "ended", stopReason: "error" },
         },
       });
       await expect(
@@ -2529,7 +2556,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       try {
         expect(state.workflowMessages.requireTurn("late-turn-1")).toMatchObject({
           state: "ended",
-          stopReason: "lost",
+          stopReason: "error",
         });
         expect(
           state.state.connection
@@ -2891,12 +2918,13 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
   it("renews a live claim while workflow code blocks longer than its lease", async () => {
     const cwd = await makeTempDir("host-blocked-worker-project");
     const databasePath = path.join(await makeTempDir("host-blocked-worker-state"), "state.sqlite");
-    const workflowPath = await writeBlockingWorkflow(cwd, 5_000);
+    const gate = await makeTempDir("host-blocked-worker-gate");
+    const workflowPath = await writeBlockingWorkflow(cwd, 0, gate);
     const host = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
-      serverRenewMs: 40,
-      runClaimLeaseMs: 200,
+      serverRenewMs: 100,
+      runClaimLeaseMs: 1_000,
     });
     const client = new WorkflowClient({ databasePath });
     await host.start();
@@ -2913,15 +2941,33 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await waitUntil(() => existsSync(path.join(gate, "entered")), 30_000);
       const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
-        const run = store.getWorkflowRun("blocked-child-run");
-        expect(run?.status).toBe("running");
-        expect(Date.parse(run?.claimExpiresAt ?? "")).toBeGreaterThan(Date.now());
+        // The worker's initial claim uses its normal lease. Wait for the host
+        // heartbeat to apply this test's shorter lease before measuring renewal.
+        await waitUntil(() => {
+          const expiry = Date.parse(
+            store.getWorkflowRun("blocked-child-run")?.claimExpiresAt ?? "",
+          );
+          return expiry > Date.now() && expiry <= Date.now() + 1_000;
+        }, 10_000);
+        const initialExpiry = Date.parse(
+          store.getWorkflowRun("blocked-child-run")?.claimExpiresAt ?? "",
+        );
+        expect(Number.isFinite(initialExpiry)).toBe(true);
+        await waitUntil(() => {
+          const run = store.getWorkflowRun("blocked-child-run");
+          return (
+            Date.now() > initialExpiry &&
+            run?.status === "running" &&
+            Date.parse(run.claimExpiresAt ?? "") > Date.now()
+          );
+        }, 10_000);
       } finally {
         store.close();
       }
+      await fs.writeFile(path.join(gate, "release"), "release");
       await waitUntil(() => {
         const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
@@ -2934,6 +2980,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
     } finally {
+      await fs.writeFile(path.join(gate, "release"), "release");
       await host.stop();
     }
   }, 45_000);

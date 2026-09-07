@@ -4360,7 +4360,8 @@ export class WorkflowServer {
     }
     this.completeResourceManagerWorkflow(context.runId, context.state);
     if (context.state.status !== "waiting") {
-      this.serverState.workflowMessages.settleOpenTurnsForRun(context.runId, "lost", context.now);
+      // A terminal workflow is not evidence that its Pi turn has stopped.
+      // Keep turn ownership until an end report or an idle branch observation.
       this.serverState.workflowMessages.cancelPendingForRun(
         context.runId,
         context.now,
