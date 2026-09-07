@@ -2915,6 +2915,51 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
+  it("cancels a parked run while its released handoff worker is still cached", async () => {
+    const cwd = await makeTempDir("host-cancel-handoff-project");
+    const databasePath = path.join(await makeTempDir("host-cancel-handoff-state"), "state.sqlite");
+    const workflowPath = await writeInteractiveWorkflow(cwd);
+    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath });
+    const activeRuns = (host as unknown as { activeRuns: Map<string, unknown> }).activeRuns;
+    const runId = "cancel-handoff-run";
+    const stop = vi.fn(async () => undefined);
+    await host.start();
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    try {
+      await startRun({ client, cwd, workflowPath, runId, executionMode: "interactive" });
+      await waitUntil(
+        () =>
+          !activeRuns.has(runId) &&
+          observed.state.connection
+            .prepare("SELECT 1 FROM interactive_requests WHERE run_id = ? AND status = 'pending'")
+            .get(runId) !== undefined,
+        30_000,
+      );
+      // Reproduce the interval after a handoff releases its durable lease and
+      // before the supervisor's exit removes its in-memory active entry.
+      activeRuns.set(runId, {
+        record: { runId },
+        claimToken: "released-token",
+        control: "handoff",
+        supervisor: { stop },
+      });
+      expect(await client.request({ operation: "run.cancel", runId })).toMatchObject({
+        outcome: "accepted",
+        receipt: { runId, status: "cancelled" },
+      });
+      await waitUntil(() => stop.mock.calls.length === 1);
+      expect(
+        observed.state.connection.prepare("SELECT status FROM runs WHERE run_id = ?").get(runId),
+      ).toEqual({ status: "cancelled" });
+    } finally {
+      activeRuns.delete(runId);
+      observed.close();
+      await client.close();
+      await host.stop();
+    }
+  }, 45_000);
+
   it("renews a live claim while workflow code blocks longer than its lease", async () => {
     const cwd = await makeTempDir("host-blocked-worker-project");
     const databasePath = path.join(await makeTempDir("host-blocked-worker-state"), "state.sqlite");

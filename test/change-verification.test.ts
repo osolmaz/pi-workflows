@@ -251,54 +251,60 @@ describe("change verification", () => {
     expect(executor.requests.map((request) => request.contract.nodeId)).toEqual(["planChecks"]);
   });
 
-  it("rejects candidate-bound comparison before accepting a corrected plan", async () => {
-    const { repository, workspace } = await fixture("verification-plan-correction");
-    const directory = await makeTempDir("verification-fake-docker");
-    const executable = path.join(directory, "docker");
-    const calls = path.join(directory, "calls");
-    await fs.writeFile(
-      executable,
-      `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ') + '\\n'); console.log('candidate checked');\n`,
-      { mode: 0o755 },
-    );
-    const candidate = {
-      ...check(repository, ""),
-      command: executable,
-      args: [
-        "run",
-        "--rm",
-        "--mount",
-        `type=bind,src=${repository},dst=/workspace`,
-        "test-image",
-        "check",
-      ],
-    };
-    const input = { originatingWorkflow: "autoimplement", qualifiedNode: "verify", workspace };
-    const executor = new ScriptedExecutor().respond("planChecks", async (request) => {
-      const identity = { ...request.contract };
-      expect(await request.accept({ checks: [candidate] })).toMatchObject({
-        ok: false,
-        error: expect.stringContaining("must not reference the prepared workspace"),
-      });
-      expect(() => parseChangeVerificationInput({ ...input, checks: [candidate] })).toThrow(
-        "must not reference the prepared workspace",
+  it.each(["arguments", "executable"])(
+    "rejects candidate-bound comparison %s before accepting a corrected plan",
+    async (binding) => {
+      const { repository, workspace } = await fixture("verification-plan-correction");
+      const directory = await makeTempDir("verification-fake-docker");
+      const executable = path.join(binding === "executable" ? repository : directory, "docker");
+      const calls = path.join(directory, "calls");
+      await fs.writeFile(
+        executable,
+        `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ') + '\\n'); console.log('candidate checked');\n`,
+        { mode: 0o755 },
       );
-      await expect(fs.access(calls)).rejects.toThrow();
-      expect(request.contract).toEqual(identity);
-      const corrected = { checks: [{ ...candidate, baseEligible: false }], untested: [] };
-      expect(parseChangeVerificationInput({ ...input, ...corrected }).checks).toMatchObject([
-        { baseEligible: false },
-      ]);
-      const accepted = await request.accept(corrected);
-      if (!accepted.ok) throw new Error(accepted.error);
-      return { output: accepted.value };
-    });
-    const { state } = await run(input, executor);
-    expect(state.status).toBe("completed");
-    expect(state.finalOutput).toMatchObject({ route: "ready", baseCommands: { items: [] } });
-    expect(executor.requests).toHaveLength(1);
-    expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1);
-  });
+      const candidate = {
+        ...check(repository, ""),
+        command: executable,
+        args:
+          binding === "executable"
+            ? ["run", "--rm", "test-image", "check"]
+            : [
+                "run",
+                "--rm",
+                "--mount",
+                `type=bind,src=${repository},dst=/workspace`,
+                "test-image",
+                "check",
+              ],
+      };
+      const input = { originatingWorkflow: "autoimplement", qualifiedNode: "verify", workspace };
+      const executor = new ScriptedExecutor().respond("planChecks", async (request) => {
+        const identity = { ...request.contract };
+        expect(await request.accept({ checks: [candidate] })).toMatchObject({
+          ok: false,
+          error: expect.stringContaining("must not reference the prepared workspace"),
+        });
+        expect(() => parseChangeVerificationInput({ ...input, checks: [candidate] })).toThrow(
+          "must not reference the prepared workspace",
+        );
+        await expect(fs.access(calls)).rejects.toThrow();
+        expect(request.contract).toEqual(identity);
+        const corrected = { checks: [{ ...candidate, baseEligible: false }], untested: [] };
+        expect(parseChangeVerificationInput({ ...input, ...corrected }).checks).toMatchObject([
+          { baseEligible: false },
+        ]);
+        const accepted = await request.accept(corrected);
+        if (!accepted.ok) throw new Error(accepted.error);
+        return { output: accepted.value };
+      });
+      const { state } = await run(input, executor);
+      expect(state.status).toBe("completed");
+      expect(state.finalOutput).toMatchObject({ route: "ready", baseCommands: { items: [] } });
+      expect(executor.requests).toHaveLength(1);
+      expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1);
+    },
+  );
 
   it("validates planned check identities, working directories, and batch limits before acceptance", async () => {
     const { repository, workspace } = await fixture("verification-plan-validation");

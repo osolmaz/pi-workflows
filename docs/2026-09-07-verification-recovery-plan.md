@@ -27,7 +27,8 @@ format directly. Validate the same complete input before a planner submission is
 explicit checks are supplied. Invalid submissions keep the request and attempt pending for
 correction through the existing tool. Keep untested checks visible in the final result.
 
-Candidate-only checks remain valid. A base comparison must not contain candidate-bound arguments.
+Candidate-only checks remain valid. A base comparison must not contain candidate-bound arguments
+or an absolute executable inside the candidate checkout.
 The base runner must select a distinct checkout. Do not silently rewrite Docker mount paths or
 classify a failure as unrelated without comparison evidence.
 
@@ -69,6 +70,11 @@ The coordinator matches only its owned turn, calls public `ctx.abort()` once for
 retains ownership until public `agent_settled` and the existing end report confirm settlement.
 A delayed report must not trigger a second abort against later ordinary chat. Cancellation must
 also work when a timeout races delivery acknowledgment. Never submit an expired result as success.
+
+A runner handoff releases its durable claim before supervisor cleanup removes the cached active
+worker. Cancellation in that interval uses the queue's unclaimed path, not the released token.
+The queue still rejects a different live owner atomically. Test that interval directly rather than
+retrying a failed E2E cancellation until it happens to pass.
 
 Public Pi APIs are sufficient to abort and observe Pi turns, but cannot prove that every third-party
 detached process stopped. Command inspection remains in the recovery agent and the tools that own
