@@ -270,11 +270,26 @@ A settings scope uses its resource revision as its public change number. Each ac
 
 `workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the run that accepted them. The server uses that run's outcome; an explicit restart does not retarget the prompt. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
 
-- A terminal run fact overrides stale message state and has no open workflow turn.
+- A terminal execution fact stays terminal while its separate recovery turn is active. The view shows that activity and its cancel control without changing the execution result.
 - An accepted decision stays accepted while the scheduler waits for execution capacity.
 - A cancelled decision is cancelled even if parent cleanup is still pending.
 - A stale owner is not shown as current.
 - An ambiguous external effect is shown as unresolved.
+
+Recovery uses existing records. `runs.recovery_root_run_id` and
+`runs.recovery_source_message_id` bind an automatic start or restart to the exact
+terminal message and original chain. Counting those child rows enforces the shared
+two-launch limit. Pruning treats the chain as one connected run tree.
+`workflow_messages.recovery_stop` records cancellation, interruption, or timeout
+without removing delivery evidence. `workflow_turns.active_elapsed_ms` saves the
+terminal turn's active time; a monotonic clock excludes disconnected time and host
+downtime. Reminder messages use the same request ID and identify the exact ended
+turn in their idempotency key. At most two reminder messages can be issued for a
+pending attempt.
+
+These columns change the alpha schema in place. Older local databases fail schema
+validation with the existing reset guidance. Installation must not reset a live
+database or discard running work automatically.
 
 Read paths do not repair state. Owner reconcilers apply pending effects and write receipts.
 

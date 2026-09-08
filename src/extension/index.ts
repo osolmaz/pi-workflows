@@ -32,6 +32,7 @@ import {
 } from "./resource-manager-command.js";
 import { SessionWorkflowView } from "./session-view.js";
 import { recoverAssistantStep, registerWorkflowAgentStepMessageRenderer } from "./step-message.js";
+import { registerTerminalMessageRenderer } from "./terminal-message.js";
 import { responseEntryId, WorkflowMessageCoordinator } from "./workflow-message-coordinator.js";
 import { parseWorkflowToolInput, WorkflowToolParameters } from "./workflow-tool.js";
 
@@ -163,6 +164,7 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
 
 export default function piWorkflows(pi: ExtensionAPI): void {
   registerWorkflowAgentStepMessageRenderer(pi);
+  registerTerminalMessageRenderer(pi);
   let client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
   const herdrViewer = new HerdrWorkflowViewer(pi.exec);
   let sessionContext: ExtensionContext | null = null;
@@ -204,7 +206,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     const message = workflowMessages.activeTurnMessage();
     if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
     const contract = agentContractForWorkflowMessage(message);
-    if (contract === undefined && message.kind !== "followUp") {
+    if (contract === undefined && message.kind !== "followUp" && message.kind !== "terminal") {
       return;
     }
     const recorder = await ensureRecorder(message, ctx);
@@ -214,7 +216,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     ) {
       return;
     }
-    if (contract === undefined) {
+    if (message.kind === "terminal") {
+      recorder.beginTerminal(message.workflowMessageId);
+    } else if (contract === undefined) {
       recorder.beginFollowUp(message.workflowMessageId);
     } else {
       recorder.beginAttempt(contract);
@@ -250,7 +254,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
           if (end.stopReason === "completed") {
             await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
           }
-          if (message.kind === "followUp") await finishRecording(message);
+          if (message.kind === "followUp" || message.kind === "terminal")
+            await finishRecording(message);
         },
         terminalDelivered: finishRecording,
       });
@@ -503,7 +508,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       "Protected human decisions cannot be answered with this model-facing tool.",
       "When the user asks to continue or resume the active workflow, call workflow resume immediately.",
       "Use update or submit only when a workflow step contract asks for it, and pass its exact requestId.",
-      "Do not start repeated work without the user's request.",
+      "Recovery may correct or restart within existing user permission. Explicit cancellation stops automatic continuation. Never repeat uncertain side effects or bypass the recovery limit.",
     ].join(" "),
     parameters: WorkflowToolParameters,
     async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {

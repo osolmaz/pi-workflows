@@ -34,7 +34,14 @@ export function stepWorkflowMessageContent(options: {
   return {
     schema: WORKFLOW_MESSAGE_CONTENT_SCHEMA,
     customType: WORKFLOW_STEP_MESSAGE_TYPE,
-    content: typeof outer.prompt === "string" ? outer.prompt : "Continue the workflow step.",
+    content: [
+      ...(options.reason === "reminder"
+        ? [
+            "The previous turn ended without the required accepted result. Complete this exact request; do not repeat completed work or start another workflow.",
+          ]
+        : []),
+      typeof outer.prompt === "string" ? outer.prompt : "Continue the workflow step.",
+    ].join("\n\n"),
     display: true,
     details,
     triggerTurn: true,
@@ -123,7 +130,7 @@ export function terminalWorkflowMessageContent(options: {
       kind: "terminal",
       terminal: options.details,
     },
-    triggerTurn: false,
+    triggerTurn: !(isRecord(options.details) && options.details.status === "cancelled"),
   };
 }
 

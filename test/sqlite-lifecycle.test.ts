@@ -223,14 +223,21 @@ describe("SQLite delivery lifecycle", () => {
       [{ workflowMessageId: terminalMessageId, piSessionEntryId: "entry-2" }],
       new Set([terminalMessageId]),
     );
-    expect(() =>
+    expect(
       messages.startTurn({
         workflowMessageId: terminalMessageId,
-        workflowTurnId: "invalid-terminal-turn",
+        workflowTurnId: "terminal-recovery-turn",
         runId: run.runId,
         targetSessionId: "session-a",
       }),
-    ).toThrow("does not request a model turn");
+    ).toMatchObject({ state: "started" });
+    messages.endTurn({
+      workflowMessageId: terminalMessageId,
+      workflowTurnId: "terminal-recovery-turn",
+      runId: run.runId,
+      targetSessionId: "session-a",
+      stopReason: "completed",
+    });
     const followUpMessageId = workflowMessageIdFor("followUp", "follow-up-1", "1");
     messages.create({
       workflowMessageId: followUpMessageId,

@@ -27,6 +27,7 @@ import type {
   WorkflowTraceEvent,
   WorkflowUpdateRecord,
 } from "../workflows/types.js";
+import { recoveryStopped } from "./recovery.js";
 import type { ServerStateStore } from "./state.js";
 
 export const WORKFLOW_PAGE_KINDS = [
@@ -650,12 +651,22 @@ export class ServerViewStore {
       }
       if (message.status === "pending") return message.runId;
       if (message.status !== "sent") continue;
-      if (Date.parse(message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now) return message.runId;
+      const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
+      if (
+        message.content.triggerTurn &&
+        !recoveryStopped(this.state, message.workflowMessageId) &&
+        (turn === undefined || turn.state === "started")
+      )
+        return message.runId;
+      if (Date.parse(turn?.endedAt ?? message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now)
+        return message.runId;
     }
     return undefined;
   }
 
   private hasCancelledSource(message: WorkflowMessage): boolean {
+    if (message.kind === "terminal")
+      return message.content.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
     if (message.kind === "step") {
       const request = this.state.connection
         .prepare("SELECT status FROM interactive_requests WHERE request_id = ? AND run_id = ?")
@@ -688,10 +699,21 @@ export class ServerViewStore {
     }
     if (message.kind === "notification") return true;
     if (message.kind === "terminal") {
+      const reservation = this.state.connection
+        .prepare(
+          `SELECT 1 FROM run_bindings b JOIN runs r ON r.run_id = b.run_id
+         WHERE b.origin_session_id = ? AND r.run_id <> ? AND r.status IN ('queued', 'running', 'waiting') LIMIT 1`,
+        )
+        .get(message.targetSessionId, message.runId);
+      if (reservation !== undefined) return false;
       const run = this.state.connection
         .prepare("SELECT status FROM runs WHERE run_id = ?")
         .get(message.runId);
-      return isObjectRecord(run) && isTerminalStatus(run.status);
+      return (
+        isObjectRecord(run) &&
+        isTerminalStatus(run.status) &&
+        (!message.content.triggerTurn || !recoveryStopped(this.state, message.workflowMessageId))
+      );
     }
     const source = this.state.connection
       .prepare(
@@ -716,6 +738,15 @@ export class ServerViewStore {
       .filter((candidate) => candidate.kind === "terminal" && candidate.status === "sent")
       .at(-1);
     if (terminal === undefined) return false;
+    if (terminal.content.triggerTurn) {
+      const turn = this.workflowMessages.latestTurnForMessage(terminal.workflowMessageId);
+      if (
+        turn?.state !== "ended" ||
+        turn.stopReason !== "completed" ||
+        recoveryStopped(this.state, terminal.workflowMessageId)
+      )
+        return false;
+    }
     const prior = this.state.connection
       .prepare(
         `SELECT follow_up_id AS followUpId, status FROM workflow_follow_ups
@@ -763,7 +794,12 @@ export class ServerViewStore {
         if (isObjectRecord(request) && request.status === "pending" && request.paused === 0) {
           return message;
         }
-      } else if (message.kind === "followUp") {
+      } else if (
+        message.kind === "followUp" ||
+        (message.kind === "terminal" &&
+          message.content.triggerTurn &&
+          !recoveryStopped(this.state, message.workflowMessageId))
+      ) {
         const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
         if (turn === undefined || turn.state === "started") return message;
       }
@@ -809,7 +845,7 @@ export class ServerViewStore {
         `SELECT t.target_session_id AS targetSessionId FROM workflow_turns t
          JOIN workflow_messages m ON m.workflow_message_id = t.workflow_message_id
          WHERE t.run_id = ? AND t.state = 'started'
-           AND m.kind IN ('step', 'followUp') LIMIT 1`,
+           AND m.kind IN ('step', 'terminal', 'followUp') LIMIT 1`,
       )
       .get(runId);
     return (
@@ -929,7 +965,9 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     status = facts.durableStatus;
     reason = facts.ambiguous
       ? "The run is terminal, but an external effect still needs explicit recovery."
-      : facts.errorMessage;
+      : facts.originTurnActive
+        ? "Execution has ended. The model is reviewing the result and safe next actions."
+        : facts.errorMessage;
   } else if (facts.ambiguous) {
     status = "ambiguous";
     reason = "An external effect needs explicit recovery.";
@@ -983,6 +1021,8 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     if (facts.pendingRequestKind === "decision") controls.push("human-answer");
     if (facts.pendingRequestKind === "agent") controls.push("update", "submit");
   }
+  if (["completed", "failed", "timed_out"].includes(status) && facts.originTurnActive)
+    controls.push("cancel");
   if (facts.ambiguous) controls.push("review");
   return { status, activity, controls, reason };
 }

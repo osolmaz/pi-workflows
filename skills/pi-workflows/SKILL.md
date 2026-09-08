@@ -49,7 +49,11 @@ When a workflow step message arrives:
 2. Follow the completion form in the current step contract.
 3. For a submitted step, produce the exact expected shape and call `workflow` with `action: "submit"` and the exact `requestId` in the current contract. If validation rejects the output, correct it and submit again to that request.
 4. For an assistant-message step, reply with the requested normal assistant message. Do not call `workflow submit`; the settled visible reply is the node output.
-5. After completion, do not add another response. The workflow sends its next declared step or a factual terminal notice. The notice does not ask for more model work.
+5. After an accepted step result, wait for the next delivered contract. A terminal message returns responsibility for the user's task to you. Explain the result, inspect failures, and correct mistakes within existing permission. Do not repeat accepted work or a summary already visible to the user.
+
+A missing-submission reminder targets the same pending request. Submit or correct that exact result; do not start another workflow to avoid it. The server allows two reminders before reporting failure.
+
+Terminal recovery allows at most two automatic starts or restarts in one chain and 15 minutes of active time per terminal turn. Check saved results, command outcomes, and unsettled effects before retrying. A changed workflow name does not reset the launch limit. Explicit cancellation stops automatic continuation. If safe recovery is unavailable or exhausted, state what succeeded, what remains, and the exact blocker.
 
 A node can run more than once in a loop. Each attempt has a new `requestId`. Never use a request ID from an earlier attempt.
 

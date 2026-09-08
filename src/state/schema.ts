@@ -115,6 +115,8 @@ CREATE TABLE runs (
   project_id TEXT REFERENCES projects(project_id),
   parent_run_id TEXT REFERENCES runs(run_id),
   root_run_id TEXT NOT NULL REFERENCES runs(run_id),
+  recovery_root_run_id TEXT REFERENCES runs(run_id) DEFERRABLE INITIALLY DEFERRED,
+  recovery_source_message_id TEXT REFERENCES workflow_messages(workflow_message_id) DEFERRABLE INITIALLY DEFERRED,
   lineage_kind TEXT CHECK (lineage_kind IS NULL OR lineage_kind IN ('restart')),
   restart_number INTEGER NOT NULL DEFAULT 0 CHECK (restart_number >= 0),
   parent_run_revision INTEGER CHECK (parent_run_revision IS NULL OR parent_run_revision >= 0),
@@ -135,6 +137,7 @@ CREATE TABLE runs (
   finished_at INTEGER,
   CHECK ((status IN ('completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
   CHECK ((parent_run_id IS NULL) = (lineage_kind IS NULL)),
+  CHECK ((recovery_root_run_id IS NULL) = (recovery_source_message_id IS NULL)),
   CHECK (
     (lineage_kind = 'restart' AND parent_run_revision IS NOT NULL) OR
     (lineage_kind IS NOT 'restart' AND parent_run_revision IS NULL)
@@ -145,6 +148,7 @@ CREATE TABLE runs (
 CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
+CREATE INDEX runs_recovery_root_idx ON runs(recovery_root_run_id);
 CREATE UNIQUE INDEX runs_restart_parent_idx ON runs(parent_run_id)
   WHERE lineage_kind = 'restart';
 
@@ -538,6 +542,7 @@ CREATE TABLE workflow_messages (
   order_number INTEGER NOT NULL CHECK (order_number > 0),
   status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'cancelled')),
   pi_session_entry_id TEXT,
+  recovery_stop TEXT CHECK (recovery_stop IS NULL OR recovery_stop IN ('cancelled', 'timed_out', 'interrupted')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (target_session_id, order_number),
@@ -559,6 +564,7 @@ CREATE TABLE workflow_turns (
   state TEXT NOT NULL CHECK (state IN ('started', 'ended')),
   stop_reason TEXT CHECK (stop_reason IS NULL OR stop_reason IN ('completed', 'aborted', 'error', 'lost')),
   response_session_entry_id TEXT,
+  active_elapsed_ms REAL NOT NULL DEFAULT 0 CHECK (active_elapsed_ms >= 0),
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   CHECK (

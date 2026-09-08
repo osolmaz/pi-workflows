@@ -84,7 +84,7 @@ describe("host workflow display reducer", () => {
     for (const durableStatus of ["completed", "failed", "timed_out", "cancelled"] as const) {
       expect(
         display({ pendingRequestKind: kind, durableStatus, originTurnActive: true }).controls,
-      ).toEqual([]);
+      ).toEqual(durableStatus === "cancelled" ? [] : ["cancel"]);
     }
     expect(
       display({ pendingRequestKind: kind, paused: true, originTurnActive: true }).controls,
@@ -159,7 +159,7 @@ describe("host workflow display reducer", () => {
     expect(display({ durableStatus: "completed", originTurnActive: true })).toMatchObject({
       status: "completed",
       activity: "origin_turn",
-      controls: [],
+      controls: ["cancel"],
     });
   });
 

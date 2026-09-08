@@ -194,6 +194,10 @@ export class SessionRecorder {
     this.currentAttempt = { nodeId: "followUp", attemptId: workflowMessageId };
   }
 
+  beginTerminal(workflowMessageId: string): void {
+    this.currentAttempt = { nodeId: "terminal", attemptId: workflowMessageId };
+  }
+
   /** Release ownership of the turn that Pi has fully settled. */
   settleAttempt(): void {
     const finished = this.lastFinishedAttempt;

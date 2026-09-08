@@ -1,10 +1,10 @@
 # Workflow messages in Pi
 
-This page describes the currently shipped workflow-message contract. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) requires restoration of post-workflow model turns and bounded missing-submission reminders. Its delivery, cancellation, follow-up, rendering, and recording requirements supersede the no-turn design choice below, but implementation remains pending. Keep the current-runtime descriptions below until that work ships.
+This page describes workflow delivery, including the post-workflow model turn and bounded submission reminders from the [workflow recovery plan](2026-09-08-workflow-recovery-plan.md).
 
 ## Goal
 
-Pi Workflows must add several kinds of content to an origin Pi conversation. These include interactive step prompts, protected human decisions, passive notifications, terminal results, and follow-up prompts. Initial and resumed prompts are one step-message kind with different display reasons.
+Pi Workflows must add several kinds of content to an origin Pi conversation. These include interactive step prompts, protected human decisions, passive notifications, terminal results, and follow-up prompts. Initial, resumed, and reminder prompts are one step-message kind with different display reasons.
 
 The server saves all of them as workflow messages. One extension component sends them through documented Pi APIs. Feature records continue to own workflow results, answers, settings, and timeouts.
 
@@ -18,10 +18,10 @@ The message kinds are:
 
 | Kind           | Pi behavior                                      | Purpose                                    |
 | -------------- | ------------------------------------------------ | ------------------------------------------ |
-| `step`         | Custom message that starts a model turn          | Initial or resumed interactive prompt      |
+| `step`         | Custom message that starts a model turn          | Initial, resumed, or reminder prompt       |
 | `decision`     | Custom message that does not start a model turn  | Protected choice for a person              |
 | `notification` | Custom message that does not start a model turn  | Passive workflow notice                    |
-| `terminal`     | Visible message that does not start a model turn | Recorded terminal result                   |
+| `terminal`     | Starts a model turn unless explicitly cancelled | Recorded result and bounded recovery       |
 | `followUp`     | Custom message that starts normal work           | Work saved for after successful completion |
 
 The server stores one `WorkflowMessage` record before Pi can send it:
@@ -212,14 +212,16 @@ reverse execution or cancellation.
 
 ## Terminal results and follow-ups
 
-A terminal result is visible but does not start a model turn. It stays in the
-origin-session view while pending and for 60 seconds after confirmed delivery.
-An explicit restart targets the terminal run and revision and creates fresh
-work without copying old steps, changed settings, approvals, or effects. It has
-no terminal-turn prerequisite or hard-coded count limit.
+A non-cancelled terminal result starts an owned model turn for explanation and
+safe recovery. It stays in the origin-session view while pending or active and
+for 60 seconds after settlement. Cancellation produces a passive terminal result.
+A restart targets the terminal run and revision and creates fresh work without
+copying old steps, changed settings, approvals, or effects. Automatic starts and
+restarts from terminal turns share a two-launch limit per recovery chain. Each
+terminal turn has a 15-minute active-time limit.
 
-Explicit follow-ups wait for successful completion, terminal notice delivery,
-prior follow-up settlement, and release of the session reservation. They remain
+Explicit follow-ups wait for successful completion, successful terminal-turn
+settlement, prior follow-up settlement, and release of the session reservation. They remain
 normal conversation work. Slash-looking text cannot dispatch an extension
 command. External effects still require saved receipts or explicit recovery of
 an ambiguous outcome. See [terminal workflow messages](DEFERRED_TURNS.md).
