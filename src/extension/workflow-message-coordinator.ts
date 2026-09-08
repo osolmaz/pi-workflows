@@ -147,6 +147,11 @@ export class WorkflowMessageCoordinator {
         }
       }
       this.abortCancelledTurn(ctx);
+      // Settle a locally completed owned turn before reporting Pi idle. Otherwise
+      // the host can mistake its saved response for a lost turn and block recovery.
+      if (this.turn?.phase === "settled") {
+        await this.flushTurn(client, view, callbacks.beforeTurnEnd);
+      }
       if (
         view.branchReportRequired ||
         this.lastBranchEpoch !== view.coordinatorEpoch ||
@@ -160,6 +165,7 @@ export class WorkflowMessageCoordinator {
       for (const message of view.workflowMessages) {
         if (
           message.kind === "terminal" &&
+          !message.content.triggerTurn &&
           message.status === "sent" &&
           branchEntries.has(message.workflowMessageId) &&
           !this.finalizedTerminals.has(message.workflowMessageId)
@@ -333,7 +339,7 @@ export class WorkflowMessageCoordinator {
       stopReason: pending.end.stopReason,
       responseSessionEntryId: pending.end.responseSessionEntryId,
     });
-    if (message.kind === "followUp") {
+    if (message.kind === "followUp" || message.kind === "terminal") {
       this.closedTurnMessages.add(message.workflowMessageId);
     }
     for (const current of new Set([view, this.view])) {
@@ -342,7 +348,7 @@ export class WorkflowMessageCoordinator {
       }
       if (
         current?.openWorkflowMessageId === message.workflowMessageId &&
-        message.kind === "followUp"
+        (message.kind === "followUp" || message.kind === "terminal")
       ) {
         current.openWorkflowMessageId = null;
       }

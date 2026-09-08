@@ -238,10 +238,11 @@ the client stops waiting but does not cancel the durable server command. A retry
 uses a new transport request ID with the same durable submission identity and
 adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
-without submitting, the exact request stays pending. The server does not add
-reminder turns or apply a hidden retry limit. Additional model work must follow
-a declared graph path or an explicit user request. The timeout remains active
-during each reported model turn, and cancellation remains active throughout.
+without submitting, the server sends up to two reminders for the exact pending
+request. It waits for the owned turn to settle and does not remind during validation,
+pause, or another active turn. If both reminders end without an accepted result,
+the run fails with `missingSubmission`. Accepted results remain saved. The timeout
+remains active during each reported model turn, and cancellation remains active throughout.
 For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
@@ -257,13 +258,17 @@ function can use prepared outputs to select a policy for this run. It has 30
 seconds to return. Computed timeout functions are runtime code, so definition
 snapshots omit them. Snapshots keep fixed numbers and fixed `null` values.
 
-### Explicit summaries and fresh restarts
+### Terminal recovery and fresh restarts
 
-> This section and the missing-submission behavior above describe the current runtime. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) requires general post-workflow model turns, bounded submission reminders, and safe automatic recovery within existing permission. Restoration is pending. Explicit summaries and restart APIs alone do not satisfy those requirements.
+Terminal messages return responsibility to the regular Pi model after execution
+ends. The model checks whether the user's task is complete, explains the outcome,
+and can correct mistakes within existing permission. Cancellation is different:
+its terminal message is passive and stops automatic continuation.
 
-Terminal notices show the recorded status, result, and error. They are visible
-messages, not model prompts. Use an explicit `assistantMessage()` node when a
-workflow needs a written explanation. `presentationPrompt` is not supported.
+The collapsed terminal card shows the workflow, status, and error. Expand it to
+read the full result and recovery instructions. An explicit `assistantMessage()`
+node can still provide a workflow-specific explanation. The terminal turn should
+refer to that explanation rather than repeat it. `presentationPrompt` is not supported.
 Autoimplement prepares its structured result, runs an explicit summary node,
 and then returns the prepared result. A failed summary cannot erase accepted work.
 
@@ -273,13 +278,22 @@ retries keep the same unsettled turn and cannot submit an unfinished response.
 Branch evidence must identify the exact workflow message before reconnect can
 adopt its turn.
 
-A fresh restart requires an explicit user request and targets `runId` plus
-`expectedRevision`. It starts from the original input in a new run. It does not
-copy old steps, changed settings, decisions, or effects. The host rejects a stale
-revision or unsettled external effects before reserving work. An identical retry
-adopts the same child run. There is no terminal-message requirement or hard-coded
-restart count. Explicit queued follow-ups become eligible after terminal notice
-delivery; they do not wait for a terminal model turn.
+A fresh restart targets `runId` plus `expectedRevision`. It starts from the original
+input in a new run and does not copy old steps, changed settings, decisions, or
+effects. The host rejects a stale revision or unsettled external effects before
+reserving work. An identical retry adopts the same child run.
+
+An owned terminal turn can start or restart work within existing user permission.
+Both commands count toward a shared limit of two automatic launches per recovery
+chain. Each terminal turn has a 15-minute active-time limit. Disconnects and server
+downtime do not consume that time. Saved launch counts and active elapsed time survive
+reconnects. An interrupted recovery turn stops with a visible blocker rather than
+silently replaying work. A later explicit user request can authorize new work.
+
+Queued follow-ups wait for the source's terminal turn to finish successfully. Another
+workflow started during recovery must also release the session before a follow-up
+can run. Cancellation or interrupted recovery keeps those follow-ups from running
+automatically. These rules implement the [workflow recovery plan](2026-09-08-workflow-recovery-plan.md).
 
 ### compute
 

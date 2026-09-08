@@ -1961,6 +1961,22 @@ export class WorkflowRunQueueStore extends ProjectStore {
         )
         .run(status, errorHash, now, now, runId);
       this.workflowMessages.cancelPendingForRun(runId, now);
+      if (status === "failed") {
+        closeRunTime(this.state, runId);
+        this.state.connection
+          .prepare(
+            `UPDATE node_attempts SET status = 'failed', error_hash = COALESCE(error_hash, ?),
+           updated_at = ?, finished_at = COALESCE(finished_at, ?)
+           WHERE run_id = ? AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
+          )
+          .run(errorHash, now, now, runId);
+        this.state.connection
+          .prepare(
+            `UPDATE interactive_requests SET status = 'cancelled', revision = revision + 1, updated_at = ?
+           WHERE run_id = ? AND status = 'pending'`,
+          )
+          .run(now, runId);
+      }
       if (status === "cancelled") {
         this.cancelWorkflowRunDependents(
           runId,

@@ -635,7 +635,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("keeps a missing submission pending without reminder turns or a hidden retry limit", async () => {
+  it("reminds an exact missing submission twice, then reports a bounded failure", async () => {
     const { cwd, workflowPath } = await setupProject();
     const fake = makePi({ cwd });
     await fake.emit("session_start");
@@ -644,16 +644,32 @@ describe("pi-workflows hosted extension", () => {
     const contract = stepContract(fake.sent[0] as Record<string, unknown>);
     const state = new ServerStateStore(workflowStatePath(), { readOnly: true });
     try {
-      for (let turn = 0; turn < 4; turn += 1) {
+      for (let turn = 0; turn < 3; turn += 1) {
         fake.setIdle(false);
         await fake.emit("agent_start");
         await fake.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
         fake.setIdle(true);
         await fake.emit("agent_settled");
-        expect(state.getInteraction(contract.requestId)?.status).toBe("pending");
-        expect(state.workflowMessages.listSession("session-one")).toHaveLength(1);
-        expect(fake.sent).toHaveLength(1);
+        if (turn < 2) {
+          await waitUntil(() => fake.sent.length === turn + 2, 30_000);
+          expect(state.getInteraction(contract.requestId)?.status).toBe("pending");
+          expect(stepContract(fake.sent.at(-1) as Record<string, unknown>).requestId).toBe(
+            contract.requestId,
+          );
+          expect((fake.sent.at(-1) as { details: { reason: string } }).details.reason).toBe(
+            "reminder",
+          );
+        }
       }
+      const runId = state.getInteraction(contract.requestId)!.runId;
+      await waitUntil(
+        () => state.workflowMessages.listRun(runId).some((message) => message.kind === "terminal"),
+        30_000,
+      );
+      expect(
+        state.workflowMessages.listRun(runId).filter((message) => message.kind === "step"),
+      ).toHaveLength(3);
+      expect(state.getInteraction(contract.requestId)?.status).toBe("cancelled");
       await fake.runCommand("cancel");
     } finally {
       state.close();
@@ -1019,7 +1035,7 @@ export default defineWorkflow({
     }
   }, 60_000);
 
-  it("delivers hosted notifications and deterministic terminal notices once each", async () => {
+  it("delivers passive notifications and model-triggering terminal handoffs once each", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeDeliveryWorkflow(cwd);
     const fake = makePi({ cwd, persistSentMessages: false });
@@ -1061,7 +1077,7 @@ export default defineWorkflow({
     expect(fake.sent.find((entry) => entry.customType === "pi-workflows-terminal")).toMatchObject({
       content: expect.stringContaining('"finalOutput":{"complete":true}'),
       display: true,
-      delivery: { triggerTurn: false },
+      delivery: { triggerTurn: true },
     });
     await fake.emit("session_shutdown");
   }, 60_000);
@@ -1120,6 +1136,10 @@ export default defineWorkflow({
       1,
     );
     fake.flushSentMessages();
+    fake.setIdle(false);
+    await fake.emit("agent_start");
+    await fake.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+    fake.setIdle(true);
     await fake.emit("agent_settled");
     await waitUntil(
       () =>

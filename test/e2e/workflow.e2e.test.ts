@@ -495,6 +495,16 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ({ messages, lastRole }) => {
         const contract = latestStepContract(messages);
         if (
+          JSON.stringify(messages.at(-1)?.content).includes(
+            "Return responsibility to the regular Pi model.",
+          )
+        ) {
+          return {
+            kind: "text",
+            text: "Terminal recovery checked the result. No further work is needed.",
+          };
+        }
+        if (
           contract?.workflow === "timeout-recovery-e2e" &&
           contract.step === "recover" &&
           lastRole === "tool" &&
@@ -551,6 +561,11 @@ describe.sequential("out-of-process workflow server end to end", () => {
           };
         }
         if (contract.workflow === "assistant-e2e" && contract.step === "prepare") {
+          if (
+            !JSON.stringify(messages.at(-1)?.content).includes("The previous turn ended without")
+          ) {
+            return { kind: "text", text: "The result is ready, but no submission was made." };
+          }
           return {
             kind: "tool",
             toolName: "workflow",
@@ -929,7 +944,10 @@ describe.sequential("out-of-process workflow server end to end", () => {
     ).toBe(true);
 
     const stepEntries = customEntriesForRun(entries, "pi-workflows-step", runId);
-    expect(stepEntries).toHaveLength(2);
+    expect(stepEntries).toHaveLength(3);
+    expect(
+      stepEntries.filter((entry) => isRecord(entry.details) && entry.details.reason === "reminder"),
+    ).toHaveLength(1);
     const stepRequestIds = stepEntries.map((entry) =>
       isRecord(entry.details) ? entry.details.requestId : undefined,
     );
@@ -946,14 +964,21 @@ describe.sequential("out-of-process workflow server end to end", () => {
         mock.requests.filter(({ messages }) =>
           JSON.stringify(messages.at(-1)).includes(deliveryPrompt),
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(deliveryPrompt === "Submit the structured E2E input." ? 2 : 1);
     }
 
     expect(
       mock.requests.filter(({ messages }) =>
         JSON.stringify(messages.at(-1)).includes("Workflow assistant-e2e: completed."),
       ),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
+    expect(
+      entries.some((entry) =>
+        JSON.stringify(entry).includes(
+          "Terminal recovery checked the result. No further work is needed.",
+        ),
+      ),
+    ).toBe(true);
 
     const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
     try {

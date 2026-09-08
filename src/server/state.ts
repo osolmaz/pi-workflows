@@ -450,9 +450,10 @@ export class ServerStateStore {
     request: InteractiveRequestRecord,
     reason: WorkflowStepReason,
     now: number = Date.now(),
+    reminderTurnId?: string,
   ) {
     const kind = request.kind === "decision" || request.kind === "checkpoint" ? "decision" : "step";
-    const idempotencyKey = `${request.revision}:${reason}`;
+    const idempotencyKey = `${request.revision}:${reason}${reminderTurnId === undefined ? "" : `:${reminderTurnId}`}`;
     const workflowMessageId = workflowMessageIdFor(kind, request.requestId, idempotencyKey);
     const content =
       kind === "decision"

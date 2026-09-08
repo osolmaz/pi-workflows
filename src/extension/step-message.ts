@@ -19,7 +19,7 @@ import {
 export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = WORKFLOW_STEP_MESSAGE_TYPE;
 export const WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA = "pi-workflows.agent-step-message.v1";
 
-type PromptDeliveryReason = "initial" | "resumed";
+type PromptDeliveryReason = "initial" | "resumed" | "reminder";
 
 export type WorkflowAgentStepMessageDetails = {
   schema: typeof WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA;
@@ -226,7 +226,9 @@ function parseDetails(value: unknown): WorkflowAgentStepMessageDetails | undefin
   if (candidate.schema !== WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA) return undefined;
   if (
     candidate.kind !== "step" ||
-    (candidate.reason !== "initial" && candidate.reason !== "resumed") ||
+    (candidate.reason !== "initial" &&
+      candidate.reason !== "resumed" &&
+      candidate.reason !== "reminder") ||
     typeof candidate.requestId !== "string" ||
     typeof candidate.workflowMessageId !== "string"
   ) {

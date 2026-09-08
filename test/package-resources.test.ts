@@ -199,7 +199,9 @@ describe("Pi package resources", () => {
 
     expect(links.length).toBeGreaterThan(0);
     for (const link of links) {
-      await expect(fs.stat(path.resolve(path.dirname(skillPath), link))).resolves.toBeDefined();
+      await expect(
+        fs.stat(path.resolve(path.dirname(skillPath), link.split("#")[0]!)),
+      ).resolves.toBeDefined();
     }
   });
 });

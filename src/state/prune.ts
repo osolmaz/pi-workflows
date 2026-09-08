@@ -330,6 +330,14 @@ function selectRunTrees(
     );
   }
 
+  for (const recovery of database
+    .prepare(
+      "SELECT run_id AS runId, recovery_root_run_id AS rootRunId FROM runs WHERE recovery_root_run_id IS NOT NULL",
+    )
+    .all() as { runId: string; rootRunId: string }[]) {
+    linkRuns(links, rowIds, recovery.runId, recovery.rootRunId);
+  }
+
   const components: string[][] = [];
   const visited = new Set<string>();
   for (const row of rows) {

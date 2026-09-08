@@ -8,7 +8,7 @@ export const WORKFLOW_TURN_SCHEMA = "pi-workflows.workflow-turn.v1" as const;
 
 export type WorkflowMessageKind = "step" | "decision" | "notification" | "terminal" | "followUp";
 export type WorkflowMessageStatus = "pending" | "sent" | "cancelled";
-export type WorkflowStepReason = "initial" | "resumed";
+export type WorkflowStepReason = "initial" | "resumed" | "reminder";
 export type WorkflowTurnState = "started" | "ended";
 export type WorkflowTurnStopReason = "completed" | "aborted" | "error" | "lost";
 
@@ -472,7 +472,7 @@ export function isWorkflowMessageContent(value: unknown): value is WorkflowMessa
 function validateContent(content: WorkflowMessageContent, kind: WorkflowMessageKind): void {
   if (!isWorkflowMessageContent(content)) throw new Error("Workflow message content is invalid");
   const shouldTrigger = kind === "step" || kind === "followUp";
-  if (content.triggerTurn !== shouldTrigger) {
+  if (kind !== "terminal" && content.triggerTurn !== shouldTrigger) {
     throw new Error(`Workflow message kind ${kind} has invalid turn behavior`);
   }
   canonicalJson(content);

@@ -2852,7 +2852,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       expect(messages.map((message) => message.kind)).toEqual(["notification", "terminal"]);
       expect(messages[0]?.content.content).toBe("ServerBacked progress.");
       expect(messages[1]?.content.content).toContain('"finalOutput":{"delivered":true}');
-      expect(messages[1]?.content).toMatchObject({ display: true, triggerTurn: false });
+      expect(messages[1]?.content).toMatchObject({ display: true, triggerTurn: true });
 
       const subscribed = await client.request({
         operation: "view.session.watch",
@@ -2890,15 +2890,15 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           payload: {
             state: "started",
             workflowMessageId: terminal.workflowMessageId,
-            workflowTurnId: "invalid-terminal-turn",
+            workflowTurnId: "terminal-recovery-turn",
             runId: terminal.runId,
             targetSessionId: terminal.targetSessionId,
             coordinatorEpoch,
           },
         }),
       ).resolves.toMatchObject({
-        outcome: "rejected",
-        error: "Workflow message does not start a model turn",
+        outcome: "accepted",
+        receipt: { ownership: "active", turn: { state: "started" } },
       });
       const afterStaleReport = new ServerStateStore(databasePath, { readOnly: true });
       try {
@@ -2906,7 +2906,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           afterStaleReport.state.connection
             .prepare("SELECT COUNT(*) AS count FROM workflow_turns WHERE workflow_message_id = ?")
             .get(terminal.workflowMessageId),
-        ).toEqual({ count: 0 });
+        ).toEqual({ count: 1 });
       } finally {
         afterStaleReport.close();
       }

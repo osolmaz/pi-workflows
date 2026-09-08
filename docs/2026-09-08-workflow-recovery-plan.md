@@ -2,7 +2,7 @@
 title: Restore workflow recovery turns and submission reminders
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-08
-status: planned
+status: in-progress
 ---
 
 # Restore workflow recovery turns and submission reminders
@@ -189,6 +189,23 @@ npm run test:e2e:live -- --provider openrouter --model deepseek/deepseek-v4-flas
 Extend that harness to cover actual terminal recovery and reminder delivery; its current success does not establish the restored behavior. Record exact package and Pi versions, model and API, observed cost, run identifiers, transcript evidence, cancellation results, and cleanup. Do not substitute another model or persist credentials.
 
 If the implementation is assigned through the legacy implementation process, push before `pi-reviewer --base main`, address findings, and inspect CI after review passes. Review and merge authority come from that implementation request, not from this documentation task.
+
+## Implementation record
+
+The user subsequently authorized implementation through the legacy implementation
+process. Work is on `feat/restore-workflow-recovery`.
+
+The implementation uses two reminders per pending attempt, two automatic launches
+per recovery chain, and a 15-minute active-time budget per terminal turn. Source
+references and elapsed time use existing run, message, and turn records. Explicit
+cancellation and interrupted recovery stop automatic continuation without deleting
+accepted results or delivery evidence.
+
+Real-Pi tests with a local mock model exercise a missed submission, the exact-request
+reminder, accepted submission, and the final model reply. The package's model-free
+installed test also uses a local mock for terminal turns; it must not make paid calls.
+The full validation and review record will be added before completion. This change
+does not install into an active profile or reset live state.
 
 ## Completion
 

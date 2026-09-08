@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -665,7 +666,9 @@ async function startPi(context) {
     "--offline",
     "--approve",
   ];
-  if (!context.options.runtimeOnly) {
+  if (context.options.runtimeOnly) {
+    args.push("--provider", "runtime-fixture", "--model", "runtime-fixture");
+  } else {
     args.push("--provider", context.options.provider, "--model", context.options.model);
   }
   const child = spawn(process.execPath, args, {
@@ -1096,7 +1099,42 @@ async function execute(root, options) {
 
   let rpc;
   let client;
+  let fixtureServer;
   try {
+    if (options.runtimeOnly) {
+      fixtureServer = http.createServer((request, response) => {
+        request.resume();
+        request.on("end", () => {
+          response.writeHead(200, { "Content-Type": "text/event-stream" });
+          const chunk = (delta, finishReason) => ({
+            id: "runtime-fixture",
+            object: "chat.completion.chunk",
+            created: 0,
+            model: "runtime-fixture",
+            choices: [{ index: 0, delta, finish_reason: finishReason }],
+          });
+          response.write(
+            `data: ${JSON.stringify(chunk({ role: "assistant", content: "The runtime check completed. No further work is needed." }, null))}\n\n`,
+          );
+          response.end(`data: ${JSON.stringify(chunk({}, "stop"))}\n\ndata: [DONE]\n\n`);
+        });
+      });
+      await new Promise((resolve) => fixtureServer.listen(0, "127.0.0.1", resolve));
+      await fs.writeFile(
+        path.join(context.profile, "models.json"),
+        JSON.stringify({
+          providers: {
+            "runtime-fixture": {
+              baseUrl: `http://127.0.0.1:${fixtureServer.address().port}/v1`,
+              api: "openai-completions",
+              apiKey: "fixture-not-a-credential",
+              compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
+              models: [{ id: "runtime-fixture" }],
+            },
+          },
+        }),
+      );
+    }
     await fs.access(options.piEntry);
     const candidate = await installCandidate(context);
     const piwBinary = await buildPiw(context);
@@ -1191,6 +1229,7 @@ async function execute(root, options) {
       await waitForEndpointClosed(endpoint);
     }
     await stopChildren(context.children);
+    if (fixtureServer !== undefined) await new Promise((resolve) => fixtureServer.close(resolve));
   }
 }
 
