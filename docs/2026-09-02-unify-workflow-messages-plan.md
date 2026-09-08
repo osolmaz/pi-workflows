@@ -7,7 +7,7 @@ status: approved
 
 # Unify workflow messages and restore hosted behavior
 
-> Historical plan. The [durable execution plan](2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+> Historical plan. The [durable execution plan](2026-09-06-durable-execution-plan.md) changed its continuation, scheduling, and automatic model-turn choices. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) now restores the required terminal recovery and reminder behavior on the current architecture. Use this earlier plan as behavioral evidence, not as authority to revert newer ownership, request, or checkpoint fixes. Runtime restoration is pending.
 
 ## Summary
 

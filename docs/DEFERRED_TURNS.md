@@ -1,5 +1,7 @@
 # Terminal workflow messages
 
+> This page describes the currently shipped behavior. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) requires a post-workflow model handoff with bounded automatic recovery, cancellation, and ordered follow-ups. The no-turn behavior below is a known implementation gap, not a rule for future changes.
+
 A terminal notice is a visible report of saved execution facts. It does not ask
 Pi to call a model. It uses the same [workflow-message path](WORKFLOW_STEP_MESSAGES.md)
 as steps, protected decisions, notifications, and explicit follow-ups.
@@ -82,7 +84,9 @@ model-turn identity. `workflow_follow_ups` owns saved follow-up prompts.
 The earlier [deferred-turn plan](plans/2026-08-21-deferred-turn-intents-plan.md) and
 [terminal restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md) are
 historical. The [durable execution plan](2026-09-06-durable-execution-plan.md)
-supersedes their continuation and automatic terminal-turn behavior.
+changed their continuation and automatic terminal-turn behavior. The September 8
+recovery plan supersedes the removal of terminal model turns while preserving
+same-run checkpoints and the newer ownership and receipt protections.
 
 This alpha contract changes in place. There is no compatibility reader, parallel
 schema, fallback sender, or migration. Incompatible local state stays untouched

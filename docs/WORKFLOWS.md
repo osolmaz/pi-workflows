@@ -259,6 +259,8 @@ snapshots omit them. Snapshots keep fixed numbers and fixed `null` values.
 
 ### Explicit summaries and fresh restarts
 
+> This section and the missing-submission behavior above describe the current runtime. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) requires general post-workflow model turns, bounded submission reminders, and safe automatic recovery within existing permission. Restoration is pending. Explicit summaries and restart APIs alone do not satisfy those requirements.
+
 Terminal notices show the recorded status, result, and error. They are visible
 messages, not model prompts. Use an explicit `assistantMessage()` node when a
 workflow needs a written explanation. `presentationPrompt` is not supported.

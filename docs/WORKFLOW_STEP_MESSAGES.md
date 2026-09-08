@@ -1,6 +1,6 @@
 # Workflow messages in Pi
 
-This is the current workflow-message contract. The [durable execution plan](2026-09-06-durable-execution-plan.md) supersedes the earlier automatic terminal-turn and reminder behavior.
+This page describes the currently shipped workflow-message contract. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) requires restoration of post-workflow model turns and bounded missing-submission reminders. Its delivery, cancellation, follow-up, rendering, and recording requirements supersede the no-turn design choice below, but implementation remains pending. Keep the current-runtime descriptions below until that work ships.
 
 ## Goal
 

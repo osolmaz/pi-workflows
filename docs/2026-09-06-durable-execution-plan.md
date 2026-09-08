@@ -7,7 +7,7 @@ status: complete
 
 # Simplify durable workflow execution
 
-> The decisions below to remove post-workflow model turns and missing-submission reminders are superseded by [Required recovery behavior](DESIGN_PHILOSOPHY.md#required-recovery-behavior). Both are required product behavior and still need runtime restoration. This plan records the earlier implementation; its completed status does not mean those requirements are satisfied.
+> The decisions below to remove post-workflow model turns and missing-submission reminders are superseded by [Required recovery behavior](DESIGN_PHILOSOPHY.md#required-recovery-behavior) and the [workflow recovery plan](2026-09-08-workflow-recovery-plan.md). Both are required product behavior and still need runtime restoration. This plan records the earlier implementation; its completed status does not mean those requirements are satisfied.
 
 ## Goal
 

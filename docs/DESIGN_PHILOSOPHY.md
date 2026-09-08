@@ -42,7 +42,7 @@ When a model turn ends without the required submission, give the model a bounded
 
 Tests must protect both behaviors through completion, failure, interruption, rejected submissions, retry exhaustion, and explicit cancellation. An API that permits recovery is not enough; verify that the model receives the required opportunity to act.
 
-The current implementation still needs restoration of the general post-workflow turn and missing-submission reminders. Existing summaries and workflow-specific repair steps do not close that gap. This section supersedes the removal decisions in the September 6 durable execution plan; it does not claim that restoration has shipped.
+The current implementation still needs restoration of the general post-workflow turn and missing-submission reminders. Existing summaries and workflow-specific repair steps do not close that gap. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) defines the implementation and acceptance tests. These requirements supersede the removal decisions in the September 6 durable execution plan; they do not claim that restoration has shipped.
 
 ## Durable runs
 
