@@ -40,6 +40,14 @@ export class WorkflowRecovery {
       .find((candidate) => this.messages.require(candidate.workflowMessageId).kind === "terminal");
     if (turn === undefined) return undefined;
     if (this.stopped(turn.workflowMessageId)) throw new Error("Workflow recovery is stopped");
+    const consumed = this.state.connection
+      .prepare("SELECT run_id AS runId FROM runs WHERE recovery_source_message_id = ?")
+      .get(turn.workflowMessageId) as { runId: string } | undefined;
+    if (consumed !== undefined) {
+      throw new Error(
+        `This terminal handoff already started recovery run ${consumed.runId}. Inspect or adopt that run; do not repeat work.`,
+      );
+    }
     const rootRunId = this.root(turn.runId);
     const count = this.launchCount(rootRunId);
     if (count >= MAX_RECOVERY_LAUNCHES) {

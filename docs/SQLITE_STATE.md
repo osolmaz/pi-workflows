@@ -278,8 +278,9 @@ A settings scope uses its resource revision as its public change number. Each ac
 
 Recovery uses existing records. `runs.recovery_root_run_id` and
 `runs.recovery_source_message_id` bind an automatic start or restart to the exact
-terminal message and original chain. Counting those child rows enforces the shared
-two-launch limit. Pruning treats the chain as one connected run tree.
+terminal message and original chain. A unique source-message index permits only
+one new run per handoff, including after that run finishes. Counting the child rows
+enforces the shared two-launch limit. Pruning treats the chain as one connected run tree.
 `workflow_messages.recovery_stop` records cancellation, interruption, or timeout
 without removing delivery evidence. `workflow_turns.active_elapsed_ms` saves the
 terminal turn's active time; a monotonic clock excludes disconnected time and host

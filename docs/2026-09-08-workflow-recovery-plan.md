@@ -2,7 +2,7 @@
 title: Restore workflow recovery turns and submission reminders
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-08
-status: in-progress
+status: implemented
 ---
 
 # Restore workflow recovery turns and submission reminders
@@ -13,7 +13,7 @@ When a workflow ends or fails, the regular Pi model must check whether the user'
 
 The user explicitly identified both behaviors as part of the design and required rules against removing them again. A finished workflow does not necessarily mean a finished user task. A workflow is a tool the regular model uses; it does not replace the model's responsibility for the task.
 
-This plan implements [Required recovery behavior](DESIGN_PHILOSOPHY.md#required-recovery-behavior). It records the agreed direction and the decisions still needed before implementation. No runtime restoration has shipped through this documentation change.
+This plan implements [Required recovery behavior](DESIGN_PHILOSOPHY.md#required-recovery-behavior). The runtime restoration and its validation are recorded in [pull request #88](https://github.com/osolmaz/pi-workflows/pull/88).
 
 ## Required behavior
 
@@ -195,8 +195,9 @@ If the implementation is assigned through the legacy implementation process, pus
 The user subsequently authorized implementation through the legacy implementation
 process. Work is on `feat/restore-workflow-recovery`.
 
-The implementation uses two reminders per pending attempt, two automatic launches
-per recovery chain, and a 15-minute active-time budget per terminal turn. Source
+The implementation uses two reminders per pending attempt, one new recovery run
+per terminal handoff, two automatic launches per recovery chain, and a 15-minute
+active-time budget per terminal turn. Source
 references and elapsed time use existing run, message, and turn records. Explicit
 cancellation and interrupted recovery stop automatic continuation without deleting
 accepted results or delivery evidence.
@@ -204,8 +205,23 @@ accepted results or delivery evidence.
 Real-Pi tests with a local mock model exercise a missed submission, the exact-request
 reminder, accepted submission, and the final model reply. The package's model-free
 installed test also uses a local mock for terminal turns; it must not make paid calls.
-The full validation and review record will be added before completion. This change
-does not install into an active profile or reset live state.
+The configured full check passed 1,255 tests with 90.98% statement, 85.60% branch,
+95.26% function, and 92.58% line coverage. Real-Pi fixture tests passed all 14 tests.
+Slophammer checks, Rust tests, Clippy, Rust formatting, package packing, and SimpleDoc
+validation passed. The installed runtime-only test passed with a local mock model.
+
+The final installed real-model canary used package 0.16.8, Pi 0.85.0,
+`openai/gpt-5.6-luna`, `openai-responses`, and a 4,096-token output allowance. Its
+model run was `20260908T133732245Z-live-model-e2e-ea7458f0`; its runtime run was
+`20260908T133603468Z-live-runtime-e2e-2f4f3c40`. The harness recorded $0.0032974 for
+the model workflow, not for all validation work. Credentials were used in place;
+the harness stopped its temporary processes and removed its temporary state.
+
+Pi Reviewer initially found that one terminal handoff could launch another run
+after its first recovery run finished. The source-message admission check and unique
+index now prevent that case. The second review found no issues. CI and the final
+merge record are tracked in pull request #88. This change does not install into an
+active profile or reset live state.
 
 ## Completion
 

@@ -284,8 +284,9 @@ effects. The host rejects a stale revision or unsettled external effects before
 reserving work. An identical retry adopts the same child run.
 
 An owned terminal turn can start or restart work within existing user permission.
-Both commands count toward a shared limit of two automatic launches per recovery
-chain. Each terminal turn has a 15-minute active-time limit. Disconnects and server
+Each terminal handoff can create only one recovery run. Repeated commands must
+adopt that run, even after it finishes. Both commands count toward a shared limit
+of two automatic launches per recovery chain. Each terminal turn has a 15-minute active-time limit. Disconnects and server
 downtime do not consume that time. Saved launch counts and active elapsed time survive
 reconnects. An interrupted recovery turn stops with a visible blocker rather than
 silently replaying work. A later explicit user request can authorize new work.

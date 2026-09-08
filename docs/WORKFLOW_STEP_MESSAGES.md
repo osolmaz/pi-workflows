@@ -16,13 +16,13 @@ A workflow message is content that Pi Workflows requires Pi to add to one conver
 
 The message kinds are:
 
-| Kind           | Pi behavior                                      | Purpose                                    |
-| -------------- | ------------------------------------------------ | ------------------------------------------ |
-| `step`         | Custom message that starts a model turn          | Initial, resumed, or reminder prompt       |
-| `decision`     | Custom message that does not start a model turn  | Protected choice for a person              |
-| `notification` | Custom message that does not start a model turn  | Passive workflow notice                    |
+| Kind           | Pi behavior                                     | Purpose                                    |
+| -------------- | ----------------------------------------------- | ------------------------------------------ |
+| `step`         | Custom message that starts a model turn         | Initial, resumed, or reminder prompt       |
+| `decision`     | Custom message that does not start a model turn | Protected choice for a person              |
+| `notification` | Custom message that does not start a model turn | Passive workflow notice                    |
 | `terminal`     | Starts a model turn unless explicitly cancelled | Recorded result and bounded recovery       |
-| `followUp`     | Custom message that starts normal work           | Work saved for after successful completion |
+| `followUp`     | Custom message that starts normal work          | Work saved for after successful completion |
 
 The server stores one `WorkflowMessage` record before Pi can send it:
 

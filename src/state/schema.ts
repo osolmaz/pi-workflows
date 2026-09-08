@@ -149,6 +149,8 @@ CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
 CREATE INDEX runs_recovery_root_idx ON runs(recovery_root_run_id);
+CREATE UNIQUE INDEX runs_recovery_source_idx ON runs(recovery_source_message_id)
+  WHERE recovery_source_message_id IS NOT NULL;
 CREATE UNIQUE INDEX runs_restart_parent_idx ON runs(parent_run_id)
   WHERE lineage_kind = 'restart';
 
