@@ -624,7 +624,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
         }
         if (contract.workflow === "restart-e2e") {
           if (holdRestartSubmission) {
-            return { kind: "text", text: "The durable request is still pending." };
+            return { kind: "text", text: "Waiting for the restart pause. ".repeat(500) };
           }
           return {
             kind: "tool",
@@ -1196,7 +1196,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await waitForPiIdle(pi);
   }, 60_000);
 
-  it("adopts one durable interaction across a real Pi restart", async () => {
+  it("adopts one paused durable interaction across a real Pi restart", async () => {
     pi.send({ id: "restart-start", type: "prompt", message: "/workflow restart-e2e" });
     const interaction = await waitForPendingInteraction(
       databasePath,
@@ -1205,6 +1205,20 @@ describe.sequential("out-of-process workflow server end to end", () => {
       () => rpcDiagnostic(pi),
     );
     await waitForRequestEntry(pi, interaction.requestId);
+    const control = new WorkflowClient({ databasePath });
+    try {
+      expect(
+        await control.request({ operation: "run.pause", runId: interaction.runId }),
+      ).toMatchObject({ outcome: "accepted" });
+    } finally {
+      await control.close();
+    }
+    await waitForRun(
+      databasePath,
+      "restart-e2e",
+      (candidate) => candidate.paused === true,
+      () => rpcDiagnostic(pi),
+    );
     await waitForPiIdle(pi);
     const requestEntriesBeforeRestart = requestEntryKeys(
       await readRpcEntries(pi),
@@ -1246,7 +1260,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     }
 
     holdRestartSubmission = false;
-    pi.send({ id: "restart-continue", type: "prompt", message: "Complete the pending workflow." });
+    pi.send({ id: "restart-continue", type: "prompt", message: "/workflow resume" });
     const { state } = await waitForRun(
       databasePath,
       "restart-e2e",
@@ -1254,9 +1268,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
       () => rpcDiagnostic(pi),
     );
     expect(state.finalOutput).toEqual({ finished: true });
-    expect(requestEntryKeys(await readRpcEntries(pi), interaction.requestId)).toEqual(
-      requestEntriesBeforeRestart,
-    );
+    const resumedRequestEntries = requestEntryKeys(await readRpcEntries(pi), interaction.requestId);
+    expect(resumedRequestEntries).toHaveLength(requestEntriesBeforeRestart.length + 1);
+    expect(resumedRequestEntries.slice(0, -1)).toEqual(requestEntriesBeforeRestart);
 
     const serverState = new ServerStateStore(databasePath, { readOnly: true });
     let submission:
