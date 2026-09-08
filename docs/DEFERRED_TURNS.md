@@ -39,8 +39,9 @@ retains ownership until Pi confirms settlement.
 ## Recovery limits and next work
 
 An owned terminal turn may restart the exact run or start corrected work within
-existing permission. Both commands share a limit of two automatic launches per
-recovery chain. A terminal turn has a 15-minute active-time limit; disconnected time
+existing permission. Each terminal handoff can create only one recovery run;
+repeated commands must adopt it. Both commands share a limit of two automatic
+launches per recovery chain. A terminal turn has a 15-minute active-time limit; disconnected time
 and server downtime are excluded. Saved counts and elapsed time survive reconnect.
 These limits do not grant spending, merge, release, or deployment permission.
 

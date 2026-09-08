@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { expect, it } from "vitest";
 import workflow from "../examples/workflows/echo.workflow.js";
+import { WorkflowClient } from "../src/client/client.js";
 import { terminalMessageView } from "../src/extension/terminal-message.js";
 import { WorkflowRecovery, recoveryStopped } from "../src/server/recovery.js";
+import { WorkflowServer } from "../src/server/server.js";
 import { canonicalJson } from "../src/state/json.js";
 import { WorkflowMessageStore } from "../src/state/workflow-messages.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
@@ -22,7 +24,7 @@ async function fixture() {
   let wall = 1000;
   const clock = { monotonic: () => mono, now: () => wall };
   const recovery = new WorkflowRecovery(queue.state, clock, 500);
-  function run(runId: string) {
+  function reserve(runId: string) {
     queue.reserveWorkflowRun({
       runId,
       workflowName: "echo",
@@ -34,6 +36,9 @@ async function fixture() {
       launchOptions: {},
       originSessionId: "session",
     });
+  }
+  function run(runId: string) {
+    reserve(runId);
     expect(queue.failWorkflowRun({ runId, errorCode: "fixture", errorMessage: "fixture" })).toBe(
       true,
     );
@@ -78,6 +83,8 @@ async function fixture() {
     });
   }
   return {
+    databasePath: path.join(directory, "state.sqlite"),
+    reserve,
     queue,
     messages,
     recovery,
@@ -107,6 +114,7 @@ it("counts corrected starts and restarts in the same durable recovery budget", a
       f.run(child);
       f.recovery.attach(child, source);
       f.recovery.attach(child, source); // Repeated receipt adoption is not another launch.
+      expect(() => f.recovery.sourceForLaunch("session")).toThrow("already started recovery run");
       f.end(index === 1 ? "root" : "child-1");
       f.start(child);
     }
@@ -117,6 +125,53 @@ it("counts corrected starts and restarts in the same durable recovery budget", a
     expect(recoveryStopped(f.queue.state, "terminal-child-2")).toBe(true);
     expect(() => restarted.sourceForLaunch("session")).toThrow("stopped");
   } finally {
+    f.queue.close();
+  }
+});
+
+it("rejects a second launch from a consumed handoff even after the first run finishes", async () => {
+  const f = await fixture();
+  try {
+    f.run("root");
+    f.start("root");
+    const source = f.recovery.sourceForLaunch("session");
+    f.run("first");
+    f.recovery.attach("first", source);
+    expect(() => new WorkflowRecovery(f.queue.state).sourceForLaunch("session")).toThrow(
+      "already started recovery run first",
+    );
+    f.run("second");
+    expect(() => f.recovery.attach("second", source)).toThrow(
+      "UNIQUE constraint failed: runs.recovery_source_message_id",
+    );
+    expect(f.recovery.launchCount("root")).toBe(1);
+  } finally {
+    f.queue.close();
+  }
+});
+
+it("prevents concurrent recovery siblings and cancels the sole queued child", async () => {
+  const f = await fixture();
+  const host = new WorkflowServer({ databasePath: f.databasePath, claimPollMs: 60_000 });
+  const client = new WorkflowClient({ databasePath: f.databasePath });
+  try {
+    await host.start();
+    f.run("root");
+    const source = { rootRunId: "root", runId: "root", messageId: "terminal-root" };
+    f.reserve("first");
+    f.recovery.attach("first", source);
+    expect(() => f.reserve("second")).toThrow(
+      "UNIQUE constraint failed: run_queue.origin_session_id",
+    );
+    expect(await client.request({ operation: "run.cancel", runId: "first" })).toMatchObject({
+      outcome: "accepted",
+    });
+    expect(f.queue.getWorkflowRun("first")?.status).toBe("cancelled");
+    expect(f.queue.getWorkflowRun("second")).toBeUndefined();
+    expect(f.queue.getWorkflowRun("root")?.status).toBe("failed");
+  } finally {
+    await client.close();
+    await host.stop();
     f.queue.close();
   }
 });
