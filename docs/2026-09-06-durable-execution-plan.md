@@ -7,6 +7,8 @@ status: complete
 
 # Simplify durable workflow execution
 
+> The decisions below to remove post-workflow model turns and missing-submission reminders are superseded by [Required recovery behavior](DESIGN_PHILOSOPHY.md#required-recovery-behavior). Both are required product behavior and still need runtime restoration. This plan records the earlier implementation; its completed status does not mean those requirements are satisfied.
+
 ## Goal
 
 Repeated failures have made Pi Workflows difficult to trust. In the reported incident, an agent step accepted a checkpoint answer, reserved a bad continuation, and left its original request pending. A correct submission then selected another pending request. The user approved one coordinated simplification rather than separate guards for each symptom.

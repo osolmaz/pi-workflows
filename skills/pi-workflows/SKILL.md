@@ -19,7 +19,7 @@ Use the smallest applicable action:
 - `status` reads the active run, or the named run when `runId` is supplied.
 - `pause`, `resume`, and `cancel` control the current active run.
 - `answer` completes the exact ordinary checkpoint request in the same run. It cannot complete an agent step or satisfy a protected `humanDecision()` gate.
-- `restart` creates fresh work only when the user explicitly requested it. Supply the exact terminal `runId` and use the view's `runRevision` as `expectedRevision`, not its presentation `revision`. It does not copy old steps, settings changes, approvals, or effects.
+- `restart` creates fresh work when explicitly requested or when safe recovery is covered by existing user permission. Explicit user cancellation stops automatic recovery. Preserve accepted work and inspect uncertain side effects before deciding to restart; do not blindly repeat them. Supply the exact terminal `runId` and use the view's `runRevision` as `expectedRevision`, not its presentation `revision`. It does not copy old steps, settings changes, approvals, or effects.
 - `update` publishes a non-completing durable update for the active step attempt.
 - `submit` completes an active submitted agent step with its required output. An assistant-message step completes through its normal visible reply instead.
 
@@ -79,7 +79,7 @@ Follow these rules:
 - Set explicit step and command timeouts.
 - Bound ordinary loops with `maxSteps` or another clear finish rule.
 - Use a controller instead of a workflow for indefinite resource reconciliation.
-- Declare all model work in the graph. Use an assistant-message agent for a visible explanation. Terminal notices report saved facts and never start a model turn. Do not use `presentationPrompt` or add reminder loops outside the graph.
+- Make model work explicit and bounded. Preserve the required post-workflow recovery turn and missing-submission reminders in [Design philosophy](../../docs/DESIGN_PHILOSOPHY.md#required-recovery-behavior). A summary node or passive terminal notice does not replace recovery. Do not remove these behaviors to simplify the graph or message delivery. Their general runtime restoration is still pending; do not claim that narrower repair steps provide it.
 - Preserve the single active workflow rule in one Pi session.
 
 Read [../../docs/WORKFLOWS.md](../../docs/WORKFLOWS.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/HUMAN_DECISIONS.md](../../docs/HUMAN_DECISIONS.md) before adding a human gate or channel. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.

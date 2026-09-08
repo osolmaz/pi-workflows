@@ -28,6 +28,26 @@ Repository rules:
   interface requires it. Document that requirement and keep the complete result available.
 - New engine features need unit tests and a section in `docs/WORKFLOWS.md`.
 
+## Required recovery behavior
+
+Follow [Required recovery behavior](docs/DESIGN_PHILOSOPHY.md#required-recovery-behavior).
+These are part of the product design, not optional presentation features:
+
+- Preserve a post-workflow model turn to explain results, inspect failures, correct mistakes, and
+  automatically continue or restart within existing permission. Explicit user cancellation stops
+  automatic continuation. A workflow-specific summary node is not a replacement.
+- Preserve bounded missing-submission reminders so the model can submit or correct the exact pending
+  result instead of leaving the workflow waiting silently. Respect active turns, pause, cancellation,
+  accepted results, and protected human decisions.
+- Preserve accepted work and existing authority checks. Never blindly repeat uncertain side effects.
+  Stop with a clear blocker when safe recovery or reminder attempts are exhausted.
+- Do not remove, disable, or narrow either behavior without explicit user approval for that specific
+  change. A refactor, alpha hard cut, or general architectural principle is not that approval.
+- Test the actual model handoff, correction, bounded recovery, and cancellation behavior. The presence
+  of restart APIs or tests that merely assert no further turn occurs is not proof of preservation.
+- The general post-workflow turn and missing-submission reminders still require runtime restoration.
+  Do not mark that work complete based on documentation changes or narrower repair paths.
+
 ## Built-in workflow skill style
 
 Skills that start a built-in workflow must help the model make one complete start call. Follow this
