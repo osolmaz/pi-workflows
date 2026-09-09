@@ -142,8 +142,25 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "11" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "12" });
     expect(resolved.definition.name).toBe("monitor");
+    expect(resolved.sources.every((item) => item.source.kind === "builtin")).toBe(true);
+    expect(resolved.sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          workflowName: "workspace-preparation",
+          source: { kind: "builtin", id: "workspace-preparation", revision: "1" },
+        }),
+        expect.objectContaining({
+          workflowName: "change-verification",
+          source: { kind: "builtin", id: "change-verification", revision: "1" },
+        }),
+        expect.objectContaining({
+          workflowName: "plan-change",
+          source: { kind: "builtin", id: "plan-change", revision: "1" },
+        }),
+      ]),
+    );
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
       "implementation",
       "implementation/documentation",

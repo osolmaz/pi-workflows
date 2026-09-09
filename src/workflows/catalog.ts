@@ -15,6 +15,7 @@ export type BuiltinWorkflowRegistration = {
   id: string;
   revision: string;
   definition: WorkflowDefinition;
+  discoverable?: boolean;
   legacySources?: LegacyBuiltinSource[];
 };
 
@@ -23,6 +24,7 @@ export type BuiltinWorkflowEntry = Readonly<{
   ref: string;
   revision: string;
   definition: WorkflowDefinition;
+  discoverable: boolean;
   legacySources: readonly LegacyBuiltinSource[];
 }>;
 
@@ -60,6 +62,7 @@ export class BuiltinWorkflowCatalog {
         ref: `builtin:${registration.id}`,
         revision: registration.revision,
         definition: registration.definition,
+        discoverable: registration.discoverable ?? true,
         legacySources: Object.freeze(
           (registration.legacySources ?? []).map((legacy) =>
             Object.freeze({ ...legacy, pathSuffixes: Object.freeze([...legacy.pathSuffixes]) }),
@@ -73,6 +76,10 @@ export class BuiltinWorkflowCatalog {
 
   list(): BuiltinWorkflowEntry[] {
     return [...this.byId.values()];
+  }
+
+  listDiscoverable(): BuiltinWorkflowEntry[] {
+    return this.list().filter((entry) => entry.discoverable);
   }
 
   get(id: string): BuiltinWorkflowEntry | undefined {

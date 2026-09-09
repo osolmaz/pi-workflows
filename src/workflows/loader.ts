@@ -113,7 +113,7 @@ export async function discoverWorkflows(
       discovered.push({ name, ref: filePath, source });
     }
   }
-  for (const builtin of catalog?.list() ?? []) {
+  for (const builtin of catalog?.listDiscoverable() ?? []) {
     if (seenNames.has(builtin.definition.name)) continue;
     seenNames.add(builtin.definition.name);
     discovered.push({ name: builtin.definition.name, ref: builtin.ref, source: "builtin" });

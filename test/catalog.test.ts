@@ -17,9 +17,9 @@ describe("BuiltinWorkflowCatalog", () => {
   it("ships stable built-in revisions", () => {
     expect(builtinWorkflowCatalog.get("plain-summary")?.revision).toBe("3");
     expect(builtinWorkflowCatalog.get("autoplan")?.revision).toBe("6");
-    expect(builtinWorkflowCatalog.get("autodoc")?.revision).toBe("2");
-    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("11");
-    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("11");
+    expect(builtinWorkflowCatalog.get("autodoc")?.revision).toBe("3");
+    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("12");
+    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("12");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
     expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("6");
   });
@@ -39,6 +39,23 @@ describe("BuiltinWorkflowCatalog", () => {
 
     expect(catalog.resolve({ kind: "builtin", id: "fixture", revision: "r1" })).toBe(definition);
     expect(catalog.get("fixture")?.ref).toBe("builtin:fixture");
+  });
+
+  it("resolves hidden built-ins without listing them for discovery", () => {
+    const visible = fixture("visible");
+    const hidden = fixture("hidden");
+    const catalog = new BuiltinWorkflowCatalog([
+      { id: "visible", revision: "r1", definition: visible },
+      { id: "hidden", revision: "r1", definition: hidden, discoverable: false },
+    ]);
+
+    expect(catalog.list().map((entry) => entry.id)).toEqual(["visible", "hidden"]);
+    expect(catalog.listDiscoverable().map((entry) => entry.id)).toEqual(["visible"]);
+    expect(catalog.sourceForDefinition(hidden)).toEqual({
+      kind: "builtin",
+      id: "hidden",
+      revision: "r1",
+    });
   });
 
   it("rejects changed revisions with restart guidance and duplicate identities", () => {
