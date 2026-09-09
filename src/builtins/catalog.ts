@@ -2,21 +2,42 @@ import { BuiltinWorkflowCatalog } from "../workflows/catalog.js";
 import autodocWorkflow from "./autodoc.workflow.js";
 import autoimplementWorkflow from "./autoimplement.workflow.js";
 import autoplanWorkflow from "./autoplan.workflow.js";
+import changeVerificationWorkflow from "./change-verification.workflow.js";
 import monitorWorkflow from "./monitor.workflow.js";
 import plainSummaryWorkflow from "./plain-summary.workflow.js";
 import planApprovalWorkflow from "./plan-approval.workflow.js";
+import planChangeWorkflow from "./plan-change.workflow.js";
 import sanityCheckWorkflow from "./sanity-check.workflow.js";
+import workspacePreparationWorkflow from "./workspace-preparation.workflow.js";
 
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "plain-summary", revision: "3", definition: plainSummaryWorkflow },
   { id: "autoplan", revision: "6", definition: autoplanWorkflow },
-  { id: "autodoc", revision: "2", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "11", definition: autoimplementWorkflow },
+  { id: "autodoc", revision: "3", definition: autodocWorkflow },
+  { id: "autoimplement", revision: "12", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "4", definition: planApprovalWorkflow },
   { id: "sanity-check", revision: "6", definition: sanityCheckWorkflow },
   {
+    id: "change-verification",
+    revision: "1",
+    definition: changeVerificationWorkflow,
+    discoverable: false,
+  },
+  {
+    id: "plan-change",
+    revision: "1",
+    definition: planChangeWorkflow,
+    discoverable: false,
+  },
+  {
+    id: "workspace-preparation",
+    revision: "1",
+    definition: workspacePreparationWorkflow,
+    discoverable: false,
+  },
+  {
     id: "monitor",
-    revision: "11",
+    revision: "12",
     definition: monitorWorkflow,
     legacySources: [
       {

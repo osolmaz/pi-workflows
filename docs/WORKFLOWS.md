@@ -43,6 +43,12 @@ before execution. A revision mismatch refuses resume. Project and global
 workflow files also use their absolute path and SHA-256 hash as source
 identity.
 
+Package-internal workflows can be registered as non-discoverable built-ins.
+They do not appear in the workflow list or ordinary name lookup, but composed
+built-ins record them with a stable built-in ID and revision. This keeps source
+identity independent of the package installation path. It does not weaken file
+identity checks for project and global workflows.
+
 The workflow's command name is the file stem, so `.pi/workflows/triage.workflow.ts`
 runs as `/workflow triage`. A direct path also works: `/workflow ./somewhere/x.workflow.ts`.
 Files are loaded with [jiti](https://github.com/unjs/jiti), so plain TypeScript

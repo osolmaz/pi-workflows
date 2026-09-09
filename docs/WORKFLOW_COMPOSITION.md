@@ -14,6 +14,13 @@ Change verification receives direct command descriptors and a prepared workspace
 
 These compositions use ordinary `agent`, `action`, `compute`, named exits, and `includeWorkflow()` mounts. They add no engine primitive or independent child run. Their large command outputs remain on action results, while findings carry stable output references.
 
+Workspace preparation, change verification, and plan change are
+non-discoverable built-ins. Parent workflows record their stable built-in IDs
+and revisions instead of package file paths. A resolver and runner can therefore
+load the same package version from different installation roots without a false
+source-change failure. Project and global child workflows still use an absolute
+path and SHA-256 hash.
+
 ## TypeScript API
 
 A TypeScript workflow definition is both executable code and a typed contract. Its input parser and exit parsers provide runtime validation and TypeScript inference from one declaration.
