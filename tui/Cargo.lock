@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "pi-workflows"
-version = "0.16.9"
+version = "0.16.10"
 dependencies = [
  "anyhow",
  "base64",
