@@ -483,6 +483,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
   let sessionId: string;
   let holdPauseSubmission = true;
   let holdRestartSubmission = true;
+  let autoimplementHandoffDecisionCount = 0;
 
   const piEnvironment = (): Record<string, string> => ({
     HOME: agentDir,
@@ -545,6 +546,28 @@ describe.sequential("out-of-process workflow server end to end", () => {
         }
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
         if (contract.workflow === "autoimplement") {
+          if (contract.step === "decide" && autoimplementHandoffDecisionCount === 0) {
+            autoimplementHandoffDecisionCount += 1;
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: {
+                action: "submit",
+                requestId: contract.requestId,
+                output: {
+                  route: "workspace",
+                  goalMet: false,
+                  blockingNow: false,
+                  outsideAuthority: false,
+                  canProceed: true,
+                  reason: "The temporary worktree must be prepared before implementation.",
+                  nextAction: "Prepare the authorized temporary worktree.",
+                  alternativesChecked: [],
+                  evidence: ["The workflow has a plan but no prepared workspace."],
+                },
+              },
+            };
+          }
           if (contract.step === "workspace/propose")
             return {
               kind: "tool",
@@ -555,10 +578,28 @@ describe.sequential("out-of-process workflow server end to end", () => {
                 output: { branchName: "test/handoff", reason: "Temporary workflow handoff test." },
               },
             };
-          return {
-            kind: "text",
-            text: "The workspace test is complete. Await cancellation without further work.",
-          };
+          if (contract.step === "decide") {
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: {
+                action: "submit",
+                requestId: contract.requestId,
+                output: {
+                  route: "blocked",
+                  goalMet: false,
+                  blockingNow: true,
+                  outsideAuthority: true,
+                  canProceed: false,
+                  reason: "The E2E scope permits workspace preparation only.",
+                  nextAction: "",
+                  alternativesChecked: ["Implementation is outside the E2E scope."],
+                  evidence: ["The temporary worktree is ready and no further action is allowed."],
+                },
+              },
+            };
+          }
+          return { kind: "text", text: "No Autoimplement response is needed." };
         }
         if (contract.workflow === "assistant-e2e" && contract.step === "prepare") {
           if (
@@ -756,6 +797,12 @@ describe.sequential("out-of-process workflow server end to end", () => {
         state.steps.some((step) => step.nodeId === "workspace/ready" && step.outcome === "ok"),
       () => rpcDiagnostic(pi),
     );
+    await waitForRun(
+      databasePath,
+      "autoimplement",
+      (state) => state.status === "completed",
+      () => rpcDiagnostic(pi),
+    );
     await waitForPiIdle(pi);
     const store = new WorkflowRunStore(databasePath, { readOnly: true });
     let worktreePath: string;
@@ -794,18 +841,6 @@ describe.sequential("out-of-process workflow server end to end", () => {
     } finally {
       store.close();
     }
-    pi.send({
-      id: "cancel-autoimplement-test",
-      type: "prompt",
-      message: `/workflow cancel ${run.runId}`,
-    });
-    await waitForRun(
-      databasePath,
-      "autoimplement",
-      (state) => state.status === "cancelled",
-      () => rpcDiagnostic(pi),
-    );
-    await waitForPiIdle(pi);
     await execFileAsync("git", ["worktree", "remove", worktreePath], { cwd: repository });
     await execFileAsync("git", ["branch", "-D", "test/handoff"], { cwd: repository });
   });
