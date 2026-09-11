@@ -249,7 +249,7 @@ function parseCommandItem(
   return { id, command, args: [...raw.args] as string[], cwd, timeoutMs, maxOutputChars };
 }
 
-const FORBIDDEN_VERIFICATION_EXECUTABLES = new Set([
+export const FORBIDDEN_VERIFICATION_EXECUTABLES = [
   "ash",
   "bash",
   "cmd",
@@ -268,7 +268,27 @@ const FORBIDDEN_VERIFICATION_EXECUTABLES = new Set([
   "sh",
   "tcsh",
   "zsh",
-]);
+] as const;
+
+export const FORBIDDEN_VERIFICATION_ACTION_WORDS = [
+  "publish",
+  "release",
+  "deploy",
+  "push",
+  "merge",
+] as const;
+
+const FORBIDDEN_VERIFICATION_EXECUTABLE_SET = new Set<string>(FORBIDDEN_VERIFICATION_EXECUTABLES);
+const FORBIDDEN_VERIFICATION_ACTION_WORD_SET = new Set<string>(FORBIDDEN_VERIFICATION_ACTION_WORDS);
+
+export function formatVerificationCommandSafetyRules(): string[] {
+  return [
+    `Executable basenames must not be any of: ${FORBIDDEN_VERIFICATION_EXECUTABLES.join(", ")}.`,
+    "All Git and GitHub CLI commands are forbidden, including read-only commands.",
+    "Shell executables and shell wrappers are forbidden.",
+    `Arguments must not contain these standalone action words: ${FORBIDDEN_VERIFICATION_ACTION_WORDS.join(", ")}.`,
+  ];
+}
 
 export function validateVerificationCommandSafety(
   command: string,
@@ -276,11 +296,15 @@ export function validateVerificationCommandSafety(
   label: string,
 ): void {
   const executable = path.win32.basename(path.basename(command)).toLowerCase();
-  if (FORBIDDEN_VERIFICATION_EXECUTABLES.has(executable)) {
+  if (FORBIDDEN_VERIFICATION_EXECUTABLE_SET.has(executable)) {
     throw new Error(`${label}.command is not allowed`);
   }
-  const joined = args.join(" ").toLowerCase();
-  if (/\b(publish|release|deploy|push|merge)\b/.test(joined)) {
+  const words =
+    args
+      .join(" ")
+      .toLowerCase()
+      .match(/[a-z]+/g) ?? [];
+  if (words.some((word) => FORBIDDEN_VERIFICATION_ACTION_WORD_SET.has(word))) {
     throw new Error(`${label} contains a mutation or publication action`);
   }
 }
