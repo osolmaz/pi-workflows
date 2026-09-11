@@ -1,6 +1,5 @@
 import type { JsonValue } from "../state/json.js";
 import type { WorkflowClient } from "./client.js";
-import type { WorkflowSessionView } from "./view.js";
 
 type ViewerPageKind =
   | "steps"
@@ -107,28 +106,6 @@ export async function materializeRunView(
   }
   materializeGraphHistory(hydrated);
   return hydrated;
-}
-
-/** Assemble and hydrate the one session view consumed by the Pi extension. */
-export async function materializeSessionView(
-  client: WorkflowClient,
-  session: WorkflowSessionView,
-): Promise<WorkflowSessionView> {
-  const run =
-    session.run === null
-      ? null
-      : ((await materializeRunView(client, session.run as unknown as JsonValue)) as unknown as
-          | WorkflowSessionView["run"]
-          | null);
-  const pendingInteractions = await Promise.all(
-    session.pendingInteractions.map(async (interaction) => {
-      const runId = isRecord(interaction) ? interaction.runId : undefined;
-      return typeof runId === "string"
-        ? await client.hydrateContent(runId, interaction)
-        : interaction;
-    }),
-  );
-  return { ...session, run, pendingInteractions };
 }
 
 async function completePage(

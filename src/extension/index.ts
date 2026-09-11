@@ -4,7 +4,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
 import { verifyTelegramTokenFile, writeDecisionChannelProfile } from "../channels/config.js";
 import { WorkflowClient } from "../client/client.js";
-import { materializeSessionView } from "../client/materialize.js";
 import type { ClientResponse } from "../client/protocol.js";
 import type {
   ClientInteractiveRequest,
@@ -593,7 +592,6 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     serverUnavailableNotified = false;
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
-    let snapshotGeneration = 0;
     const sessionClient = client;
 
     const connectSession = (): void => {
@@ -612,42 +610,28 @@ export default function piWorkflows(pi: ExtensionAPI): void {
             sessionId,
             (event) => {
               if (generation !== sessionGeneration || sessionContext !== ctx) return;
-              const currentSnapshotGeneration = ++snapshotGeneration;
               if (event.event === "unavailable") {
                 sessionSnapshots.delete(sessionId);
                 sessionView.clear(ctx);
                 return;
               }
               if (!isWorkflowSessionView(event.payload)) return;
-              void materializeSessionView(sessionClient, event.payload)
-                .then((session) => {
-                  if (
-                    generation !== sessionGeneration ||
-                    currentSnapshotGeneration !== snapshotGeneration ||
-                    sessionContext !== ctx
-                  ) {
-                    return;
-                  }
-                  sessionSnapshots.set(sessionId, session);
-                  workflowMessages.updateView(session);
-                  sessionView.update(session, ctx);
-                  const ownedMessageId =
-                    session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
-                  const ownedMessage = session.workflowMessages.find(
-                    (message) => message.workflowMessageId === ownedMessageId,
-                  );
-                  const prepare =
-                    ownedMessage !== undefined &&
-                    (ownedMessage.kind === "step" ||
-                      ownedMessage.kind === "terminal" ||
-                      ownedMessage.kind === "followUp")
-                      ? ensureRecorder(ownedMessage, ctx)
-                      : Promise.resolve();
-                  void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
-                })
-                .catch(() => {
-                  // A newer session revision retries from its own stable snapshot.
-                });
+              const session = event.payload;
+              sessionSnapshots.set(sessionId, session);
+              workflowMessages.updateView(session);
+              sessionView.update(session, ctx);
+              const ownedMessageId = session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
+              const ownedMessage = session.workflowMessages.find(
+                (message) => message.workflowMessageId === ownedMessageId,
+              );
+              const prepare =
+                ownedMessage !== undefined &&
+                (ownedMessage.kind === "step" ||
+                  ownedMessage.kind === "terminal" ||
+                  ownedMessage.kind === "followUp")
+                  ? ensureRecorder(ownedMessage, ctx)
+                  : Promise.resolve();
+              void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
             },
             { coordinator: true },
           );

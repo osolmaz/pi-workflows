@@ -576,8 +576,12 @@ pending interaction on a paused run remains the same durable request and resumes
 without a runner. Other paused or parked work gets a new claim generation and runner.
 With no resumable run, the server rejects the request.
 
-The origin Pi session shows its active run in the workflow widget. `Shift+Up`
-and `Shift+Down` scroll it. A sent step message is open only while its
+The origin Pi session shows its active run in the workflow widget. The extension
+renders each bounded server session snapshot immediately. It does not wait for
+complete step, trace, session, settings, follow-up, or update history, and it
+does not hydrate large run content for this compact view. Detailed clients load
+that data through the shared protocol only when they need it. `Shift+Up` and
+`Shift+Down` scroll the widget. A sent step message is open only while its
 interaction is pending and its run is not paused. Because public `agent_start`
 has no message payload, any model turn that starts in that state is workflow
 work. If Escape ends that turn with Pi's public `aborted` stop reason, one
