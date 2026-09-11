@@ -970,7 +970,8 @@ describe("built-in autoimplement", () => {
     const observation = {
       decisionNumber: 2,
       decisionLimit: 40,
-      consecutiveRouteAttempts: 0,
+      consecutiveNoProgressAttempts: 0,
+      progressFingerprint: "sha256:test",
       lastRoute: "implementation",
       latestAttempt: null,
       availableRoutes: ["repair", "blocked"],
@@ -1790,6 +1791,64 @@ describe("built-in autoimplement", () => {
     const lastObservation = state.steps.filter((step) => step.nodeId === "observe").at(-1)
       ?.output as { availableRoutes: string[] };
     expect(lastObservation.availableRoutes).not.toContain("implementation");
+  });
+
+  it("keeps a route available while its accepted evidence changes", async () => {
+    const executor = summaryExecutor()
+      .respond(
+        "decide",
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("blocked", "The work remains blocked after new evidence."),
+      )
+      .respond("implement", {
+        output: {
+          status: "issue",
+          summary: "More implementation work is needed.",
+          files: [],
+          issueKind: "implementation",
+          evidence: "The implementation is incomplete.",
+        },
+      })
+      .respond(
+        "classifyImplementation",
+        ...Array.from({ length: 4 }, (_, index) => ({
+          output: {
+            route: "blocked",
+            summary: `Observed issue ${index + 1}`,
+            evidence: `New evidence ${index + 1}`,
+          },
+        })),
+      );
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-controller-progress"),
+    });
+
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      preparedWorkspace: preparedWorkspaceFor(),
+    });
+
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "The work remains blocked after new evidence.",
+    });
+    expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(4);
+    expect(
+      state.steps
+        .filter((step) => step.nodeId === "observe")
+        .map(
+          (step) =>
+            (step.output as { consecutiveNoProgressAttempts: number })
+              .consecutiveNoProgressAttempts,
+        ),
+    ).toEqual(expect.arrayContaining([1]));
   });
 
   it("keeps explicit cancellation terminal", async () => {
