@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
@@ -7,6 +8,7 @@ import {
   MAX_PROTOCOL_MESSAGE_BYTES,
   encodeProtocolLine,
 } from "../src/client/protocol.js";
+import { WORKFLOW_DISPLAY_CONTROLS, type WorkflowDisplay } from "../src/client/view.js";
 import { ServerStateStore } from "../src/server/state.js";
 import {
   ServerViewStore,
@@ -41,7 +43,35 @@ function display(changes: Partial<WorkflowDisplayFacts>) {
   return reduceWorkflowDisplay({ ...base, ...changes });
 }
 
+const controlFixture = JSON.parse(
+  readFileSync(
+    path.join(import.meta.dirname, "../protocol/fixtures/run-view-controls-v1.json"),
+    "utf8",
+  ),
+) as {
+  controls: string[];
+  displays: Array<{ name: string; display: WorkflowDisplay }>;
+  agentSnapshot: { display: WorkflowDisplay };
+};
+
 describe("host workflow display reducer", () => {
+  it("keeps the server-owned control fixture aligned with the reducer", () => {
+    expect(WORKFLOW_DISPLAY_CONTROLS).toEqual(controlFixture.controls);
+    expect(controlFixture.agentSnapshot.display).toEqual(display({ pendingRequestKind: "agent" }));
+    expect(controlFixture.displays.find(({ name }) => name === "decision")?.display).toEqual(
+      display({ pendingRequestKind: "decision" }),
+    );
+    expect(controlFixture.displays.find(({ name }) => name === "checkpoint")?.display).toEqual(
+      display({ pendingRequestKind: "checkpoint" }),
+    );
+    expect(controlFixture.displays.find(({ name }) => name === "paused")?.display).toEqual(
+      display({ paused: true }),
+    );
+    expect(controlFixture.displays.find(({ name }) => name === "ambiguous")?.display).toEqual(
+      display({ ambiguous: true }),
+    );
+  });
+
   it("applies the documented status precedence", () => {
     expect(
       display({

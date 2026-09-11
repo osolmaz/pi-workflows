@@ -114,6 +114,10 @@ fn valid_session_binding(binding: Option<&Value>) -> bool {
         == Some(SESSION_BINDING_SCHEMA)
 }
 
+fn loading_message<'a>(run_error: Option<&'a str>, connection_error: Option<&'a str>) -> &'a str {
+    run_error.or(connection_error).unwrap_or("Loading run…")
+}
+
 fn parse_run_summary(summary: &Value) -> Option<RunSummary> {
     let manifest: crate::state::types::Manifest =
         serde_json::from_value(summary.get("manifest")?.clone()).ok()?;
@@ -450,6 +454,9 @@ pub fn render_single_once(
     loop {
         if remote.view(run_id).is_some() {
             break;
+        }
+        if let Some(error) = remote.view_error(run_id) {
+            anyhow::bail!(error);
         }
         if let Some(error) = remote.error() {
             anyhow::bail!(error);
@@ -1762,20 +1769,25 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     // connection must be visible while a cached run is still displayed.
     let Provider::Remote(remote) = &app.provider;
     let remote_status = (!remote.connected()).then(|| remote.status_label());
-    let load_error = remote.error();
     let local_stale = false;
 
     let Some(data) = app.provider.data(&run_id) else {
+        let Provider::Remote(remote) = &app.provider;
+        let run_error = remote.view_error(&run_id);
+        let connection_error = remote.error();
         frame.render_widget(
-            Paragraph::new(load_error.as_deref().unwrap_or("Loading run…"))
-                .style(Style::default().fg(palette.text).bg(palette.panel_bg))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" piw ")
-                        .style(Style::default().bg(palette.panel_bg))
-                        .border_style(pane_border(&palette, false)),
-                ),
+            Paragraph::new(loading_message(
+                run_error.as_deref(),
+                connection_error.as_deref(),
+            ))
+            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" piw ")
+                    .style(Style::default().bg(palette.panel_bg))
+                    .border_style(pane_border(&palette, false)),
+            ),
             main_area,
         );
         app.timeline = draw_transport(
@@ -3490,17 +3502,30 @@ mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
         current_progress_epoch, display_end_ms, display_reason_content, graph_position_label,
-        inspector_height_for_drag, inspector_tab_label, inspector_tab_layout, next_page_cursor,
-        page_range, parse_run_summary, progress_rates, push_human_decision_presentation,
-        reconcile_selected_run, resolve_remote_artifacts, resolved_inspector_height,
-        sidebar_width_for_drag, step_projection_contains, temporal_delay_from_page,
-        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
-        InspectorTab, NodeBounds, Palette, Rect, StepRecord, TemporalDelay, TraceScope,
-        DEFAULT_NODE_STYLE,
+        inspector_height_for_drag, inspector_tab_label, inspector_tab_layout, loading_message,
+        next_page_cursor, page_range, parse_run_summary, progress_rates,
+        push_human_decision_presentation, reconcile_selected_run, resolve_remote_artifacts,
+        resolved_inspector_height, sidebar_width_for_drag, step_projection_contains,
+        temporal_delay_from_page, temporal_through_seq, trace_events_for_scope,
+        valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds, Palette, Rect, StepRecord,
+        TemporalDelay, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn loading_message_distinguishes_pending_data_from_invalid_data() {
+        assert_eq!(loading_message(None, None), "Loading run…");
+        assert_eq!(
+            loading_message(Some("Workflow run snapshot is invalid."), None),
+            "Workflow run snapshot is invalid."
+        );
+        assert_eq!(
+            loading_message(None, Some("connection closed")),
+            "connection closed"
+        );
+    }
 
     #[test]
     fn run_summary_uses_the_server_display_status() {

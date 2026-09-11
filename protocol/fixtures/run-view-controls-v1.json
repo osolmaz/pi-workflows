@@ -1,0 +1,157 @@
+{
+  "schema": "pi-workflows.run-view-controls-fixture.v1",
+  "controls": ["pause", "resume", "cancel", "answer", "human-answer", "update", "submit", "review"],
+  "displays": [
+    {
+      "name": "agent",
+      "display": {
+        "status": "waiting",
+        "activity": null,
+        "controls": ["pause", "cancel", "update", "submit"],
+        "reason": "The workflow needs its assigned agent result."
+      }
+    },
+    {
+      "name": "decision",
+      "display": {
+        "status": "waiting",
+        "activity": null,
+        "controls": ["pause", "cancel", "human-answer"],
+        "reason": "The workflow needs a protected human decision."
+      }
+    },
+    {
+      "name": "checkpoint",
+      "display": {
+        "status": "waiting",
+        "activity": null,
+        "controls": ["pause", "cancel", "answer"],
+        "reason": "The workflow needs a checkpoint answer."
+      }
+    },
+    {
+      "name": "paused",
+      "display": {
+        "status": "paused",
+        "activity": null,
+        "controls": ["resume", "cancel"],
+        "reason": "The workflow is durably paused."
+      }
+    },
+    {
+      "name": "ambiguous",
+      "display": {
+        "status": "ambiguous",
+        "activity": null,
+        "controls": ["review"],
+        "reason": "An external effect needs explicit recovery."
+      }
+    },
+    {
+      "name": "future-advisory-control",
+      "display": {
+        "status": "waiting",
+        "activity": null,
+        "controls": ["pause", "cancel", "future-advisory-control"],
+        "reason": "A future server control remains displayable."
+      }
+    }
+  ],
+  "agentSnapshot": {
+    "schema": "pi-workflows.run-view.v1",
+    "runId": "run-agent-controls",
+    "revision": 4,
+    "runRevision": 2,
+    "manifest": {
+      "schema": "pi-workflows.run-manifest.v1",
+      "runId": "run-agent-controls",
+      "workflowName": "agent-controls",
+      "workflowSource": {
+        "kind": "file",
+        "path": "/tmp/agent-controls.workflow.ts",
+        "hash": "abc"
+      },
+      "startedAt": "2026-01-01T00:00:00.000Z",
+      "finishedAt": null,
+      "status": "waiting",
+      "traceSchema": "pi-workflows.trace-event.v1",
+      "paths": {
+        "workflow": "host",
+        "state": "host",
+        "trace": "host"
+      }
+    },
+    "state": {
+      "schema": "pi-workflows.run-state.v1",
+      "traceSeq": 1,
+      "runId": "run-agent-controls",
+      "workflowName": "agent-controls",
+      "workflowSource": {
+        "kind": "file",
+        "path": "/tmp/agent-controls.workflow.ts",
+        "hash": "abc"
+      },
+      "startedAt": "2026-01-01T00:00:00.000Z",
+      "finishedAt": null,
+      "updatedAt": "2026-01-01T00:00:01.000Z",
+      "status": "waiting",
+      "input": {},
+      "outputs": {},
+      "results": {},
+      "steps": [],
+      "waitingOn": "work"
+    },
+    "workflow": {
+      "schema": "pi-workflows.definition-snapshot.v1",
+      "name": "agent-controls",
+      "startAt": "work",
+      "nodes": {
+        "work": {
+          "nodeType": "agent"
+        }
+      },
+      "edges": []
+    },
+    "display": {
+      "status": "waiting",
+      "activity": null,
+      "controls": ["pause", "cancel", "update", "submit"],
+      "reason": "The workflow needs its assigned agent result."
+    },
+    "graphSteps": [],
+    "takenTransitions": [],
+    "graphCursor": 0,
+    "stepStart": 0,
+    "stepTotal": 0,
+    "tracePage": {
+      "start": 0,
+      "total": 0,
+      "items": []
+    },
+    "session": {
+      "binding": null,
+      "entryPage": {
+        "start": 0,
+        "total": 0,
+        "items": []
+      },
+      "eventPage": {
+        "start": 0,
+        "total": 0,
+        "items": []
+      },
+      "capture": null,
+      "integrity": null
+    },
+    "settingsScopes": [],
+    "settingsStart": 0,
+    "settingsTotal": 0,
+    "followUpQueue": null,
+    "followUpStart": 0,
+    "followUpTotal": 0,
+    "updateStart": 0,
+    "updateTotal": 0,
+    "live": true,
+    "possiblyInterrupted": false
+  }
+}

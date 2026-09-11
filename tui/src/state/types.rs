@@ -56,21 +56,13 @@ pub enum WorkflowActivity {
     OriginTurn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowControl {
-    Pause,
-    Resume,
-    Cancel,
-    Answer,
-    Review,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowDisplay {
     pub status: RunStatus,
     pub activity: Option<WorkflowActivity>,
-    pub controls: Vec<WorkflowControl>,
+    /// Advisory control names are owned by the Workflow Server.
+    /// Executable client operations remain closed protocol types.
+    pub controls: Vec<String>,
     pub reason: Option<String>,
     #[serde(rename = "reasonContent", skip_serializing_if = "Option::is_none")]
     pub reason_content: Option<Value>,
@@ -91,8 +83,9 @@ impl WorkflowDisplay {
 
 #[cfg(test)]
 mod workflow_display_tests {
-    use super::{RunState, RunStatus, WorkflowActivity, WorkflowControl, WorkflowDisplay};
-    use serde_json::json;
+    use super::{RunState, RunStatus, WorkflowActivity, WorkflowDisplay};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
 
     #[test]
     fn preserves_the_server_display_and_uses_only_a_running_origin_turn_as_the_active_wait() {
@@ -122,20 +115,38 @@ mod workflow_display_tests {
 
         assert_eq!(running.status, RunStatus::Running);
         assert_eq!(running.activity, Some(WorkflowActivity::OriginTurn));
-        assert_eq!(
-            running.controls,
-            vec![WorkflowControl::Pause, WorkflowControl::Cancel]
-        );
+        assert_eq!(running.controls, vec!["pause", "cancel"]);
         assert_eq!(running.active_node(&state), Some("work"));
 
         let waiting = WorkflowDisplay {
             status: RunStatus::Waiting,
             activity: None,
-            controls: vec![WorkflowControl::Pause, WorkflowControl::Cancel],
+            controls: vec!["pause".into(), "cancel".into()],
             reason: Some("waiting".into()),
             reason_content: None,
         };
         assert_eq!(waiting.active_node(&state), None);
+    }
+
+    #[test]
+    fn accepts_server_owned_display_controls_and_rejects_non_strings() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root")
+            .join("protocol/fixtures/run-view-controls-v1.json");
+        let fixture: Value = serde_json::from_slice(&std::fs::read(path).expect("control fixture"))
+            .expect("valid control fixture");
+        let displays = fixture["displays"].as_array().expect("fixture displays");
+
+        for case in displays {
+            let display: WorkflowDisplay = serde_json::from_value(case["display"].clone())
+                .expect("server-owned control strings should decode");
+            assert!(!display.controls.is_empty());
+        }
+
+        let mut invalid = displays[0]["display"].clone();
+        invalid["controls"][0] = json!(42);
+        assert!(serde_json::from_value::<WorkflowDisplay>(invalid).is_err());
     }
 }
 
