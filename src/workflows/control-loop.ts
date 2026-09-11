@@ -114,9 +114,7 @@ export function controlLoop<
       if (source === decide) {
         throw new Error("Control loop decide node must not also be a branch return");
       }
-      if (claimedReturns.has(source)) {
-        throw new Error(`Control loop return ${source} is declared more than once`);
-      }
+      if (claimedReturns.has(source)) continue;
       claimedReturns.add(source);
       returnEdges.push({ from: source, to: returnTo });
     }

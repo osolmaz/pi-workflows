@@ -1,3 +1,4 @@
+import { controlLoop } from "../workflows/control-loop.js";
 import {
   action,
   agent,
@@ -752,6 +753,18 @@ function previousActionPrompt(context: WorkflowNodeContext): string {
     : `Previous action result: ${JSON.stringify(actionRecord)}`;
 }
 
+const monitorControlLoop = controlLoop({
+  decide: "decide",
+  returnTo: "observe",
+  routes: {
+    stop: { to: "finish", terminal: true },
+    wait: { to: "schedule", returns: ["sleep"] },
+    advance: { to: "act", returns: ["act"] },
+    recover: { to: "act", returns: ["act"] },
+    repair: { to: "planChange", returns: ["repairComplete"] },
+  },
+});
+
 const monitorWorkflow: WorkflowDefinition = defineWorkflow({
   source: import.meta.url,
   contractId: "pi-workflows.monitor.v1",
@@ -1005,29 +1018,14 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
     { from: "estimate", to: "publish_progress" },
     { from: "publish_progress", to: "report" },
     { from: "report", to: "decide" },
-    {
-      from: "decide",
-      switch: {
-        on: "$.route",
-        cases: {
-          stop: "finish",
-          wait: "schedule",
-          advance: "act",
-          recover: "act",
-          repair: "planChange",
-        },
-      },
-    },
-    { from: "act", to: "observe" },
+    ...monitorControlLoop.edges,
     { from: "planChange.ready", to: "implementation" },
     { from: "planChange.blocked", to: "repairBlocked" },
     { from: "implementation.completed", to: "repairComplete" },
     { from: "implementation.blocked", to: "repairBlocked" },
-    { from: "repairComplete", to: "observe" },
     { from: "repairBlocked", to: "repairReport" },
     { from: "repairReport", to: "finish" },
     { from: "schedule", to: "sleep" },
-    { from: "sleep", to: "observe" },
   ],
 });
 
