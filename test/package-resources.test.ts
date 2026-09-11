@@ -172,6 +172,9 @@ describe("Pi package resources", () => {
     expect(autoimplement).toContain('"scope": "Only /absolute/path/to/repository.');
     expect(autoimplement).toContain('"merge": false');
     expect(autoimplement).toContain('"constraints": [');
+    expect(autoimplement).toContain("`verificationChecks`");
+    expect(autoimplement).toContain("`verificationUntested`");
+    expect(autoimplement).toContain("The workflow planner is the safe default.");
     expect(autoimplement).toContain('"mode": "required"');
     expect(autoimplement).toContain('"mode": "skip"');
 

@@ -1,6 +1,6 @@
 # Control loops
 
-Status: planned
+Status: current
 
 A control loop lets a workflow choose its next branch from current state. Each branch returns control after one limited unit of work. The controller then observes the new state and chooses again.
 
@@ -122,12 +122,11 @@ The helper rejects a definition when:
 - no routes are declared;
 - a nonterminal route has no return point;
 - a terminal route declares a return point;
-- two branches claim the same return point;
 - the controller is also listed as a branch return;
 - a route or reference violates existing workflow naming rules;
 - `cancelled` is declared as a continuation route.
 
-Literal route and reference names remain available to TypeScript. The surrounding `defineWorkflow()` call keeps its existing checks for unknown nodes, invalid child exits, duplicate outgoing edges, and unreachable nodes.
+When two routes use the same return point, the helper emits one return edge. Literal route and reference names remain available to TypeScript. The surrounding `defineWorkflow()` call keeps its existing checks for unknown nodes, invalid child exits, duplicate outgoing edges, and unreachable nodes.
 
 ## Decision results
 
@@ -239,7 +238,7 @@ Every loop needs a finite safety bound. `maxSteps` remains the final workflow li
 
 A workflow also checks useful progress with facts it can observe. Useful facts can include a changed plan digest, diff, head revision, check result, review fingerprint, CI state, effect receipt, or failure state.
 
-When the same route returns with the same relevant facts and no new evidence, the controller must select another safe route or report blocked. It must not consume the remaining step limit by repeating unchanged work.
+When the same route returns with the same relevant facts and no new evidence, the controller must select another safe route or report blocked. It must not consume the remaining step limit by repeating unchanged work. Autoimplement fingerprints stable branch facts and ignores timing fields and temporary request or working-directory values when it applies this check.
 
 The controller has its own named active-time limit. It does not recover recursively through itself. If its normal bounded submission recovery cannot produce a valid decision, the workflow reports a clear blocker.
 
@@ -331,7 +330,7 @@ Tests for the public helper cover:
 - exhaustive route targets;
 - nonterminal returns and terminal routes;
 - ordinary node and named child-exit returns;
-- invalid names and duplicate return sources;
+- invalid names and shared return-source deduplication;
 - expansion to ordinary edges;
 - existing graph validation after expansion;
 - nested included workflows;

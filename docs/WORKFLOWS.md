@@ -243,7 +243,10 @@ success only after this check accepts the output. If the tool turn is aborted,
 the client stops waiting but does not cancel the durable server command. A retry
 uses a new transport request ID with the same durable submission identity and
 adopts the stored result. Rejected submissions return
-the validation error and can retry in the same step. If the model settles
+the validation error and can retry in the same step. When a late submission loses
+to the active-time limit, the error says that the request expired only when the
+saved timeout event names that exact request. Other revision conflicts keep the
+generic conflict error. If the model settles
 without submitting, the server sends up to two reminders for the exact pending
 request. It waits for the owned turn to settle and does not remind during validation,
 pause, or another active turn. If both reminders end without an accepted result,
@@ -519,6 +522,12 @@ A missing case for the resolved value fails the run with a routing error. A
 node with no outgoing edge (or no matching failure route) ends the run:
 `completed` on success, `failed`/`timed_out`/`cancelled` otherwise.
 
+Use `controlLoop()` when one decision point must send work to several branches
+that return after one bounded action. The helper returns normal switch and
+return edges. It adds no node type or runtime state. The workflow still owns
+observation, decision checks, progress checks, terminal checks, and failure
+handling. See [Control loops](CONTROL_LOOPS.md).
+
 ## Included workflows
 
 Use `includeWorkflow()` to mount a standalone workflow under a parent name:
@@ -642,8 +651,8 @@ checks, compare eligible failures with the base revision in a temporary
 detached worktree, and keep matching baseline failures visible without blocking
 the current change. The built-in `autoimplement` workflow finds a clear existing
 plan from explicit input, conversation context, or referenced canonical
-documents. A missing-plan claim and every other non-exempt blocker enter one
-bounded challenge path. An explicit plan bypasses autodoc only when a
+documents. One central `decide` controller chooses the next safe branch from
+current evidence. An explicit plan bypasses autodoc only when a
 current-document receipt carries its matching plan digest; otherwise autodoc
 inspects and adopts or updates the canonical documents. Later invalidating
 evidence returns to `autoplan` followed by `autodoc`.
@@ -656,9 +665,9 @@ Autoimplement runs independent commands through bounded command batches. A batch
 
 Autoimplement prepares the workspace before its first edit-capable node. `workspaceMode` accepts `auto`, `branch`, `worktree`, or `defaultBranch`. Auto mode adopts a current task branch, creates a model-named branch from a clean default branch, or creates a model-named standard sibling worktree when the default checkout has existing work. Program actions validate and apply names. Direct default-branch work requires explicit authority and does not imply commit, push, merge, or release authority. Every later stage uses the prepared absolute path.
 
-Autoimplement gives `implement` and the shared verifier's `semanticRepair` the same named eight-hour deadline. The engine default stays unchanged. When a supported step fails or times out, one shared bounded recovery step inspects accepted outputs and durable repository or pull-request state. It adopts a completed effect or retries only a missing effect. Cancellation remains immediate and never enters recovery. Unsupported or uncertain effects create a qualified blocker claim before challenge.
+Autoimplement gives `implement` and the shared verifier's `semanticRepair` the same named eight-hour deadline. The engine default stays unchanged. Each branch performs one bounded unit of work and returns to observation after expected success, failure, or timeout. The controller can choose plan discovery, workspace preparation, documentation, implementation, repair, verification, publication, review, P2 work, comment handling, CI, delivery, redesign, completion, or blocked. Cancellation remains immediate and terminal. Unexpected parser, graph, and invariant errors still fail the run.
 
-Local verification uses one shared change-verification planner. Autoimplement does not translate commands into implicitly read-only or base-eligible checks. Supplied checks and planner submissions use the same complete validator before acceptance. An invalid submission stays pending for correction on the same request and attempt; no command starts. Candidate-bound arguments, including Docker mounts, and absolute executables inside the candidate checkout cannot be used for a base comparison. Candidate-only checks are valid, but their failures remain unknown without comparison evidence. Planned untested checks remain visible.
+Local verification uses one shared change-verification planner. A caller can supply exact `verificationChecks` and explicit `verificationUntested` work when the prepared workspace is already known. Otherwise the planner uses a 30-minute active-time limit. Its prompt and validator use the same command-safety lists, including the rule that all Git commands are forbidden. One rejection returns all independent check errors in stable order, and no command starts before acceptance. Failed or timed-out planning returns a normal blocked child result to the Autoimplement controller. Candidate-only and remote-only checks remain explicit without invented evidence.
 
 Direct program actions run candidate checks and read-only base-eligible checks with the same command, arguments, timeout, and output limit. Results separate related, unrelated, fixed-baseline, unknown, and untested findings. Matching base failures do not block the candidate. Related failures enter a two-attempt mechanical or semantic repair loop. Unknown or incomplete evidence needs bounded judgment, and truncated, timed-out, cancelled, or spawn-failed output cannot pass.
 
@@ -672,9 +681,7 @@ Autoimplement inspects every pull request before it waits for CI. It accepts onl
 
 The action abort signal stops active command process groups and prevents queued commands from starting. Accepted outputs use immutable events and content-addressed blobs. An interrupted unaccepted batch runs again because batch commands are read-only or isolated local checks. Progress updates contain metadata only and never control routing. Truncated reviewer or CI output cannot count as clean. See [Run independent commands in bounded batches](plans/2026-08-20-bounded-command-batches-plan.md) for the complete contract and implementation plan.
 
-A model-generated blocker from implementation or a safe later stage does not end autoimplement by itself. A separate blocker-challenge agent checks the task, approved plan, current result, evidence, scope, authority, earlier attempts, and practical alternatives. It confirms a blocker only when the blocker exists now, is outside the granted authority, has no safe path forward, has an empty next action, and includes concrete evidence and checked alternatives. A rejected blocker must name the next practical action and routes through the existing redesign workflow before implementation and verification continue.
-
-Autoimplement can run the blocker challenge at most three times in one run. Each later challenge receives the earlier challenge results. Reaching the limit stops with the normal workflow safety-limit reason. Explicit human stops, cancellation, exhausted workflow or replan limits, protected authorization gaps, and an independent blocked result from redesign remain direct stops. These hard boundaries do not enter the blocker challenge.
+A branch blocker does not end Autoimplement by itself. The controller can repair, retry, redesign, move to another safe branch, or return blocked. A blocked decision requires current evidence and at least one checked alternative. The loop permits at most 40 accepted decisions and removes a route after three consecutive returns with the same stable facts. Changed evidence resets that route count. If the controller itself fails or times out three times without an accepted decision, Autoimplement returns a normal blocked result. These limits prevent blind retries while allowing real progress.
 
 ### Built-in sanity check
 
@@ -842,7 +849,9 @@ resume` takes a new generation and reruns only work after the last durable
   boundary.
 - The server tells each runner to `start`, `resume`, or `restart`.
   An answered checkpoint resumes its exact attempt in the same run. An explicit
-  restart creates a new run at the workflow start.
+  restart creates a new child run at the workflow start. The model-facing result
+  returns the child as `runId`, the terminal source as `parentRunId`, and the
+  saved `restartNumber`, and tells the model to continue with the child.
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command

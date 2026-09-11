@@ -14,6 +14,8 @@ Change verification receives direct command descriptors and a prepared workspace
 
 These compositions use ordinary `agent`, `action`, `compute`, named exits, and `includeWorkflow()` mounts. They add no engine primitive or independent child run. Their large command outputs remain on action results, while findings carry stable output references.
 
+A child used as a control-loop branch must turn each expected non-cancelled result into a named exit. This includes expected failures and timeouts. The parent connects those exits to observation. The parent does not catch an arbitrary child programming error. Cancellation remains terminal. See [Control loops](CONTROL_LOOPS.md).
+
 Workspace preparation, change verification, and plan change are
 non-discoverable built-ins. Parent workflows record their stable built-in IDs
 and revisions instead of package file paths. A resolver and runner can therefore
@@ -295,7 +297,7 @@ monitor
 
 `autoimplement` requires a clear existing plan, but the structured `plan` input is optional because the plan can already be in conversation context or canonical documentation. It blocks when it cannot find a clear plan. It skips autodoc when documentation is current and includes autodoc when documentation is missing or stale. The absence of `input.plan` never routes to initial autoplan.
 
-Autoimplement includes the shared plan-change workflow only as evidence-driven `redesign`. When implementation, verification, review, comments, or CI proves that the approach is wrong, the shared workflow runs Autoplan, Autodoc, the configured plan decision, and bounded replanning before implementation resumes. Local bugs go to a fix step instead. Existing supplied or discovered plans bypass the decision.
+Autoimplement includes the shared plan-change workflow only as evidence-driven `redesign`. Its central controller chooses that branch when implementation, verification, review, comments, or CI proves that the approach is wrong. The shared workflow runs Autoplan, Autodoc, the configured plan decision, and bounded replanning, then returns its named result to the controller. Local bugs can go to repair instead. Existing supplied or discovered plans bypass the plan decision.
 
 Review rounds record findings at every severity from P0 through P2. P0 or P1 findings require another implementation and review round. A P2-only round can be addressed, but the workflow does not run the reviewer again solely because P2 work changed files.
 

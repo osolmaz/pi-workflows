@@ -6,6 +6,8 @@ date: 2026-09-11
 
 # Add reusable workflow control loops
 
+Status: implemented
+
 Autoimplement needs one central decision point that can send work into custom branches and receive control again. A recoverable failure or timeout should lead to another decision in the same run instead of ending the run or starting over.
 
 [Control loops](../CONTROL_LOOPS.md) is the canonical explanation and specification. It defines the terms, public authoring API, branch rules, failure behavior, safety rules, diagrams, examples, visualization, compatibility, and general test requirements. This plan contains only the work needed to implement that specification and apply it to Autoimplement and Monitor.
@@ -76,7 +78,7 @@ Add focused tests in `test/control-loop.test.ts`. Cover valid expansion, literal
 
 ### Graph checks
 
-Extend the existing definition checks only where `controlLoop()` cannot enforce a rule while it builds edges.
+Use the existing definition checks for rules that `controlLoop()` cannot enforce while it builds edges. Implementation showed that no graph-validator change was needed: `controlLoop()` checks its local input, and `defineWorkflow()` already checks the expanded graph.
 
 Check the expanded graph, not a second private graph model. A declared branch must reach one of its return points or a declared terminal target on every expected successful path. Agent and action failures and timeouts that the branch treats as recoverable must have explicit outcome routes. Cancellation must remain terminal.
 
@@ -172,7 +174,7 @@ Add extension tests for visible text, structured details, parent state, child st
 
 ### Built-in identity
 
-Raise the Autoimplement and Monitor revisions in `src/builtins/catalog.ts` and `src/builtins/metadata.ts`. Update affected definition snapshots and fixtures.
+Raise the Autoimplement and Monitor revisions in `src/builtins/catalog.ts` and `src/builtins/metadata.ts`. Raise the internal change-verification revision because its snapshotted behavior also changes. Update affected definition snapshots and fixtures.
 
 Apply the alpha hard cut. New runs use the new graph. Existing snapshotted runs keep their saved definitions. Add no migration or compatibility reader.
 
@@ -197,8 +199,9 @@ Run focused tests while implementing:
 
 ```bash
 npx vitest run test/control-loop.test.ts test/decision.test.ts test/graph.test.ts test/workflow-graph.test.ts test/composition.test.ts
-npx vitest run test/builtin-monitor.test.ts test/builtin-autoimplement.test.ts test/change-verification.test.ts
-npx vitest run test/server-interaction.test.ts test/extension.test.ts
+npx vitest run test/monitor-workflow.test.ts test/monitor-repair.test.ts test/monitor-human-approval.test.ts
+npx vitest run test/builtin-autoimplement.test.ts test/change-verification.test.ts
+npx vitest run test/server.test.ts test/extension.test.ts
 ```
 
 Use the exact current test filenames if the server interaction coverage is split across more focused files.
