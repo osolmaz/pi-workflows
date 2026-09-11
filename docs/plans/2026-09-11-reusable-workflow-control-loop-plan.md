@@ -6,337 +6,204 @@ date: 2026-09-11
 
 # Add reusable workflow control loops
 
-Workflows need one central decision point that can send work into custom branches and receive control again. Autoimplement needs this structure so a recoverable failure or timeout leads to a new decision in the same run instead of ending the run or starting over.
+Autoimplement needs one central decision point that can send work into custom branches and receive control again. A recoverable failure or timeout should lead to another decision in the same run instead of ending the run or starting over.
 
-The standard term for this structure is a control loop. The component that observes state and chooses the next action is the controller. The workflow node that makes the choice is named `decide`.
+[Control loops](../CONTROL_LOOPS.md) is the canonical explanation and specification. It defines the terms, public authoring API, branch rules, failure behavior, safety rules, diagrams, examples, visualization, compatibility, and general test requirements. This plan contains only the work needed to implement that specification and apply it to Autoimplement and Monitor.
 
-This plan adds a reusable TypeScript authoring helper and uses it in Autoimplement and Monitor. It uses existing workflow nodes, edges, includes, events, and run state. It does not add a runtime node type, a service, or another state store.
-
-The current workflow behavior is documented in [Workflow authoring reference](../WORKFLOWS.md). The relevant design rules are in [Design philosophy](../DESIGN_PHILOSOPHY.md) and [Workflow composition](../WORKFLOW_COMPOSITION.md). The earlier timeout and blocker work is recorded in [Add Autoimplement timeout fallback](2026-08-21-autoimplement-timeout-fallback-plan.md) and [Confirm blockers before autoimplement stops](2026-08-20-autoimplement-blocker-challenge-plan.md).
+Related implementation history is in [Add Autoimplement timeout fallback](2026-08-21-autoimplement-timeout-fallback-plan.md) and [Confirm blockers before autoimplement stops](2026-08-20-autoimplement-blocker-challenge-plan.md).
 
 ## Problem
 
-Autoimplement routes most successful work directly from one stage to the next. It uses separate recovery paths for timeouts and blocker claims. This splits the decision about what to do next across many nodes.
+Autoimplement sends successful work directly from one stage to the next. Separate nodes handle timeout recovery and blocker claims. The decision about what happens next is therefore spread across the graph.
 
-The verification incident showed the gap. The included `localVerification/planChecks` node timed out before the child workflow reached its `ready` or `blocked` exit. The parent therefore had no accepted child result to route. The complete Autoimplement run ended before its timeout fallback could inspect the state.
+The verification incident exposed a missing route. `localVerification/planChecks` timed out before its included workflow reached `ready` or `blocked`. The parent never received a child result, and the complete run ended before its timeout fallback could inspect the state.
 
-Restart then created a new child run, but the model-visible result named the terminal parent run. The model inspected the wrong run. Restart is useful for a terminal run, but it is the wrong normal recovery path for a recoverable stage failure.
+The same run also exposed avoidable correction delays and incorrect restart text:
 
-The same structural need appears in Monitor. Monitor already follows an `observe -> decide -> act -> observe` control loop. The common graph shape should be available to other workflows without copying route and return edges.
+- the planning prompt omitted rules enforced by the command validator;
+- validation returned independent errors one at a time;
+- the 15-minute active-time limit expired during correction attempts;
+- the final late submission reported only a revision conflict;
+- restart created a child run while the model-visible result named the parent.
 
-## Evidence
+## Selected change
 
-The failed Autoimplement run recorded these facts:
+Add the public `controlLoop()` authoring helper specified in [Control loops](../CONTROL_LOOPS.md). It produces ordinary route and return edges from a typed definition and adds no runtime node type.
 
-- `localVerification/planChecks` used the default 900,000 ms timeout and expired after 900,987 ms of active model time.
-- A correct submission was lost after a provider WebSocket error.
-- Later submissions received validation errors one at a time.
-- The planning prompt did not state every command rule enforced by the validator.
-- The final corrected submission arrived after timeout cancellation changed the request revision.
-- Restart created a child run, while the visible result named only the parent run.
+Use the helper in Monitor without changing Monitor's behavior. Refactor Autoimplement around one `decide` agent and remove the separate timeout fallback, blocker challenge, and cross-stage route selectors that it replaces.
 
-The original ACPX PR-triage Mermaid diagram separates solution judgment, validation, refactoring, review, CI, and completion. Its review and CI paths already loop after repair. See [PR triage](https://github.com/openclaw/acpx/blob/main/examples/flows/pr-triage/README.md).
+Keep the existing workflow engine, node outcomes, included workflows, named exits, durable state, revision fencing, effect receipts, and cancellation behavior.
 
-ACPX and Pi Workflows both provide `decision()` and `decisionEdge()` for a constrained model choice and exhaustive routing. Pi Workflows also provides `includeWorkflow()` and named child exits. These parts are sufficient for the runtime behavior in this plan.
+## Scope
 
-## Goals
+Change these areas:
 
-- Give finite workflows a reusable control-loop authoring API.
-- Keep each workflow's routes and branches customizable.
-- Keep the expanded graph explicit in definitions, snapshots, traces, and the viewer.
-- Let Autoimplement return to one `decide` node after each recoverable branch result.
-- Let the controller move backward or forward based on current evidence.
-- Keep expected child failures and timeouts inside the same run.
-- Keep cancellation immediate and terminal.
-- Prevent blind retries after uncertain side effects.
-- Stop as completed only when every required gate has current evidence.
-- Stop as blocked only when no authorized safe route remains or progress bounds are exhausted.
-- Preserve exact request IDs, revision fencing, accepted outputs, and effect receipts.
-- Keep remote-only checks explicit and untested until real evidence exists.
+- the public workflow authoring exports under `src/workflows`;
+- graph validation needed by the helper;
+- the built-in Monitor definition;
+- the built-in Autoimplement definition;
+- the internal change-verification workflow;
+- server conflict text for a proven request timeout;
+- extension restart result text and details;
+- built-in revisions and fixtures;
+- focused tests, built-in skill guidance, and workflow documentation.
 
 ## Non-goals
 
-- Do not add a new workflow node type.
-- Do not add automatic hidden retries or routes.
-- Do not add a general runtime controller or an indefinite resource controller.
-- Do not let a model invent route names, nodes, commands, or authority.
-- Do not catch cancellation and send it back into the loop.
-- Do not hide unexpected programming errors as ordinary branch results.
-- Do not add a database, event schema, transport, service, or external resource.
+- Do not add a workflow node type.
+- Do not add parent-side handling for arbitrary child programming errors.
+- Do not add hidden retries, dynamic routes, or generated commands.
+- Do not add a controller-specific database, event schema, service, or resource.
 - Do not change Pi core or use private Pi APIs.
 - Do not change ACPX, ClawSweeper, Harbor HF, or another repository.
+- Do not catch cancellation and return it to the controller.
+- Do not keep the replaced Autoimplement fallback paths.
 - Do not add compatibility aliases, readers, dual paths, or a new schema version.
 
-## Control-loop model
+## Implementation
 
-A control loop has four parts:
+### Public authoring helper
 
-1. Observe the current state.
-2. Decide which declared route is safe and necessary.
-3. Run one branch.
-4. Return to observation and decide again.
+Add `src/workflows/control-loop.ts`.
 
-```mermaid
-flowchart TD
-    O[Observe current state] --> D{Decide}
-    D --> P[Plan or prepare]
-    D --> I[Implement or repair]
-    D --> V[Verify]
-    D --> R[Review]
-    D --> C[Inspect or wait for CI]
-    D --> L[Deliver]
-    D --> X[Complete]
-    D --> B[Blocked]
-    P --> O
-    I --> O
-    V --> O
-    R --> O
-    C --> O
-    L --> O
-```
+Implement the `controlLoop()` input, output, and definition checks from [Control loops](../CONTROL_LOOPS.md). Preserve literal route and reference types so TypeScript can check route targets and named child exits in the surrounding workflow definition.
 
-The controller is read-only. A selected branch owns its effects. When the branch returns, the controller reads accepted outputs, node outcomes, effect receipts, repository state, and remote state that is relevant to the next choice.
+Return only ordinary `WorkflowEdge` values and the inferred route choices. Do not add runtime behavior or hidden definition metadata.
 
-A branch runs one bounded unit of work. It may contain several internal nodes, but every expected non-cancelled outcome reaches one declared return point. The branch does not choose an unrelated later stage by itself.
+Export the helper and its public TypeScript types from `src/workflows/index.ts` and the package entry points that already expose `decision()` and `decisionEdge()`.
 
-## Public authoring API
+Add focused tests in `test/control-loop.test.ts`. Cover valid expansion, literal inference, ordinary node returns, child-exit returns, terminal routes, invalid names, empty routes, missing returns, duplicate returns, and attempts to continue through cancellation.
 
-Add `controlLoop()` under `src/workflows/control-loop.ts` and export it from the normal workflow entry points.
+### Graph checks
 
-The helper is an authoring function. It builds ordinary edges from a typed route map. It does not run during workflow execution and does not create a new node kind.
+Extend the existing definition checks only where `controlLoop()` cannot enforce a rule while it builds edges.
 
-The input has this conceptual shape:
+Check the expanded graph, not a second private graph model. A declared branch must reach one of its return points or a declared terminal target on every expected successful path. Agent and action failures and timeouts that the branch treats as recoverable must have explicit outcome routes. Cancellation must remain terminal.
 
-```typescript
-const loop = controlLoop({
-  decide: "decide",
-  returnTo: "observe",
-  routes: {
-    implement: {
-      to: "implement",
-      returns: ["implementationResult"],
-    },
-    verify: {
-      to: "localVerification",
-      returns: ["localVerification.ready", "localVerification.blocked"],
-    },
-    complete: {
-      to: "prepareCompleted",
-      terminal: true,
-    },
-    blocked: {
-      to: "prepareBlocked",
-      terminal: true,
-    },
-  },
-});
-```
+Keep unexpected parser errors, unknown routes, invariant failures, and malformed definitions as run failures. Do not turn them into controller decisions.
 
-The helper returns:
+Add focused coverage to `test/graph.test.ts`, `test/workflow-graph.test.ts`, and composition tests where included workflows are involved.
 
-- the route names for `decision()` or a workflow-specific decision validator;
-- one exhaustive switch edge from `decide` to the route targets;
-- one return edge from every declared nonterminal branch return to `returnTo`.
+### Monitor adoption
 
-The TypeScript types preserve literal route, node, include, and child-exit names. Missing route targets and invalid child-exit references remain compile-time errors when the surrounding workflow definition is typed. Existing graph validation still rejects unknown nodes, unreachable nodes, and duplicate outgoing edges.
+Replace Monitor's handwritten decision and return edges with `controlLoop()` output in `src/builtins/monitor.workflow.ts`.
 
-The helper validates these rules when the definition loads:
+Keep its existing `observe -> decide -> act -> observe` behavior. Preserve all stop, wait, advance, recover, repair, cost, authority, progress, scheduling, and maximum-check rules.
 
-- `decide` and `returnTo` are present.
-- At least one route exists.
-- Each nonterminal route has one target and at least one return point.
-- A terminal route has one target and no return point.
-- Return sources are unique across the control loop.
-- The controller is not also a branch return source.
-- Route names and references follow existing workflow naming rules.
-- No route named `cancelled` is accepted as a continuation route.
+Update `test/builtin-monitor.test.ts` to compare the expanded routes and runtime behavior. Raise the built-in Monitor revision because its snapshotted source changes.
 
-The helper does not inspect prose or generate business policy. Each workflow owns its observation, decision prompt, decision validation, branch work, completion checks, blocker checks, authority checks, and progress checks.
+### Autoimplement controller
 
-## Decision result
+Add one bounded, read-only `decide` agent to `src/builtins/autoimplement.workflow.ts`. Add an observation compute node that prepares current accepted facts before each decision.
 
-A controller decision uses a workflow-specific parser built on the route names returned by `controlLoop()`. Autoimplement requires this data:
+The controller uses the Autoimplement routes listed in [Control loops](../CONTROL_LOOPS.md). Each route enters an existing node or included workflow. Each expected non-cancelled branch result returns to observation.
 
-```json
-{
-  "route": "verification",
-  "reason": "The implementation is present and current checks have not run.",
-  "evidence": ["current diff and accepted implementation result"],
-  "nextAction": "Run local verification."
-}
-```
+Add a workflow-specific decision parser. It must enforce:
 
-The parser rejects an unknown route on the same request. It also applies route-specific checks:
+- current evidence for forward routes;
+- authority for mutating routes;
+- settlement evidence before a possible side effect is repeated;
+- current verification, review, CI, and delivery evidence before completion;
+- evidence and checked alternatives before blocked;
+- existing retry limits and useful progress before repeating a route.
 
-- `complete` requires current implementation, verification, review, CI, and delivery evidence that applies to the active work mode.
-- `blocked` requires a present blocker, evidence, checked alternatives, and no safe action within authority.
-- A mutating route requires authority for that branch.
-- A retry after an uncertain effect requires observed settlement or an accepted receipt.
-- A repeated route with unchanged relevant state counts toward the workflow's existing progress bounds.
+A rejected decision stays pending on the same exact request and attempt. The validation response must report all independent correctable errors within existing output bounds.
 
-The decision output is normal node output in the existing run state. No separate controller state is added.
-
-## Branch outcomes
-
-Expected operation failures and timeouts are part of branch control flow. Each affected `agent` or `action` node routes on `$result.outcome`:
-
-- `ok` continues to the branch's result point.
-- `failed` creates a branch result and returns to observation.
-- `timed_out` creates a branch result and returns to observation.
-- `cancelled` has no continuation route and ends the run immediately.
-
-An included workflow must convert its expected internal failures and timeouts into one of its named exits. The parent then lists those exits as branch returns.
-
-This uses the existing composition contract. The parent does not catch an arbitrary child programming error. A parser bug, invalid graph, unknown route, or invariant violation still fails the run clearly.
-
-Add focused graph checks for workflows that use `controlLoop()`. The checks traverse each declared branch in the expanded graph and prove that its declared successful paths reach a return or terminal target. Agent and action nodes that can fail operationally must show explicit `failed` and `timed_out` routes. The check rejects a continuation route for `cancelled`.
-
-## Autoimplement structure
-
-Replace Autoimplement's separate timeout fallback, blocker challenge, and cross-stage routing with one controller. Apply the alpha hard cut and remove the replaced nodes and edges in the same change.
-
-The Autoimplement loop starts after input preparation. Its observation step builds a bounded summary from accepted workflow state. The `decide` agent may use read-only tools to confirm current repository and remote facts before it submits one route.
-
-Autoimplement declares these routes:
-
-- `planDiscovery`: find the selected plan.
-- `workspace`: prepare or confirm the authorized workspace.
-- `documentation`: record the current plan.
-- `implementation`: implement missing planned work.
-- `repair`: fix a confirmed implementation or verification problem.
-- `verification`: run local change verification.
-- `publication`: commit, push, and open or update a pull request when authorized.
-- `review`: run or reuse review for the current head.
-- `comments`: inspect current pull-request feedback.
-- `ci`: inspect, wait for, or address CI state.
-- `delivery`: finish authorized default-branch or pull-request delivery.
-- `redesign`: use the existing shared plan-change workflow after invalidating evidence.
-- `complete`: prepare the completed result.
-- `blocked`: prepare the blocked result.
-
-Each route enters an existing node or included workflow. Existing review commands, CI watches, repair limits, plan approval, workspace rules, and delivery rules remain. The controller changes who chooses the next cross-stage route. It does not weaken any gate.
-
-Normal branch results return to observation. A branch may report failure, timeout, partial work, pending work, or a blocker claim. The controller then selects an earlier stage, a later stage, a retry, redesign, completion, or blocked based on current evidence.
-
-Remove these narrow decision systems after the controller has equivalent tested behavior:
+Remove the old cross-stage recovery system after the controller passes equivalent tests:
 
 - `timeoutFallbackGuard`, `timeoutFallback`, and `routeTimeoutFallback`;
 - `createBlockerClaim`, `routeBlockerClaim`, `challengeBlockerGuard`, `challengeBlocker`, and `routeChallenge`;
-- cross-stage classifiers whose only job is to choose a route now owned by `decide`.
+- route nodes whose only remaining job is now owned by the controller.
 
-Keep local compute nodes that normalize evidence or enforce a deterministic rule. They return facts to the controller instead of selecting an unrelated workflow stage.
+Retain local compute nodes that normalize evidence or enforce one deterministic branch rule. They return branch results instead of selecting unrelated later stages.
 
-## Verification branch correction
+### Autoimplement branches
 
-Make the included change-verification workflow return a named result for every expected `planChecks` outcome.
+Rewire each branch as one bounded unit:
 
-- A valid plan continues to candidate checks.
-- A failed or timed-out planning turn returns `blocked` with the exact request, attempt, outcome, and error evidence.
-- Cancellation remains terminal.
-- No verification command runs after an invalid, failed, or timed-out plan.
+- plan discovery returns its found or blocked evidence;
+- workspace preparation returns either named child exit;
+- documentation and redesign return their named child exits;
+- implementation and repair return accepted output, failure, or timeout evidence;
+- verification returns either named child exit;
+- publication returns current local and remote state;
+- review returns current command, finding, and head evidence;
+- comment inspection returns current feedback evidence;
+- CI returns current check, wait, command, and failure evidence;
+- delivery returns current default-branch or pull-request delivery evidence.
 
-The Autoimplement parent routes both `localVerification.ready` and `localVerification.blocked` to observation. The controller may retry verification, repair, redesign, or confirm blocked. It does not restart the complete workflow for this case.
+Each agent or action that handles operational failure routes `ok`, `failed`, and `timed_out` explicitly. Leave `cancelled` without a continuation route.
 
-Keep the earlier incident fixes as part of the verification branch:
+### Verification planning
 
-- accept known verification commands directly through `verificationChecks`;
-- add explicit untested checks with supplied commands and keep them visible;
-- build the planning prompt from the same command-safety facts used by validation;
-- return all independent validation errors in one bounded correction response;
-- give verification planning an explicit 30-minute active-time limit;
-- report an expired request when durable timeout evidence proves that timeout won the submission race.
+Update `src/builtins/change-verification.workflow.ts` so every expected `planChecks` outcome reaches a named child exit.
 
-## Review branch
+A valid plan continues to candidate checks. A failed or timed-out planning turn returns `blocked` with its exact request, attempt, outcome, and error evidence. Cancellation stays terminal. No verification command starts from an invalid or incomplete plan.
 
-The review branch owns one bounded review unit. It may select and run the reviewer command, repair a malformed command, assess findings, or verify a P2 fix. It returns current review evidence to the controller.
+Route both `localVerification.ready` and `localVerification.blocked` back to Autoimplement observation. The controller then chooses retry, repair, redesign, a later stage, or blocked.
 
-The controller chooses the next route:
+Retain the incident fixes from the earlier plan:
 
-- run review again when a current P0 or P1 fix changed the reviewed head;
-- repair when a valid finding requires a local change;
-- redesign when a finding invalidates the approved plan;
-- inspect comments when local review is current and clear;
-- block when the required reviewer cannot run and no authorized safe path remains.
+- allow exact known checks through `verificationChecks`;
+- add explicit untested items when supplied checks cannot cover remote work;
+- derive the planning prompt and command validator from the same safety facts;
+- collect independent plan errors into one bounded response;
+- set a 30-minute active-time limit for verification planning.
 
-## CI branch
+Add focused tests for the original two validation errors in one response, correction on the same request, no command execution before acceptance, supplied checks, explicit untested checks, and the planner fallback.
 
-The CI branch owns one bounded CI unit. It may inspect current checks, run one validated watch, repair a malformed watch command, classify a completed failure, or run useful local work while checks remain pending.
+### Timeout conflict text
 
-The branch returns after each bounded wait or action. The controller then decides whether to inspect CI again, repair code, redesign, deliver, or block. It does not invent an ETA.
+Use immutable timeout events in the existing server state owner to identify a late submission for the exact expired request.
 
-Remote-only checks remain untested until current remote evidence exists. A pending check is not reported as passed.
+Check for an already accepted idempotent submission first. Report that the request expired only when durable evidence proves that timeout cancelled it. Keep every unrelated revision conflict unchanged. Do not reopen or mutate the request.
 
-## Monitor adoption
+Add focused server tests for timeout winning, submission winning, accepted retry adoption, unrelated cancellation, and stale output rejection.
 
-Use `controlLoop()` to describe Monitor's existing `observe -> decide -> act -> observe` graph without changing its behavior.
+### Restart result
 
-Monitor supplies its own routes: `stop`, `wait`, `advance`, `recover`, and `repair`. Its `returnTo` remains `observe`. Its existing authority, cost, defect, progress, scheduling, and maximum-check rules remain unchanged.
+Build the extension's restart result from the accepted server receipt.
 
-Monitor is the second production use of the helper. If the helper cannot express both Monitor and Autoimplement without workflow-specific exceptions, revise the helper before publishing it.
+Return the new child as `runId`, the terminal source as `parentRunId`, and the saved `restartNumber`. Tell the model to inspect the child. Do not state that the terminal parent restarted.
 
-## Restart result
+Keep restart as terminal-run recovery. Autoimplement branch recovery remains inside the active control loop.
 
-Fix the model-visible restart result independently of the control loop. Build it from the accepted server receipt.
+Add extension tests for visible text, structured details, parent state, child state, and status calls that use the returned child ID.
 
-The result must name:
+### Built-in identity
 
-- `runId` as the new child run;
-- `parentRunId` as the terminal source run;
-- `restartNumber` as the child's restart number.
+Raise the Autoimplement and Monitor revisions in `src/builtins/catalog.ts` and `src/builtins/metadata.ts`. Update affected definition snapshots and fixtures.
 
-Restart remains a fresh run for terminal recovery. It is not used for an ordinary branch failure that the Autoimplement controller can handle in the active run.
+Apply the alpha hard cut. New runs use the new graph. Existing snapshotted runs keep their saved definitions. Add no migration or compatibility reader.
 
-## Progress and safety bounds
+### Documentation
 
-Keep `maxSteps` as the final run bound. Keep existing route-specific review, repair, CI, blocker, and replanning limits until the controller replaces their ownership explicitly.
+Keep [Control loops](../CONTROL_LOOPS.md) as the single source for the general model and API.
 
-The controller also checks useful progress. It compares current facts that already exist, such as the plan digest, prepared workspace, diff or head revision, verification result, review fingerprint, CI target, delivery receipt, and latest failure. It does not invent a progress value.
+When implementation ships:
 
-When the same route returns with the same relevant state and no new evidence, the controller must choose another safe route or report blocked. It must not loop only because steps remain under `maxSteps`.
+- change its status from planned to current;
+- update examples to match the final exported TypeScript names;
+- update `docs/WORKFLOWS.md` with links and built-in behavior;
+- update `docs/WORKFLOW_COMPOSITION.md` with child branch requirements;
+- update Autoimplement and Monitor skill guidance where input or recovery behavior changes;
+- keep implementation history and test commands in this dated plan.
 
-The controller itself has a named active-time limit. A failed or timed-out controller receives only the existing bounded missing-submission recovery. It does not route recursively to itself. If no valid decision is accepted within the bound, the run reports blocked with the controller failure.
+Do not copy the full control-loop explanation or API specification into the dated plan or built-in skill files.
 
-## Implementation plan
+## Verification
 
-1. Add `src/workflows/control-loop.ts` with the generic route definitions, literal-preserving TypeScript types, `controlLoop()`, definition checks, and focused unit tests. Export the helper and public types from `src/workflows/index.ts` and package entry points. Document that it creates ordinary edges and has no runtime behavior.
-2. Add graph tests for exhaustive decision routes, branch returns, terminal routes, unknown references, duplicate outgoing edges, expected failed and timed-out return paths, cancelled paths, included-workflow exits, and nested control loops. Keep graph errors stable and concise.
-3. Refactor Monitor to construct its existing routes and returns with `controlLoop()`. Prove that the expanded graph, decisions, waits, actions, repair composition, stop behavior, and persisted results remain equivalent. Raise the built-in Monitor revision because its snapshotted source changes.
-4. Add Autoimplement observation and `decide` nodes. Add a workflow-specific decision parser that checks route evidence, authority, completion, blockers, uncertain effects, and progress. Declare every route and return through `controlLoop()`.
-5. Rewire Autoimplement branches so each expected non-cancelled success, failure, and timeout returns to observation. Keep branch work bounded. Remove the superseded timeout fallback, blocker challenge, and scattered cross-stage route nodes after their behavior is covered by the controller.
-6. Update change verification so `planChecks` failure and timeout reach a named child exit. Route both child exits back to Autoimplement observation. Add direct untested input, shared prompt and validator rules, complete bounded validation errors, and the explicit planning timeout.
-7. Improve server submission conflict text only when immutable events prove that the exact request expired. Keep idempotent accepted submissions, exact request IDs, and revision fencing unchanged.
-8. Correct extension restart content and details so the model receives the new child run ID and the terminal parent ID from the accepted restart receipt.
-9. Raise the Autoimplement built-in revision and update fixtures in place. Do not add an old graph path, compatibility reader, alias, feature flag, or new schema version.
-10. Update `docs/WORKFLOWS.md`, `docs/WORKFLOW_COMPOSITION.md`, built-in skill guidance, and examples. Explain the public authoring helper, control-loop rules, Autoimplement routes, Monitor use, child failure handling, and terminal restart behavior.
+Run focused tests while implementing:
 
-## Tests
+```bash
+npx vitest run test/control-loop.test.ts test/decision.test.ts test/graph.test.ts test/workflow-graph.test.ts test/composition.test.ts
+npx vitest run test/builtin-monitor.test.ts test/builtin-autoimplement.test.ts test/change-verification.test.ts
+npx vitest run test/server-interaction.test.ts test/extension.test.ts
+```
 
-Add focused tests for:
+Use the exact current test filenames if the server interaction coverage is split across more focused files.
 
-- public `controlLoop()` exports and literal route inference;
-- missing, duplicate, unknown, and terminal route definitions;
-- ordinary nodes and included-workflow exits as branch return points;
-- expansion to normal workflow edges with no new node kind;
-- one and several control loops in nested included workflows;
-- Monitor's current stop, wait, advance, recover, and repair behavior;
-- every Autoimplement route from current observed state;
-- moving backward from verification, review, CI, or delivery to repair or redesign;
-- moving forward only when the current gate has evidence;
-- completion only after all required current gates;
-- blocked only after authority, alternatives, and progress checks;
-- no-progress detection and the final `maxSteps` bound;
-- agent and action success, failure, and timeout returning to the controller;
-- cancellation bypassing the controller and ending immediately;
-- uncertain commit, push, pull-request, comment, merge, release, and deployment effects not being repeated without settlement evidence;
-- `localVerification/planChecks` failure and timeout returning to Autoimplement;
-- supplied verification checks and explicit untested checks;
-- shared command rules and combined validation corrections;
-- timeout-versus-submission races with exact request IDs and revision fencing;
-- restart text and details naming the new child and terminal parent;
-- interruption, pause, resume, and recovery within the same run;
-- the required post-workflow turn and missing-submission recovery behavior.
-
-After focused tests pass, run the repository checks required for code changes:
+After focused tests pass, run the required repository checks:
 
 ```bash
 npm run check
@@ -345,38 +212,32 @@ npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 ```
 
-Then run one real-model live end-to-end check with an authenticated low-cost provider and exact model ID. The run must show a branch failure returning to `decide`, a safe earlier route, successful continuation, and no restart. Keep remote-only checks untested when the run has no real remote evidence.
+Then run one real-model live end-to-end check with an authenticated low-cost provider and exact model ID. Force one recoverable branch failure or timeout. The transcript must show a return to `decide`, selection of a safe earlier branch, successful continuation in the same run, and no restart.
+
+Keep remote-only work untested unless current remote evidence exists.
 
 ## Acceptance criteria
 
-- Pi Workflows exports one reusable control-loop authoring helper and its TypeScript types.
-- The helper expands to existing nodes and edges and adds no runtime node kind.
-- Monitor and Autoimplement both use the helper without workflow-specific exceptions in its shared implementation.
-- Autoimplement has one controller for cross-stage decisions.
-- Every expected non-cancelled branch outcome returns to the controller or a declared terminal result.
+- Pi Workflows exports the helper and types specified in `docs/CONTROL_LOOPS.md`.
+- The helper produces existing edge definitions and no runtime node type.
+- Monitor and Autoimplement use the same helper without workflow-specific code inside it.
+- Autoimplement has one controller for cross-stage choices.
+- Every expected non-cancelled branch outcome returns to observation or a declared terminal result.
 - `localVerification/planChecks` cannot end Autoimplement through an unhandled expected failure or timeout.
-- The controller can select an earlier branch when current evidence requires repair, verification, review, or redesign.
+- The controller can move to an earlier branch when current evidence requires it.
+- Completion and blocked routes pass deterministic workflow-specific checks.
 - Cancellation remains immediate and terminal.
-- Uncertain side effects are observed or adopted before any retry.
-- Completion and blocked decisions pass deterministic workflow-specific checks.
+- Uncertain effects are observed or adopted before retry.
 - Repeated work without observed progress stops within existing bounds.
-- Validation errors are complete enough for one correction turn.
-- The model-visible restart result names the new child and terminal parent.
-- Existing run data remains readable without a migration or compatibility path.
-- Documentation and tests match the shipped behavior.
-
-## Rollout
-
-Implement this as an alpha hard replacement. New built-in revisions use the control-loop graph. Existing snapshotted runs keep their saved definitions and finish under those definitions.
-
-Do not migrate, reinterpret, or rewrite active or terminal run records. If incompatible local state cannot resume safely, fail with a clear reset or restart instruction.
-
-Keep the public helper small. Do not add dynamic route registration, hidden commands, implicit retries, or a controller-specific persistence layer during rollout.
+- Verification planning returns complete correction information and has enough bounded active time.
+- The restart result names the new child and terminal parent.
+- Existing run data needs no migration or compatibility path.
+- Timeless and dated documentation have no duplicated specification sections.
 
 ## Contract impact
 
-- **Session state:** normal controller prompts, accepted decisions, branch results, summaries, and workflow tool results.
-- **Other persistent data:** normal definition snapshots, step results, events, and effect receipts in the existing schemas.
+- **Session state:** normal controller prompts, decisions, branch results, summaries, and workflow tool results.
+- **Other persistent data:** normal snapshots, step results, events, and effect receipts in existing schemas.
 - **Pi internals:** none.
-- **Public Pi API:** existing documented extension events, tools, messages, and abort behavior only.
-- **Public pi-workflows API:** new `controlLoop()` authoring helper and literal-preserving TypeScript route definitions. Existing node, edge, include, exit, and run contracts remain in place.
+- **Public Pi API:** existing documented extension APIs only.
+- **Public pi-workflows API:** the new `controlLoop()` authoring helper and its literal-preserving TypeScript definitions. Existing node, edge, include, exit, and run formats stay in place.
