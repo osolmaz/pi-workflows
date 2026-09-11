@@ -14,12 +14,12 @@ export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "plain-summary", revision: "3", definition: plainSummaryWorkflow },
   { id: "autoplan", revision: "6", definition: autoplanWorkflow },
   { id: "autodoc", revision: "3", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "12", definition: autoimplementWorkflow },
+  { id: "autoimplement", revision: "13", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "4", definition: planApprovalWorkflow },
   { id: "sanity-check", revision: "6", definition: sanityCheckWorkflow },
   {
     id: "change-verification",
-    revision: "1",
+    revision: "2",
     definition: changeVerificationWorkflow,
     discoverable: false,
   },
@@ -37,7 +37,7 @@ export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   },
   {
     id: "monitor",
-    revision: "12",
+    revision: "13",
     definition: monitorWorkflow,
     legacySources: [
       {
