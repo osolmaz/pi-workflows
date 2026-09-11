@@ -104,26 +104,6 @@ fn decode_view(
     raw: &Value,
     content: &ViewContent,
 ) -> DecodeOutcome {
-    for item in [
-        &content.definition,
-        &content.graph_history,
-        &content.display_reason,
-    ] {
-        if let ContentState::Invalid(error) = item {
-            return DecodeOutcome::Invalid(error.clone());
-        }
-    }
-    if [
-        &content.definition,
-        &content.graph_history,
-        &content.display_reason,
-    ]
-    .iter()
-    .any(|item| matches!(item, ContentState::Pending))
-    {
-        return DecodeOutcome::PendingContent;
-    }
-
     let graph_revision = raw
         .get("graphRevision")
         .and_then(Value::as_u64)
@@ -146,6 +126,26 @@ fn decode_view(
     let Ok(mut display) = serde_json::from_value::<WorkflowDisplay>(display_value.clone()) else {
         return DecodeOutcome::Invalid("display has invalid required fields".to_string());
     };
+
+    for item in [
+        &content.definition,
+        &content.graph_history,
+        &content.display_reason,
+    ] {
+        if let ContentState::Invalid(error) = item {
+            return DecodeOutcome::Invalid(error.clone());
+        }
+    }
+    if [
+        &content.definition,
+        &content.graph_history,
+        &content.display_reason,
+    ]
+    .iter()
+    .any(|item| matches!(item, ContentState::Pending))
+    {
+        return DecodeOutcome::PendingContent;
+    }
     if display_reason_artifact(raw).is_some() {
         let Some(reason_content) = display_reason_value(raw, content.display_reason.as_deref())
         else {
@@ -1551,6 +1551,21 @@ mod tests {
                 DecodeOutcome::Invalid(error) if error == reason
             ));
         }
+    }
+
+    #[test]
+    fn invalid_inline_snapshot_fields_take_priority_over_pending_content() {
+        let mut raw = agent_snapshot();
+        raw["display"]["controls"] = json!([42]);
+        let content = ViewContent {
+            definition: ContentState::Pending,
+            ..ViewContent::default()
+        };
+
+        assert!(matches!(
+            decode_view(4, 1, &raw, &content),
+            DecodeOutcome::Invalid(error) if error == "display has invalid required fields"
+        ));
     }
 
     #[test]
