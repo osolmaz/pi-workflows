@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { VERIFICATION_PLANNING_TIMEOUT_MS } from "../src/builtins/agent-timeouts.js";
 import {
   changeVerificationWorkflow,
   classifyVerification,
@@ -240,8 +241,18 @@ describe("change verification", () => {
 
   it("uses a bounded model command plan only when checks are not supplied", async () => {
     const { repository, workspace } = await fixture("change-verification-plan-checks");
-    const executor = new ScriptedExecutor().respond("planChecks", {
-      output: { checks: [check(repository, "process.exit(0)")] },
+    const executor = new ScriptedExecutor().respond("planChecks", async (request) => {
+      expect(request.prompt).toContain(
+        "All Git and GitHub CLI commands are forbidden, including read-only commands.",
+      );
+      expect(request.prompt).toContain("baseEligible=true requires readOnly=true");
+      expect(request.prompt).toContain("cwd must equal the exact prepared workspace");
+      expect(request.prompt).toContain("Return 1 through 64 checks");
+      const accepted = await request.accept({
+        checks: [check(repository, "process.exit(0)")],
+      });
+      if (!accepted.ok) throw new Error(accepted.error);
+      return { output: accepted.value };
     });
     const { state } = await run(
       { originatingWorkflow: "autodoc", qualifiedNode: "verify", workspace },
@@ -249,6 +260,89 @@ describe("change verification", () => {
     );
     expect(state.finalOutput).toMatchObject({ route: "ready" });
     expect(executor.requests.map((request) => request.contract.nodeId)).toEqual(["planChecks"]);
+    expect(changeVerificationWorkflow.nodes.planChecks?.timeoutMs).toBe(
+      VERIFICATION_PLANNING_TIMEOUT_MS,
+    );
+    expect(VERIFICATION_PLANNING_TIMEOUT_MS).toBe(1_800_000);
+  });
+
+  it("returns all detectable planned-check errors in one correction response", async () => {
+    const { repository, workspace } = await fixture("change-verification-combined-errors");
+    const baseComparison = {
+      ...check(repository, "process.exit(0)"),
+      id: "base-comparison",
+      readOnly: false,
+      baseEligible: true,
+    };
+    const forbiddenGit = {
+      ...check(repository, "process.exit(0)"),
+      id: "git-check",
+      command: "git",
+      args: ["diff", "--check"],
+      baseEligible: false,
+    };
+    const executor = new ScriptedExecutor().respond("planChecks", async (request) => {
+      const rejected = await request.accept({ checks: [baseComparison, forbiddenGit] });
+      expect(rejected).toMatchObject({ ok: false });
+      if (rejected.ok) throw new Error("invalid verification plan was accepted");
+      expect(rejected.error).toContain(
+        "verification checks[0] base comparison requires readOnly=true",
+      );
+      expect(rejected.error).toContain("verification checks[1].command is not allowed");
+      expect(rejected.error.indexOf("checks[0]")).toBeLessThan(rejected.error.indexOf("checks[1]"));
+      const accepted = await request.accept({
+        checks: [check(repository, "process.exit(0)")],
+        untested: [],
+      });
+      if (!accepted.ok) throw new Error(accepted.error);
+      return { output: accepted.value };
+    });
+    const { state } = await run(
+      { originatingWorkflow: "autoimplement", qualifiedNode: "verify", workspace },
+      executor,
+    );
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ route: "ready" });
+    expect(executor.requests).toHaveLength(1);
+  });
+
+  it("returns failed and timed-out command planning as a normal blocker", async () => {
+    const failedFixture = await fixture("change-verification-plan-failed");
+    const failed = await run(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace: failedFixture.workspace,
+      },
+      new ScriptedExecutor().respond("planChecks", { error: "provider disconnected" }),
+    );
+    expect(failed.state.status, failed.state.error).toBe("completed");
+    expect(failed.state.finalOutput).toMatchObject({
+      route: "blocked",
+      reason: "Verification command planning failed before a valid plan was accepted.",
+    });
+
+    const timedFixture = await fixture("change-verification-plan-timed-out");
+    const workflow = {
+      ...changeVerificationWorkflow,
+      nodes: {
+        ...changeVerificationWorkflow.nodes,
+        planChecks: { ...changeVerificationWorkflow.nodes.planChecks!, timeoutMs: 20 },
+      },
+    };
+    const timed = await new WorkflowEngine({
+      executor: new ScriptedExecutor().respond("planChecks", { hang: true }),
+      databasePath: await makeStateDatabasePath("change-verification-plan-timeout"),
+    }).run(workflow, {
+      originatingWorkflow: "autoimplement",
+      qualifiedNode: "verify",
+      workspace: timedFixture.workspace,
+    });
+    expect(timed.state.status, timed.state.error).toBe("completed");
+    expect(timed.state.finalOutput).toMatchObject({
+      route: "blocked",
+      reason: "Verification command planning timed out before a valid plan was accepted.",
+    });
   });
 
   it.each(["arguments", "normalized arguments", "executable"])(

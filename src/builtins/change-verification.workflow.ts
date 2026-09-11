@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import {
   runCommandBatch,
   MAX_COMMAND_BATCH_ITEMS,
+  MAX_COMMAND_BATCH_OUTPUT_CHARS,
+  MAX_COMMAND_BATCH_TIMEOUT_MS,
   validateCommandBatchRequest,
   type CommandBatchItem,
   type CommandBatchItemResult,
@@ -14,8 +16,11 @@ import {
 } from "../workflows/command-batch.js";
 import { action, agent, compute, defineWorkflow, manualEffect } from "../workflows/definition.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
-import { IMPLEMENTATION_TIMEOUT_MS } from "./agent-timeouts.js";
-import { validateVerificationCommandSafety } from "./autoimplement-command-batches.js";
+import { IMPLEMENTATION_TIMEOUT_MS, VERIFICATION_PLANNING_TIMEOUT_MS } from "./agent-timeouts.js";
+import {
+  formatVerificationCommandSafetyRules,
+  validateVerificationCommandSafety,
+} from "./autoimplement-command-batches.js";
 import {
   parsePreparedWorkspace,
   type PreparedWorkspace,
@@ -260,7 +265,9 @@ export function parseChangeVerificationInput(value: unknown): ChangeVerification
     workspace,
     ...(checks === undefined ? {} : { checks }),
     changedFiles: stringArray(record.changedFiles, "change verification changedFiles"),
-    untested: stringArray(record.untested, "change verification untested"),
+    untested: stringArray(record.untested, "change verification untested").map((item, index) =>
+      requireString(item, `change verification untested[${index}]`),
+    ),
     ...(record.plan === undefined ? {} : { plan: record.plan }),
     maxConcurrency:
       record.maxConcurrency === undefined
@@ -271,14 +278,50 @@ export function parseChangeVerificationInput(value: unknown): ChangeVerification
 
 function parsePlannedChecks(value: unknown, context: WorkflowNodeContext): VerificationPlan {
   const record = requireRecord(value, "verification command plan");
-  if (!Array.isArray(record.checks) || record.checks.length === 0)
+  if (!Array.isArray(record.checks) || record.checks.length === 0) {
     throw new Error("verification command plan checks must be a non-empty array");
-  const input = parseChangeVerificationInput({
-    ...(context.input as ChangeVerificationInput),
-    checks: record.checks,
-    untested: record.untested,
-  });
-  return { checks: input.checks!, untested: input.untested ?? [] };
+  }
+  if (record.checks.length > MAX_COMMAND_BATCH_ITEMS) {
+    throw new Error(
+      `verification command plan checks must contain at most ${MAX_COMMAND_BATCH_ITEMS} entries`,
+    );
+  }
+
+  const request = context.input as ChangeVerificationInput;
+  const checks: VerificationCheck[] = [];
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  for (const [index, check] of record.checks.entries()) {
+    try {
+      checks.push(parseCheck(check, request.workspace, index));
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+    if (check !== null && typeof check === "object" && !Array.isArray(check)) {
+      const rawId = (check as Record<string, unknown>).id;
+      if (typeof rawId === "string" && rawId.trim().length > 0) {
+        const id = rawId.trim();
+        if (ids.has(id)) errors.push(`verification check id is duplicated: ${id}`);
+        ids.add(id);
+      }
+    }
+  }
+
+  let untested: string[] = [];
+  try {
+    untested = stringArray(record.untested, "verification command plan untested").map(
+      (item, index) => requireString(item, `verification command plan untested[${index}]`),
+    );
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `verification command plan is invalid:\n${errors.map((error) => `- ${error}`).join("\n")}`,
+    );
+  }
+  return { checks, untested };
 }
 
 async function runBatch(
@@ -1084,16 +1127,22 @@ export const changeVerificationWorkflow = defineWorkflow({
       }),
     }),
     planChecks: agent({
+      timeoutMs: VERIFICATION_PLANNING_TIMEOUT_MS,
       statusDetail: "planning independent verification commands",
       prompt: ({ input }) => {
         const request = input as ChangeVerificationInput;
         return [
           "Propose the required direct verification commands because no complete program command list was supplied.",
-          "Do not run commands. Use no shell wrapper, stdin, environment override, Git mutation, publication, merge, release, or deployment.",
-          "Each check needs id, executable, argument array, exact prepared cwd, timeout, output limit, readOnly, baseEligible, changedFileScope, and findingFormat.",
-          "Set readOnly only when the command does not modify repository source. Set baseEligible only when the same executable and arguments safely test a separate base checkout by changing cwd alone.",
-          "Candidate-bound paths, including absolute Docker bind mounts, require baseEligible=false. Do not claim base-comparison evidence for candidate-only checks.",
-          "List checks that cannot run locally under untested. Do not omit required remote checks or mark them completed.",
+          "Do not run commands. Use no stdin or environment override.",
+          ...formatVerificationCommandSafetyRules(),
+          `Return 1 through ${MAX_COMMAND_BATCH_ITEMS} checks. Check ids must be unique and match [A-Za-z0-9][A-Za-z0-9._:-]{0,63}.`,
+          "Each check must contain only id, command, args, cwd, timeoutMs, maxOutputChars, readOnly, baseEligible, changedFileScope, findingFormat, and optional mechanicalFix.",
+          `command must be non-empty. args must be strings with no NUL. cwd must equal the exact prepared workspace. timeoutMs must be an integer from 1 through ${MAX_COMMAND_BATCH_TIMEOUT_MS}. maxOutputChars must be an integer from 1 through ${MAX_COMMAND_BATCH_OUTPUT_CHARS}.`,
+          "readOnly, baseEligible, and changedFileScope must be booleans. findingFormat must be text or json.",
+          "baseEligible=true requires readOnly=true and means the exact command and arguments can safely test a separate base checkout by changing cwd alone.",
+          "A base-eligible executable or argument must not point at the prepared workspace. Candidate-bound paths, including absolute Docker bind mounts, require baseEligible=false.",
+          "If mechanicalFix is present, it follows the same command-safety rules and needs command, string args, one or more repository-relative files with no .. segments, timeoutMs, maxOutputChars, and a non-empty expectedDiff.",
+          "List checks that cannot run locally as non-empty strings under untested. Do not omit required remote checks or mark them completed.",
           `Prepared workspace: ${JSON.stringify(request.workspace)}`,
           `Changed files: ${JSON.stringify(request.changedFiles ?? [])}`,
         ].join("\n");
@@ -1169,6 +1218,40 @@ export const changeVerificationWorkflow = defineWorkflow({
         '{ "route": "ready" | "repair" | "blocked", "reason": "reason", "evidence": ["evidence"] }',
       validate: parseJudgment,
     }),
+    planChecksBlocked: compute({
+      run: (context) => {
+        const input = context.input as ChangeVerificationInput;
+        const attempt = [...context.state.steps]
+          .reverse()
+          .find((step) => step.nodeId === "planChecks");
+        const reason =
+          attempt?.outcome === "timed_out"
+            ? "Verification command planning timed out before a valid plan was accepted."
+            : "Verification command planning failed before a valid plan was accepted.";
+        return {
+          schema: CHANGE_VERIFICATION_SCHEMA,
+          route: "blocked",
+          originatingWorkflow: input.originatingWorkflow,
+          qualifiedNode: input.qualifiedNode,
+          workspace: input.workspace,
+          changedFiles: input.changedFiles ?? [],
+          candidateCommands: null,
+          baseCommands: null,
+          relatedFailures: [],
+          unrelatedFailures: [],
+          fixedBaselineFailures: [],
+          unknownFailures: [],
+          untestedChecks: [],
+          repairAttempts: [],
+          failureFingerprint: createHash("sha256")
+            .update(`${attempt?.outcome ?? "failed"}:${attempt?.error ?? reason}`)
+            .digest("hex"),
+          outputReferences: [],
+          reason,
+          evidence: [attempt?.error ?? "No accepted verification command plan is available."],
+        } satisfies ChangeVerificationResult;
+      },
+    }),
     ready: compute({
       run: (context) => {
         const result = latestClassification(context);
@@ -1189,6 +1272,8 @@ export const changeVerificationWorkflow = defineWorkflow({
     }),
     blocked: compute({
       run: (context) => {
+        const planning = context.outputs.planChecksBlocked as ChangeVerificationResult | undefined;
+        if (planning !== undefined) return planning;
         const guard = context.outputs.repairGuard as
           | { result?: ChangeVerificationResult }
           | undefined;
@@ -1229,7 +1314,14 @@ export const changeVerificationWorkflow = defineWorkflow({
       from: "selectChecks",
       switch: { on: "$.route", cases: { run: "runCandidate", plan: "planChecks" } },
     },
-    { from: "planChecks", to: "runCandidate" },
+    {
+      from: "planChecks",
+      switch: {
+        on: "$result.outcome",
+        cases: { ok: "runCandidate", timed_out: "planChecksBlocked", failed: "planChecksBlocked" },
+      },
+    },
+    { from: "planChecksBlocked", to: "blocked" },
     { from: "runCandidate", to: "runBase" },
     { from: "runBase", to: "classify" },
     {
