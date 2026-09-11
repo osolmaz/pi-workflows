@@ -122,17 +122,17 @@ describe("controlLoop", () => {
     ).toThrow(/terminal route complete must not declare returns/);
   });
 
-  it("rejects duplicate and controller return sources", () => {
-    expect(() =>
+  it("deduplicates shared returns and rejects the controller as a return source", () => {
+    expect(
       controlLoop({
         decide: "decide",
         returnTo: "observe",
         routes: {
-          first: { to: "a", returns: ["same"] },
-          second: { to: "b", returns: ["same"] },
+          first: { to: "work", returns: ["same"] },
+          second: { to: "work", returns: ["same"] },
         },
-      }),
-    ).toThrow(/declared more than once/);
+      }).edges.filter((edge) => "to" in edge),
+    ).toEqual([{ from: "same", to: "observe" }]);
     expect(() =>
       controlLoop({
         decide: "decide",
