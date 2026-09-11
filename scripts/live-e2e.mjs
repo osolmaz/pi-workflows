@@ -913,30 +913,46 @@ async function runModelWorkflow(context, rpc, client, api) {
     smoke: "model-passed",
     nonce: "pi-workflows-live-e2e",
     timeoutRecovered: true,
+    controlRoutes: ["work", "recover", "complete"],
   };
   if (!isDeepStrictEqual(state.finalOutput, expected)) {
     throw new Error(
       `Model workflow returned the wrong output: ${JSON.stringify(state.finalOutput)}`,
     );
   }
-  if (!Array.isArray(state.steps) || state.steps.length !== 4) {
-    throw new Error(`Model workflow recorded ${String(state.steps?.length)} steps instead of four`);
-  }
+  const expectedSteps = [
+    ["prepare", "ok"],
+    ["observe", "ok"],
+    ["decide", "ok"],
+    ["work", "timed_out"],
+    ["workResult", "ok"],
+    ["observe", "ok"],
+    ["decide", "ok"],
+    ["recover", "ok"],
+    ["observe", "ok"],
+    ["decide", "ok"],
+    ["finish", "ok"],
+  ];
   if (
+    !Array.isArray(state.steps) ||
     !isDeepStrictEqual(
       state.steps.map((step) => [step.nodeId, step.outcome]),
-      [
-        ["submit", "ok"],
-        ["work", "timed_out"],
-        ["recover", "ok"],
-        ["finish", "ok"],
-      ],
+      expectedSteps,
     )
-  )
-    throw new Error("Model workflow did not complete the exact timeout-recovery sequence");
-  const step = requireObject(state.steps[0], "model workflow step");
+  ) {
+    throw new Error(
+      `Model workflow did not complete the exact control-loop sequence: ${JSON.stringify(state.steps)}`,
+    );
+  }
+  const step = requireObject(
+    state.steps.find((candidate) => candidate.nodeId === "decide"),
+    "model workflow decision step",
+  );
   if (typeof step.attemptId !== "string" || step.outcome !== "ok") {
-    throw new Error(`Model workflow step was not accepted: ${JSON.stringify(step)}`);
+    throw new Error(`Model workflow decision was not accepted: ${JSON.stringify(step)}`);
+  }
+  if (run.restartNumber !== 0 || run.parentRunId !== null) {
+    throw new Error(`Model workflow unexpectedly restarted: ${JSON.stringify(run)}`);
   }
 
   await waitForPiIdle(rpc, MODEL_TIMEOUT_MS);
@@ -963,18 +979,18 @@ async function runModelWorkflow(context, rpc, client, api) {
       entry.customType === "pi-workflows-step" &&
       entry.details?.contract?.runId === run.runId,
   );
-  if (deliveries.length !== 3) {
+  if (deliveries.length !== 5) {
     throw new Error(
-      `Expected three durable workflow step deliveries, observed ${deliveries.length}`,
+      `Expected five durable workflow step deliveries, observed ${deliveries.length}`,
     );
   }
   if (
     !isDeepStrictEqual(
       deliveries.map((entry) => entry.details?.contract?.nodeId),
-      ["submit", "work", "recover"],
+      ["decide", "work", "decide", "recover", "decide"],
     )
   )
-    throw new Error("Model workflow delivery order does not match timeout recovery");
+    throw new Error("Model workflow delivery order does not match control-loop recovery");
   const details = requireObject(deliveries[0].details, "workflow step delivery");
   if (typeof details.requestId !== "string" || details.contract?.attemptId !== step.attemptId) {
     throw new Error(
