@@ -177,6 +177,7 @@ type AutoimplementObservation = {
 };
 
 const MAX_CONTROL_DECISIONS = 40;
+const MAX_CONTROL_FAILURES = 3;
 const MAX_CONSECUTIVE_NO_PROGRESS_ATTEMPTS = 3;
 const MAX_CONTROL_ITEMS = 5;
 const MAX_CONTROL_TEXT = 500;
@@ -594,6 +595,7 @@ const CONTROL_ATTEMPT_NODES = new Set([
   "finalizeDelivery",
   "adoptPlan",
   "decide",
+  "controlFailure",
 ]);
 
 function isIncludedControlReturn(nodeId: string): boolean {
@@ -831,11 +833,36 @@ function resultRoutes(
   if (nodeId === "finalizeDefaultBranch") return ["publication", "redesign", "blocked"];
   if (nodeId === "finalizeDelivery") return ["delivery", "blocked"];
   if (nodeId === "redesign/blocked") return ["redesign", "blocked"];
-  if (nodeId === "decide") {
+  if (nodeId === "decide" || nodeId === "controlFailure") {
     const previous = context.outputs.observe as AutoimplementObservation | undefined;
     return previous?.availableRoutes ?? initialControlRoutes(context);
   }
   return initialControlRoutes(context);
+}
+
+function controlFailure(context: WorkflowNodeContext): Record<string, unknown> {
+  let attempts = 0;
+  const evidence: string[] = [];
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step?.nodeId !== "decide") continue;
+    if (step.outcome === "ok") break;
+    attempts += 1;
+    evidence.push(`${step.outcome}: ${step.error ?? "No accepted controller decision."}`);
+  }
+  return attempts >= MAX_CONTROL_FAILURES
+    ? {
+        route: "blocked",
+        attempts,
+        reason: `The controller failed ${attempts} times without an accepted decision.`,
+        evidence,
+      }
+    : {
+        route: "retry",
+        attempts,
+        reason: "The controller did not return an accepted decision. Try the same decision again.",
+        evidence,
+      };
 }
 
 function acceptedControlDecisions(context: WorkflowNodeContext): AutoimplementControlDecision[] {
@@ -1419,6 +1446,12 @@ function ciForOutput(context: WorkflowNodeContext): unknown {
 function latestBlockedReason(context: WorkflowNodeContext): { reason: string; evidence: unknown } {
   for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
     const step = context.state.steps[index];
+    if (step?.nodeId === "controlFailure" && step.outcome === "ok") {
+      const failure = step.output as { route?: unknown; reason?: unknown };
+      if (failure.route === "blocked" && typeof failure.reason === "string") {
+        return { reason: failure.reason, evidence: step.output };
+      }
+    }
     if (step?.nodeId !== "decide" || step.outcome !== "ok") continue;
     const decision = step.output as AutoimplementControlDecision;
     if (decision.route === "blocked") {
@@ -1622,6 +1655,7 @@ export const autoimplementWorkflow = defineWorkflow({
       expectedOutput: `{ "route": ${AUTOIMPLEMENT_CONTROL_ROUTES.map((route) => `"${route}"`).join(" | ")}, "goalMet": true | false, "blockingNow": true | false, "outsideAuthority": true | false, "canProceed": true | false, "reason": "concise reason", "nextAction": "next action or empty for terminal routes", "alternativesChecked": ["checked alternative"], "evidence": ["concrete evidence"] }`,
       validate: parseControlDecision,
     }),
+    controlFailure: compute({ run: controlFailure }),
     dispatch: compute({
       run: ({ outputs }) => outputs.decide,
     }),
@@ -2056,8 +2090,12 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "decide",
       switch: {
         on: "$result.outcome",
-        cases: { ok: "dispatch", timed_out: "observe", failed: "observe" },
+        cases: { ok: "dispatch", timed_out: "controlFailure", failed: "controlFailure" },
       },
+    },
+    {
+      from: "controlFailure",
+      switch: { on: "$.route", cases: { retry: "observe", blocked: "prepareBlocked" } },
     },
     ...autoimplementControlLoop.edges,
     {

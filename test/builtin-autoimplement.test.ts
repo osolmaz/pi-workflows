@@ -1851,6 +1851,29 @@ describe("built-in autoimplement", () => {
     ).toEqual(expect.arrayContaining([1]));
   });
 
+  it("reports blocked after three controller failures", async () => {
+    const executor = summaryExecutor().respond("decide", { hang: true });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-controller-failure-bound"),
+    });
+
+    const { state } = await engine.run(autoimplementWithTimeout("decide", 20), {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      preparedWorkspace: preparedWorkspaceFor(),
+    });
+
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "The controller failed 3 times without an accepted decision.",
+    });
+    expect(state.steps.filter((step) => step.nodeId === "decide")).toHaveLength(3);
+    expect(state.steps.filter((step) => step.nodeId === "controlFailure")).toHaveLength(3);
+  });
+
   it("keeps explicit cancellation terminal", async () => {
     const executor = summaryExecutor()
       .respond("decide", controlDecision("implementation"))
@@ -1966,6 +1989,19 @@ describe("built-in autoimplement", () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     expect(autoimplementWorkflow.nodes.timeoutFallback).toBeUndefined();
     expect(autoimplementWorkflow.nodes.challengeBlocker).toBeUndefined();
+    expect(compiled.edges.find((candidate) => candidate.from === "decide")).toMatchObject({
+      switch: {
+        on: "$result.outcome",
+        cases: { ok: "dispatch", timed_out: "controlFailure", failed: "controlFailure" },
+      },
+    });
+    expect(
+      (
+        compiled.edges.find((candidate) => candidate.from === "decide") as {
+          switch: { cases: Record<string, string> };
+        }
+      ).switch.cases,
+    ).not.toHaveProperty("cancelled");
     for (const nodeId of [
       "implement",
       "fix",
