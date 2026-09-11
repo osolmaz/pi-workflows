@@ -2119,7 +2119,7 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
       expect(timing().elapsedMs).toBe(disconnected.elapsedMs);
       expect(timing().openIntervals).toBe(0);
       expect(state.getInteraction(interaction.requestId)?.status).toBe("pending");
-      await connect(message, false);
+      coordinatorEpoch = await connect(message, false);
       await waitUntil(() => timing().status === "timed_out", 30_000);
       expect(timing()).toMatchObject({
         startedAt: initial.startedAt,
@@ -2128,6 +2128,26 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
       });
       expect(timing().elapsedMs).toBeGreaterThanOrEqual(1_500);
       expect(state.getInteraction(interaction.requestId)?.status).toBe("cancelled");
+      await expect(
+        client.request({
+          operation: "interaction.submit",
+          runId,
+          expectedRevision: interaction.revision,
+          payload: {
+            targetSessionId: "host-test-session",
+            coordinatorEpoch,
+            requestId: interaction.requestId,
+            submissionId: "late-timeout-submission",
+            value: { output: { answer: "too late" } },
+          },
+        }),
+      ).resolves.toMatchObject({
+        outcome: "rejected",
+        error: "Workflow step request expired before this submission was accepted",
+      });
+      expect(state.interactionSubmission(interaction.requestId, "late-timeout-submission")).toBe(
+        undefined,
+      );
     } finally {
       state.close();
       await client.close();
@@ -2698,6 +2718,23 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       } finally {
         state.close();
       }
+      const authority = await ownSession(client);
+      await expect(
+        client.request({
+          operation: "interaction.submit",
+          runId: "cancel-interaction-run",
+          expectedRevision: interaction.revision,
+          payload: {
+            ...authority,
+            requestId: interaction.requestId,
+            submissionId: "late-cancel-submission",
+            value: { output: { answer: "too late" } },
+          },
+        }),
+      ).resolves.toMatchObject({
+        outcome: "rejected",
+        error: "Interactive request revision conflict",
+      });
     } finally {
       await host.stop();
     }

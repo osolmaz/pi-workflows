@@ -846,6 +846,29 @@ export class ServerStateStore {
     );
   }
 
+  interactionTimedOut(requestId: string): boolean {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT e.payload_hash AS payloadHash
+         FROM interactive_requests i
+         JOIN runs r ON r.run_id = i.run_id
+         JOIN events e ON e.resource_id = r.resource_id
+         WHERE i.request_id = ? AND e.event_type = 'run.interaction_timeout_started'
+         ORDER BY e.event_seq DESC`,
+      )
+      .all(requestId) as Array<{ payloadHash: Buffer | null }>;
+    return rows.some((row) => {
+      if (row.payloadHash === null) return false;
+      const payload = this.state.readJson(row.payloadHash);
+      return (
+        payload !== null &&
+        typeof payload === "object" &&
+        !Array.isArray(payload) &&
+        payload.requestId === requestId
+      );
+    });
+  }
+
   beginInteractionValidation(options: {
     requestId: string;
     submissionId: string;

@@ -2437,22 +2437,37 @@ export class WorkflowServer {
       };
     }
     const submissionId = requireString(payload.submissionId, "submissionId");
-    const submission = this.serverState.beginInteractionValidation({
-      requestId,
-      submissionId,
-      idempotencyKey: request.idempotencyKey,
-      expectedRevision:
-        request.expectedRevision === undefined
-          ? current.revision
-          : requireNonNegativeInteger(request.expectedRevision, "expectedRevision"),
-      payload: (payload.value ?? null) as JsonValue,
-      receipt: {
-        operation: request.operation,
+    let submission: ReturnType<ServerStateStore["beginInteractionValidation"]>;
+    try {
+      submission = this.serverState.beginInteractionValidation({
         requestId,
         submissionId,
-        status: "validating",
-      },
-    });
+        idempotencyKey: request.idempotencyKey,
+        expectedRevision:
+          request.expectedRevision === undefined
+            ? current.revision
+            : requireNonNegativeInteger(request.expectedRevision, "expectedRevision"),
+        payload: (payload.value ?? null) as JsonValue,
+        receipt: {
+          operation: request.operation,
+          requestId,
+          submissionId,
+          status: "validating",
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "Interactive request revision conflict" &&
+        this.serverState.interactionTimedOut(requestId)
+      ) {
+        return {
+          outcome: "rejected",
+          error: "Workflow step request expired before this submission was accepted",
+        };
+      }
+      throw error;
+    }
     const interaction = submission.interaction;
     const receipt = isObjectRecord(submission.receipt)
       ? { ...submission.receipt, requestId, submissionId: submission.submissionId }
