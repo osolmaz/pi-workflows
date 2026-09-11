@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
+import type { ClientEvent } from "../src/client/protocol.js";
+import type { WorkflowDisplayStatus, WorkflowSessionView } from "../src/client/view.js";
 import piWorkflows from "../src/extension/index.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
@@ -331,6 +333,126 @@ function stepContract(entry: Record<string, unknown>): {
   return { requestId: contract.requestId, nodeId: contract.nodeId, attemptId: contract.attemptId };
 }
 
+function widgetSessionSnapshot(
+  revision: number,
+  displayStatus: WorkflowDisplayStatus,
+  waitingOn: string,
+  stepTotal: number,
+): WorkflowSessionView {
+  const at = "2026-09-11T00:00:00.000Z";
+  const runId = "widget-refresh-run";
+  return {
+    schema: "pi-workflows.session-view.v1",
+    sessionId: "session-one",
+    run: {
+      schema: "pi-workflows.run-view.v1",
+      runId,
+      revision,
+      runRevision: revision,
+      display: {
+        status: displayStatus,
+        activity: displayStatus === "running" ? "origin_turn" : null,
+        controls: [],
+        reason: null,
+      },
+      manifest: {},
+      state: {
+        schema: "pi-workflows.run-state.v1",
+        traceSeq: revision,
+        runId,
+        workflowName: "widget-refresh",
+        startedAt: at,
+        updatedAt: at,
+        status: "running",
+        input: null,
+        outputs: {},
+        results: {},
+        steps: [],
+        updates: [],
+        waitingOn,
+      },
+      workflow: {
+        schema: "pi-workflows.definition-snapshot.v1",
+        name: "widget-refresh",
+        startAt: "publish",
+        nodes: {
+          publish: { nodeType: "agent" },
+          runReview: { nodeType: "agent" },
+        },
+        edges: [{ from: "publish", to: "runReview" }],
+      },
+      queue: {
+        runId,
+        workflowName: "widget-refresh",
+        workflowSourceRef: "builtin:autoimplement",
+        initialized: true,
+        definitionDigest: "digest",
+        status: "running",
+        originSessionId: "session-one",
+        executionMode: "interactive",
+        parentRunId: null,
+        rootRunId: runId,
+        lineageKind: null,
+        restartNumber: 0,
+        parentRunRevision: null,
+        errorCode: null,
+        createdAt: at,
+        updatedAt: at,
+        startedAt: at,
+        finishedAt: null,
+      },
+      updates: [],
+      graphSteps: [],
+      graphStepStart: 0,
+      graphStepTotal: 0,
+      takenTransitions: [],
+      graphHistory: { steps: [], transitions: [] },
+      takenTransitionStart: 0,
+      takenTransitionTotal: 0,
+      graphCursor: 0,
+      stepStart: 0,
+      stepTotal,
+      tracePage: { start: 0, total: 0, items: [] },
+      session: {},
+      settingsScopes: [],
+      settingsStart: 0,
+      settingsTotal: 0,
+      followUpQueue: null,
+      followUpStart: 0,
+      followUpTotal: 0,
+      updateStart: 0,
+      updateTotal: 0,
+      live: true,
+      possiblyInterrupted: false,
+    },
+    pendingInteractions: [],
+    pendingInteractionStart: 0,
+    pendingInteractionTotal: 0,
+    workflowMessages: [],
+    workflowMessageStart: 0,
+    workflowMessageTotal: 0,
+    workflowMessageWindowComplete: true,
+    nextWorkflowMessageId: null,
+    openWorkflowMessageId: null,
+    openWorkflowTurn: null,
+    cancelledWorkflowMessageIds: [],
+    coordinatorEpoch: "test-epoch",
+    coordinatorActive: false,
+    branchReportRequired: false,
+  };
+}
+
+function sessionSnapshotEvent(revision: number, payload: WorkflowSessionView): ClientEvent {
+  return {
+    schema: "pi-workflows.client.v1",
+    type: "event",
+    subscriptionId: "widget-refresh-subscription",
+    event: "session_snapshot",
+    revision,
+    payload: payload as unknown as ClientEvent["payload"],
+  };
+}
+
 describe("pi-workflows hosted extension", () => {
   it("reports channel status through the hosted client", async () => {
     const { cwd } = await setupProject();
@@ -399,6 +521,50 @@ describe("pi-workflows hosted extension", () => {
     ).toHaveLength(1);
     await fake.emit("session_shutdown");
   }, 60_000);
+
+  it("updates the widget without waiting for complete run history", async () => {
+    const { cwd } = await setupProject();
+    let listener: ((event: ClientEvent) => void) | undefined;
+    vi.spyOn(WorkflowClient.prototype, "ensureAvailable").mockResolvedValue({
+      schema: "pi-workflows.client.v1",
+      type: "hello",
+      connectionId: "widget-refresh-connection",
+      packageVersion: "test",
+    });
+    vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(
+      async (_sessionId, next) => {
+        listener = next;
+        return async () => {};
+      },
+    );
+    const request = vi.spyOn(WorkflowClient.prototype, "request").mockImplementation((options) => {
+      if (options.operation === "view.page") return new Promise<never>(() => {});
+      return Promise.reject(new Error(`Unexpected request: ${options.operation}`));
+    });
+    const fake = makePi({ cwd });
+
+    await fake.emit("session_start");
+    await waitUntil(() => listener !== undefined, 5_000);
+    listener?.(sessionSnapshotEvent(1, widgetSessionSnapshot(1, "waiting", "publish", 0)));
+    await waitUntil(() => fake.statuses.at(-1)?.includes("[waiting] publish") === true, 5_000);
+
+    // A complete-view client would wait for this missing step page. The Pi
+    // extension needs only the bounded session projection for its widget.
+    listener?.(sessionSnapshotEvent(2, widgetSessionSnapshot(2, "running", "runReview", 1)));
+    await waitUntil(() => fake.statuses.at(-1)?.includes("[running] runReview") === true, 5_000);
+    const widget = fake.widgets.findLast((value) => typeof value === "function") as (
+      tui: unknown,
+      theme: { bold: (text: string) => string; fg: (_color: string, text: string) => string },
+    ) => { render: (width: number) => string[] };
+    const rendered = widget(undefined, {
+      bold: (text) => text,
+      fg: (_color, text) => text,
+    }).render(80);
+    expect(rendered.join("\n")).toContain("runReview");
+    expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ operation: "view.page" }));
+
+    await fake.emit("session_shutdown");
+  }, 30_000);
 
   it("starts, presents, updates, and completes an interactive hosted run", async () => {
     const { cwd, workflowPath } = await setupProject();
