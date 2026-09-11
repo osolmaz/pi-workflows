@@ -182,6 +182,8 @@ Direct imports check child input and exit names in TypeScript, while names and
 paths remain available for dynamic discovery. Nested children share one run,
 trace, pause state, and cancellation state. See
 [Workflow composition](docs/WORKFLOW_COMPOSITION.md) for the complete contract.
+Use [`controlLoop()`](docs/CONTROL_LOOPS.md) when one controller must choose
+among several bounded branches that return to the same observation point.
 
 ## Agent-managed workflows
 

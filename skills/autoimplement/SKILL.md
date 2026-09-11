@@ -20,9 +20,12 @@ Build the input as follows:
 - `baseBranch`: Use the requested base or the repository default branch.
 - `workspaceMode`: Use `auto` unless the user or repository requires `branch`, `worktree`, or `defaultBranch`. `auto` keeps a correct task branch, creates a task branch from a clean default branch, and isolates a dirty default checkout in a standard sibling worktree. Use `defaultBranch` only with explicit direct-work authority.
 - `preparedWorkspace`: Include a previously confirmed `pi-workflows.prepared-workspace.v1` result when the workspace was prepared before the run. Omit it otherwise.
+- `verificationChecks`: Include exact local command records only when `preparedWorkspace` already gives the final absolute work path. Each record needs `id`, `command`, string `args`, that exact path as `cwd`, positive `timeoutMs` and `maxOutputChars`, boolean `readOnly`, `baseEligible`, and `changedFileScope`, and `findingFormat` set to `text` or `json`. An optional `mechanicalFix` needs its own `command`, string `args`, repository-relative `files`, positive `timeoutMs` and `maxOutputChars`, and non-empty `expectedDiff`. `baseEligible: true` requires `readOnly: true` and a command that can run unchanged in a separate base checkout. All Git, GitHub CLI, shell-wrapper, mutation, publication, merge, release, and deployment commands are forbidden. Omit this field when the complete safe list or final work path is not known. The workflow planner is the safe default.
+- `verificationUntested`: Use non-empty strings for required checks that cannot run locally, such as remote browser tests. Supply it only with `verificationChecks`. Omit it with the planner path because the planner returns its own `untested` list.
 - `directDefaultBranchAuthorized`: Set `true` only when direct work on the actual default branch is explicit. It does not grant commit, push, merge, or release authority.
 - `merge`: Set `true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set `false`.
 - `documents`: Include known canonical plan or specification paths. Use an empty array when none are known.
+- `documentation`: Include a trusted current-document receipt only when it names the matching plan digest and canonical documents. Omit it when documentation still needs inspection.
 - `approval`: Omit it for the default behavior: ask on each new plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` when the user says to block on plan changes. Use `{ "mode": "skip" }` when the user says to continue without asking about plan changes.
 - `concurrency`: Include it only when the conversation gives explicit limits.
 
@@ -35,12 +38,12 @@ Replace the example values below with facts from the conversation, then make one
   "action": "start",
   "workflow": "autoimplement",
   "input": {
-    "task": "Implement the selected timeout fallback plan end to end.",
+    "task": "Implement the selected control-loop plan end to end.",
     "plan": {
-      "canonicalDocument": "docs/plans/timeout-fallback-plan.md",
-      "summary": "Add a bounded timeout fallback.",
+      "canonicalDocument": "docs/plans/2026-09-11-reusable-workflow-control-loop-plan.md",
+      "summary": "Add a reusable control loop and use it in Autoimplement.",
       "requirements": [
-        "Route supported timeouts to one read-only fallback.",
+        "Return expected branch failures and timeouts to the controller.",
         "Keep cancellation terminal."
       ],
       "verification": ["npm run check", "npm run test:e2e"]
@@ -51,7 +54,7 @@ Replace the example values below with facts from the conversation, then make one
     "baseBranch": "main",
     "workspaceMode": "auto",
     "merge": false,
-    "documents": ["docs/plans/timeout-fallback-plan.md"]
+    "documents": ["docs/plans/2026-09-11-reusable-workflow-control-loop-plan.md"]
   }
 }
 ```
@@ -82,7 +85,7 @@ Skip plan decisions when the user says to accept every new plan immediately:
 
 Omit `approval` for autonomous mode. It asks the `operator` audience and continues with the exact presented plan after 10 minutes without an accepted answer. The workflow owns this decision. The model must not answer the protected decision through the workflow tool.
 
-Do not manually duplicate stages already owned by the workflow. Autoimplement runs independent pi-reviewer commands, pending CI watches, and local verification commands from separate repositories in bounded batches. It keeps model turns, fixes, pushes, comment changes, merges, and releases ordered. One repository uses the same batch path with concurrency one.
+Do not manually duplicate stages already owned by the workflow. Autoimplement observes current evidence, then one central controller chooses the next declared branch. Expected branch success, failure, and timeout return to the controller. Cancellation stays terminal. Repeated routes with unchanged evidence and repeated controller failures are bounded. Autoimplement runs independent pi-reviewer commands, pending CI watches, and local verification commands from separate repositories in bounded batches. It keeps model turns, fixes, pushes, comment changes, merges, and releases ordered. One repository uses the same batch path with concurrency one.
 
 When this skill is loaded inside an active workflow step, do not start another workflow. Complete the current step contract with the available tools.
 
