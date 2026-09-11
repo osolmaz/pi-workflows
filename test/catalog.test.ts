@@ -18,8 +18,9 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(builtinWorkflowCatalog.get("plain-summary")?.revision).toBe("3");
     expect(builtinWorkflowCatalog.get("autoplan")?.revision).toBe("6");
     expect(builtinWorkflowCatalog.get("autodoc")?.revision).toBe("3");
-    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("12");
-    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("12");
+    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("13");
+    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("13");
+    expect(builtinWorkflowCatalog.get("change-verification")?.revision).toBe("2");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
     expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("6");
   });

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
+import type { AgentStepRequest, AgentStepSubmission } from "../src/workflows/types.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
@@ -36,24 +37,48 @@ function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
     })
     .respond("classifyImplementation", {
       output: { route: "blocked", summary: "test boundary", evidence: "done" },
-    })
-    .respond("challengeBlocker", {
-      output: {
-        route: "blocked",
-        blockingNow: true,
-        outsideAuthority: true,
-        canProceed: false,
-        reason: "The startup test intentionally stops here.",
-        nextAction: "",
-        nextStage: null,
-        alternativesChecked: ["Continue beyond the startup boundary"],
-        evidence: ["The test does not authorize later stages"],
-      },
     });
 }
 
+function autoimplementDecision(request: AgentStepRequest): AgentStepSubmission {
+  const match = /Observation: (.+)\nRecent attempts:/.exec(request.prompt);
+  if (match?.[1] === undefined) throw new Error("Autoimplement observation is missing");
+  const observation = JSON.parse(match[1]) as {
+    availableRoutes: string[];
+    latestAttempt?: { output?: unknown };
+  };
+  const latest = observation.latestAttempt?.output as
+    | { route?: unknown; reason?: unknown; result?: { route?: unknown; reason?: unknown } }
+    | undefined;
+  const latestResult = latest?.result ?? latest;
+  const suggested = latestResult?.route;
+  const route =
+    typeof suggested === "string" && observation.availableRoutes.includes(suggested)
+      ? suggested
+      : observation.availableRoutes[0];
+  if (route === undefined) throw new Error("Autoimplement route is missing");
+  const complete = route === "complete";
+  const blocked = route === "blocked";
+  return {
+    output: {
+      route,
+      goalMet: complete,
+      blockingNow: blocked,
+      outsideAuthority: blocked,
+      canProceed: !complete && !blocked,
+      reason:
+        blocked && typeof latestResult?.reason === "string"
+          ? latestResult.reason
+          : `Choose ${route}.`,
+      nextAction: complete || blocked ? "" : `Run ${route}.`,
+      alternativesChecked: blocked ? ["The startup test allows no later work"] : [],
+      evidence: [`Current evidence supports ${route}.`],
+    },
+  };
+}
+
 async function run(executor: ScriptedExecutor, input: unknown) {
-  executor.respond("blockedSummary", () => ({
+  executor.respond("decide", autoimplementDecision).respond("blockedSummary", () => ({
     output: "The required plan is missing.",
     assistantMessage: { sha256: "a".repeat(64) },
   }));
@@ -166,28 +191,14 @@ describe("autoimplement existing-plan startup", () => {
   });
 
   it("blocks instead of devising when no clear plan exists", async () => {
-    const executor = new ScriptedExecutor()
-      .respond("findPlan", {
-        output: {
-          route: "blocked",
-          documents: [],
-          reason: "No clear selected plan exists.",
-          evidence: null,
-        },
-      })
-      .respond("challengeBlocker", {
-        output: {
-          route: "blocked",
-          blockingNow: true,
-          outsideAuthority: true,
-          canProceed: false,
-          reason: "No existing plan can be adopted.",
-          nextAction: "",
-          nextStage: null,
-          alternativesChecked: ["Search referenced canonical documents"],
-          evidence: ["No selected plan exists"],
-        },
-      });
+    const executor = new ScriptedExecutor().respond("findPlan", {
+      output: {
+        route: "blocked",
+        documents: [],
+        reason: "No clear selected plan exists.",
+        evidence: null,
+      },
+    });
     const { state } = await run(executor, { task: "implement something" });
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
