@@ -17,6 +17,20 @@ The selected run contains bounded pages. Step, trace, session-entry, session-eve
 
 Large values use server content references. `piw` fetches workflow definitions, graph history, and complete server display reasons before it publishes the related live view. It fetches other large details when the user opens them. It verifies the byte count and SHA-256 digest before it shows the complete text or JSON value. Page and content requests run outside input and drawing through the shared client protocol. A newer page selection replaces the previous request, including when the user returns to an earlier page. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
 
+## Snapshot decoding
+
+The Workflow Server owns the advisory `display.controls` strings. The current values are `pause`, `resume`, `cancel`, `answer`, `human-answer`, `update`, `submit`, and `review`. The Rust run document accepts other string values so a future display-only control cannot stop the whole run from loading. `piw` does not execute these strings. Executable protocol operations remain closed and strictly validated.
+
+The Rust client gives each selected run one decode state:
+
+- ready when the complete required view is valid;
+- pending while the first snapshot or requested referenced content is incomplete; or
+- invalid when a required document or field cannot be decoded.
+
+Only the pending state shows `Loading run…`. The invalid state shows a safe error that names the failed section without including the run payload, session text, or artifact content. A newer snapshot or completed content request replaces the cached result, so a valid update clears an old error. Local sockets and WebSockets use the same decoder.
+
+The JSON wire shape and all version-1 schema identifiers remain unchanged. This behavior needs no state migration or compatibility path. See [Fix piw snapshot decoding](plans/2026-09-11-piw-snapshot-decoding-plan.md).
+
 ## Install
 
 The crates.io package uses the project name and installs the shorter `piw`
