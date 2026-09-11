@@ -181,7 +181,6 @@ const MAX_CONTROL_FAILURES = 3;
 const MAX_CONSECUTIVE_NO_PROGRESS_ATTEMPTS = 3;
 const MAX_CONTROL_ITEMS = 5;
 const MAX_CONTROL_TEXT = 500;
-const WORK_ATTEMPT_NODES = ["implement", "fix", "addressP2"] as const;
 
 const autoimplementControlLoop = controlLoop({
   decide: "dispatch",
@@ -249,40 +248,6 @@ function boundedControlItems(value: unknown, label: string): string[] {
     }
     return text;
   });
-}
-
-function latestStepIndex(
-  context: WorkflowNodeContext,
-  predicate: (step: WorkflowNodeContext["state"]["steps"][number]) => boolean,
-): number {
-  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
-    const step = context.state.steps[index];
-    if (step && predicate(step)) return index;
-  }
-  return -1;
-}
-
-function latestWorkAttemptIndex(context: WorkflowNodeContext): number {
-  return latestStepIndex(context, (step) =>
-    (WORK_ATTEMPT_NODES as readonly string[]).includes(step.nodeId),
-  );
-}
-
-function hasCurrentAcceptedWork(context: WorkflowNodeContext): boolean {
-  const index = latestWorkAttemptIndex(context);
-  return index >= 0 && context.state.steps[index]?.outcome === "ok";
-}
-
-function hasCurrentPublication(context: WorkflowNodeContext): boolean {
-  const workIndex = latestWorkAttemptIndex(context);
-  const publicationIndex = latestStepIndex(context, (step) => {
-    if (step.outcome !== "ok") return false;
-    if (step.nodeId === "publish") return true;
-    if (step.nodeId !== "verifyP2") return false;
-    const output = step.output as { passed?: unknown } | null;
-    return output?.passed === true;
-  });
-  return publicationIndex > workIndex;
 }
 
 function parseInput(value: unknown): AutoimplementInput {
