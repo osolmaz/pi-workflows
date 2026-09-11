@@ -9,7 +9,11 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { HumanDecisionResponse } from "../src/workflows/types.js";
+import type {
+  AgentStepRequest,
+  AgentStepSubmission,
+  HumanDecisionResponse,
+} from "../src/workflows/types.js";
 import { humanRequest, submitCheckpoint } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
@@ -173,6 +177,29 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
     );
 }
 
+function autoimplementDecision(request: AgentStepRequest): AgentStepSubmission {
+  const match = /Observation: (.+)\nRecent attempts:/.exec(request.prompt);
+  if (match?.[1] === undefined) throw new Error("Autoimplement observation is missing");
+  const observation = JSON.parse(match[1]) as { availableRoutes: string[] };
+  const route = observation.availableRoutes[0];
+  if (route === undefined) throw new Error("Autoimplement route is missing");
+  const complete = route === "complete";
+  const blocked = route === "blocked";
+  return {
+    output: {
+      route,
+      goalMet: complete,
+      blockingNow: blocked,
+      outsideAuthority: blocked,
+      canProceed: !complete && !blocked,
+      reason: `Choose ${route}.`,
+      nextAction: complete || blocked ? "" : `Run ${route}.`,
+      alternativesChecked: blocked ? ["No safe route remains"] : [],
+      evidence: [`Current evidence supports ${route}.`],
+    },
+  };
+}
+
 function completedRepairExecutor(rounds = 1): ScriptedExecutor {
   return designResponses(
     new ScriptedExecutor().respond(
@@ -186,6 +213,7 @@ function completedRepairExecutor(rounds = 1): ScriptedExecutor {
       output: "The repair passed its checks.",
       assistantMessage: { sha256: "a".repeat(64) },
     }))
+    .respond("implementation/decide", autoimplementDecision)
     .respond("implementation/implement", {
       output: {
         status: "implemented",
