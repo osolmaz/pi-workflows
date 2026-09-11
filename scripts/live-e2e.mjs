@@ -979,19 +979,40 @@ async function runModelWorkflow(context, rpc, client, api) {
       entry.customType === "pi-workflows-step" &&
       entry.details?.contract?.runId === run.runId,
   );
-  if (deliveries.length !== 5) {
+  const uniqueDeliveries = [];
+  const deliveredRequests = new Map();
+  for (const delivery of deliveries) {
+    const deliveryDetails = requireObject(delivery.details, "workflow step delivery");
+    if (typeof deliveryDetails.requestId !== "string") {
+      throw new Error(`Workflow delivery has no request ID: ${JSON.stringify(deliveryDetails)}`);
+    }
+    const existing = deliveredRequests.get(deliveryDetails.requestId);
+    if (
+      existing !== undefined &&
+      existing.details?.contract?.nodeId !== deliveryDetails.contract?.nodeId
+    ) {
+      throw new Error(
+        `Workflow request was delivered for different nodes: ${deliveryDetails.requestId}`,
+      );
+    }
+    if (existing === undefined) {
+      deliveredRequests.set(deliveryDetails.requestId, delivery);
+      uniqueDeliveries.push(delivery);
+    }
+  }
+  if (uniqueDeliveries.length !== 5) {
     throw new Error(
-      `Expected five durable workflow step deliveries, observed ${deliveries.length}`,
+      `Expected five durable workflow step requests, observed ${uniqueDeliveries.length}`,
     );
   }
   if (
     !isDeepStrictEqual(
-      deliveries.map((entry) => entry.details?.contract?.nodeId),
+      uniqueDeliveries.map((entry) => entry.details?.contract?.nodeId),
       ["decide", "work", "decide", "recover", "decide"],
     )
   )
     throw new Error("Model workflow delivery order does not match control-loop recovery");
-  const details = requireObject(deliveries[0].details, "workflow step delivery");
+  const details = requireObject(uniqueDeliveries[0].details, "workflow step delivery");
   if (typeof details.requestId !== "string" || details.contract?.attemptId !== step.attemptId) {
     throw new Error(
       `Workflow delivery does not match the accepted attempt: ${JSON.stringify(details)}`,
