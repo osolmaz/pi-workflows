@@ -164,7 +164,8 @@ type AutoimplementControlDecision = {
 type AutoimplementObservation = {
   decisionNumber: number;
   decisionLimit: number;
-  consecutiveRouteAttempts: number;
+  consecutiveNoProgressAttempts: number;
+  progressFingerprint: string;
   lastRoute: AutoimplementControlRoute | null;
   latestAttempt: {
     nodeId: string;
@@ -176,7 +177,7 @@ type AutoimplementObservation = {
 };
 
 const MAX_CONTROL_DECISIONS = 40;
-const MAX_CONSECUTIVE_ROUTE_ATTEMPTS = 3;
+const MAX_CONSECUTIVE_NO_PROGRESS_ATTEMPTS = 3;
 const MAX_CONTROL_ITEMS = 5;
 const MAX_CONTROL_TEXT = 500;
 const WORK_ATTEMPT_NODES = ["implement", "fix", "addressP2"] as const;
@@ -612,6 +613,66 @@ function latestControlAttempt(context: WorkflowNodeContext) {
   return undefined;
 }
 
+const NON_PROGRESS_FIELDS = new Set([
+  "attemptId",
+  "cwd",
+  "durationMs",
+  "elapsedMs",
+  "finishedAt",
+  "recordedAt",
+  "requestId",
+  "startedAt",
+  "workflowMessageId",
+]);
+
+function stableProgressValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableProgressValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !NON_PROGRESS_FIELDS.has(key))
+        .map(([key, entry]) => [key, stableProgressValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function controlProgressFingerprint(attempt: ReturnType<typeof latestControlAttempt>): string {
+  return digest(
+    attempt === undefined
+      ? { nodeId: "prepare", outcome: "ok" }
+      : {
+          nodeId: attempt.nodeId,
+          outcome: attempt.outcome,
+          output: stableProgressValue(attempt.output),
+          ...(attempt.error === undefined ? {} : { error: attempt.error }),
+        },
+  );
+}
+
+function consecutiveNoProgressAttempts(
+  context: WorkflowNodeContext,
+  lastRoute: AutoimplementControlRoute | null,
+  latest: ReturnType<typeof latestControlAttempt>,
+  progressFingerprint: string,
+): number {
+  if (lastRoute === null || latest === undefined || latest.nodeId === "decide") return 0;
+  let count = 1;
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step?.nodeId !== "observe" || step.outcome !== "ok") continue;
+    const observation = step.output as Partial<AutoimplementObservation> | undefined;
+    if (
+      observation?.lastRoute !== lastRoute ||
+      observation.progressFingerprint !== progressFingerprint
+    ) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 function branchResult(value: unknown): Record<string, unknown> {
   const record = requireRecord(value, "control branch result");
   const result = record.result;
@@ -786,12 +847,14 @@ function acceptedControlDecisions(context: WorkflowNodeContext): AutoimplementCo
 function autoimplementObservation(context: WorkflowNodeContext): AutoimplementObservation {
   const decisions = acceptedControlDecisions(context);
   const lastRoute = decisions.at(-1)?.route ?? null;
-  let consecutiveRouteAttempts = 0;
-  for (let index = decisions.length - 1; index >= 0; index -= 1) {
-    if (decisions[index]?.route !== lastRoute) break;
-    consecutiveRouteAttempts += 1;
-  }
   const latest = latestControlAttempt(context);
+  const progressFingerprint = controlProgressFingerprint(latest);
+  const noProgressAttempts = consecutiveNoProgressAttempts(
+    context,
+    lastRoute,
+    latest,
+    progressFingerprint,
+  );
   let availableRoutes =
     decisions.length >= MAX_CONTROL_DECISIONS
       ? (["blocked"] as AutoimplementControlRoute[])
@@ -800,7 +863,7 @@ function autoimplementObservation(context: WorkflowNodeContext): AutoimplementOb
     lastRoute !== null &&
     lastRoute !== "complete" &&
     lastRoute !== "blocked" &&
-    consecutiveRouteAttempts >= MAX_CONSECUTIVE_ROUTE_ATTEMPTS
+    noProgressAttempts >= MAX_CONSECUTIVE_NO_PROGRESS_ATTEMPTS
   ) {
     availableRoutes = availableRoutes.filter((route) => route !== lastRoute);
     if (availableRoutes.length === 0) availableRoutes = ["blocked"];
@@ -808,7 +871,8 @@ function autoimplementObservation(context: WorkflowNodeContext): AutoimplementOb
   return {
     decisionNumber: decisions.length + 1,
     decisionLimit: MAX_CONTROL_DECISIONS,
-    consecutiveRouteAttempts,
+    consecutiveNoProgressAttempts: noProgressAttempts,
+    progressFingerprint,
     lastRoute,
     latestAttempt:
       latest === undefined
