@@ -913,9 +913,10 @@ async function executeCommand(
         expectedRevision,
         payload: session,
       });
+      const receipt = restartReceipt(response.receipt);
       return {
-        message: `Restarted workflow ${runId}.`,
-        details: { action: "restart", runId, response: response.receipt ?? null },
+        message: `Created child workflow run ${receipt.runId} from terminal parent ${receipt.parentRunId} (restart ${receipt.restartNumber}). Continue with the child run.`,
+        details: { action: "restart", ...receipt, response: response.receipt ?? null },
       };
     }
     case "change-settings": {
@@ -1285,6 +1286,27 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
     case "submit":
       throw new Error("Step operations require a pending interaction");
   }
+}
+
+function restartReceipt(value: JsonValue | undefined): {
+  runId: string;
+  parentRunId: string;
+  restartNumber: number;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value.runId !== "string" ||
+    typeof value.parentRunId !== "string" ||
+    !Number.isSafeInteger(value.restartNumber) ||
+    (value.restartNumber as number) < 1
+  ) {
+    throw new Error("Workflow restart receipt is incomplete");
+  }
+  return {
+    runId: value.runId,
+    parentRunId: value.parentRunId,
+    restartNumber: value.restartNumber as number,
+  };
 }
 
 async function requestAccepted(

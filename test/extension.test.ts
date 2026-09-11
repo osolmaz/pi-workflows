@@ -471,6 +471,72 @@ describe("pi-workflows hosted extension", () => {
     durableRequests.mockRestore();
   }, 60_000);
 
+  it("returns the child run identity after restart", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    const contract = stepContract(fake.sent[0] as Record<string, unknown>);
+    await fake.runTool("complete-before-restart", {
+      action: "submit",
+      requestId: contract.requestId,
+      output: { answer: "done" },
+    });
+
+    let parentRunId = "";
+    await waitUntil(() => {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        const parent = store.listWorkflowRuns().find((run) => run.status === "done");
+        parentRunId = parent?.runId ?? "";
+        return parent !== undefined;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    const runStore = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+    const parentRunRevision = runStore.runRevision(parentRunId);
+    runStore.close();
+
+    const restarted = (await fake.runTool("restart-completed-run", {
+      action: "restart",
+      runId: parentRunId,
+      expectedRevision: parentRunRevision,
+    })) as {
+      content: Array<{ text: string }>;
+      details: {
+        action: string;
+        runId: string;
+        parentRunId: string;
+        restartNumber: number;
+      };
+    };
+    expect(restarted.details).toMatchObject({
+      action: "restart",
+      parentRunId,
+      restartNumber: 1,
+    });
+    expect(restarted.details.runId).not.toBe(parentRunId);
+    expect(restarted.content[0]?.text).toContain(
+      `Created child workflow run ${restarted.details.runId} from terminal parent ${parentRunId}`,
+    );
+    expect(restarted.content[0]?.text).toContain("Continue with the child run.");
+
+    const childStatus = (await fake.runTool("status-restarted-child", {
+      action: "status",
+      runId: restarted.details.runId,
+    })) as { details: { action: string; runId: string } };
+    expect(childStatus.details).toMatchObject({
+      action: "status",
+      runId: restarted.details.runId,
+    });
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
   it("shows host state and pauses a waiting step when Escape aborts its turn", async () => {
     const { cwd, workflowPath } = await setupProject();
     const abort = new AbortController();
