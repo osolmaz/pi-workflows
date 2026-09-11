@@ -24,6 +24,14 @@ export {
 } from "./definition.js";
 export { decision, decisionEdge, type DecisionDefinition } from "./decision.js";
 export {
+  controlLoop,
+  type ControlLoopDefinition,
+  type ControlLoopEdge,
+  type ControlLoopGraph,
+  type ControlLoopRoute,
+  type ControlLoopRoutes,
+} from "./control-loop.js";
+export {
   MAX_PRESENTATION_BLOCKS,
   MAX_PRESENTATION_CODE_UNITS,
   MAX_PRESENTATION_ITEMS,
