@@ -17,12 +17,23 @@ export type WorkflowDisplayStatus =
   | "cancelled"
   | "ambiguous";
 
+export const WORKFLOW_DISPLAY_CONTROLS = [
+  "pause",
+  "resume",
+  "cancel",
+  "answer",
+  "human-answer",
+  "update",
+  "submit",
+  "review",
+] as const;
+
+export type WorkflowDisplayControl = (typeof WORKFLOW_DISPLAY_CONTROLS)[number];
+
 export type WorkflowDisplay = {
   status: WorkflowDisplayStatus;
   activity: "supervised_runner" | "origin_turn" | null;
-  controls: Array<
-    "pause" | "resume" | "cancel" | "answer" | "human-answer" | "update" | "submit" | "review"
-  >;
+  controls: WorkflowDisplayControl[];
   reason: string | null;
   reasonContent?: JsonValue;
 };

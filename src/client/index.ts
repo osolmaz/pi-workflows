@@ -14,12 +14,14 @@ export {
   type ClientRequest,
   type ClientResponse,
 } from "./protocol.js";
-export type {
-  WorkflowBranchReport,
-  WorkflowDisplay,
-  WorkflowDisplayStatus,
-  WorkflowRunSummary,
-  WorkflowRunView,
-  WorkflowSessionView,
-  WorkflowTurnReport,
+export {
+  WORKFLOW_DISPLAY_CONTROLS,
+  type WorkflowBranchReport,
+  type WorkflowDisplay,
+  type WorkflowDisplayControl,
+  type WorkflowDisplayStatus,
+  type WorkflowRunSummary,
+  type WorkflowRunView,
+  type WorkflowSessionView,
+  type WorkflowTurnReport,
 } from "./view.js";

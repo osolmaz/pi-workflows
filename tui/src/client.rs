@@ -67,25 +67,96 @@ pub struct RemoteView {
     pub possibly_interrupted: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ContentState {
+    #[default]
+    Absent,
+    Pending,
+    Ready(String),
+    Invalid(String),
+}
+
+impl ContentState {
+    fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Ready(content) => Some(content),
+            Self::Absent | Self::Pending | Self::Invalid(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ViewContent {
+    definition: ContentState,
+    graph_history: ContentState,
+    display_reason: ContentState,
+}
+
+enum DecodeOutcome {
+    Ready(Box<RemoteView>),
+    PendingContent,
+    Invalid(String),
+}
+
 fn decode_view(
     revision: u64,
     generation: u64,
     raw: &Value,
-    definition_content: Option<&str>,
-    graph_history_content: Option<&str>,
-    display_reason_content: Option<&str>,
-) -> Option<RemoteView> {
+    content: &ViewContent,
+) -> DecodeOutcome {
+    for item in [
+        &content.definition,
+        &content.graph_history,
+        &content.display_reason,
+    ] {
+        if let ContentState::Invalid(error) = item {
+            return DecodeOutcome::Invalid(error.clone());
+        }
+    }
+    if [
+        &content.definition,
+        &content.graph_history,
+        &content.display_reason,
+    ]
+    .iter()
+    .any(|item| matches!(item, ContentState::Pending))
+    {
+        return DecodeOutcome::PendingContent;
+    }
+
     let graph_revision = raw
         .get("graphRevision")
         .and_then(Value::as_u64)
         .unwrap_or(revision);
-    let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
-    let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
-    let mut display: WorkflowDisplay = serde_json::from_value(raw.get("display")?.clone()).ok()?;
+    let Some(manifest_value) = raw.get("manifest") else {
+        return DecodeOutcome::Invalid("manifest is missing".to_string());
+    };
+    let Ok(manifest) = serde_json::from_value::<Manifest>(manifest_value.clone()) else {
+        return DecodeOutcome::Invalid("manifest has invalid required fields".to_string());
+    };
+    let Some(state_value) = raw.get("state") else {
+        return DecodeOutcome::Invalid("state is missing".to_string());
+    };
+    let Ok(state) = serde_json::from_value::<RunState>(state_value.clone()) else {
+        return DecodeOutcome::Invalid("state has invalid required fields".to_string());
+    };
+    let Some(display_value) = raw.get("display") else {
+        return DecodeOutcome::Invalid("display is missing".to_string());
+    };
+    let Ok(mut display) = serde_json::from_value::<WorkflowDisplay>(display_value.clone()) else {
+        return DecodeOutcome::Invalid("display has invalid required fields".to_string());
+    };
     if display_reason_artifact(raw).is_some() {
-        display.reason_content = Some(display_reason_value(raw, display_reason_content)?);
+        let Some(reason_content) = display_reason_value(raw, content.display_reason.as_deref())
+        else {
+            return DecodeOutcome::Invalid("display reason content is invalid".to_string());
+        };
+        display.reason_content = Some(reason_content);
     }
-    let graph_history = graph_history_value(raw, graph_history_content);
+    let graph_history = graph_history_value(raw, content.graph_history.as_deref());
+    if graph_history_artifact(raw).is_some() && graph_history.is_none() {
+        return DecodeOutcome::Invalid("workflow graph history is invalid".to_string());
+    }
     let graph_steps = graph_history
         .as_ref()
         .and_then(|value| value.get("steps"))
@@ -113,8 +184,15 @@ fn decode_view(
         .get("stepTotal")
         .and_then(Value::as_u64)
         .unwrap_or(state.steps.len() as u64);
-    let snapshot: Option<DefinitionSnapshot> = workflow_definition_value(raw, definition_content)
-        .and_then(|value| serde_json::from_value(value).ok());
+    let Some(workflow_value) = workflow_definition_value(raw, content.definition.as_deref()) else {
+        return DecodeOutcome::Invalid("workflow definition is missing or invalid".to_string());
+    };
+    let Ok(snapshot) = serde_json::from_value::<DefinitionSnapshot>(workflow_value) else {
+        return DecodeOutcome::Invalid(
+            "workflow definition has invalid required fields".to_string(),
+        );
+    };
+    let snapshot = Some(snapshot);
     let graph_layout = raw
         .get("graphScene")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -149,7 +227,7 @@ fn decode_view(
                 .as_ref()
                 .map_or(0, |updates| updates.len() as u64)
         });
-    Some(RemoteView {
+    DecodeOutcome::Ready(Box::new(RemoteView {
         revision,
         graph_revision,
         generation,
@@ -214,7 +292,7 @@ fn decode_view(
             .get("possiblyInterrupted")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-    })
+    }))
 }
 
 fn page_items(raw: &Value, pointer: &str) -> Vec<Value> {
@@ -274,9 +352,9 @@ fn workflow_definition_content(
     state: &mut Shared,
     run_id: &str,
     raw: &Value,
-) -> (Option<String>, bool) {
+) -> (ContentState, bool) {
     let Some(artifact) = workflow_definition_artifact(raw) else {
-        return (None, false);
+        return (ContentState::Absent, false);
     };
     referenced_content(
         state,
@@ -287,9 +365,9 @@ fn workflow_definition_content(
     )
 }
 
-fn graph_history_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Option<String>, bool) {
+fn graph_history_content(state: &mut Shared, run_id: &str, raw: &Value) -> (ContentState, bool) {
     let Some(artifact) = graph_history_artifact(raw) else {
-        return (None, false);
+        return (ContentState::Absent, false);
     };
     referenced_content(
         state,
@@ -300,9 +378,9 @@ fn graph_history_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Opti
     )
 }
 
-fn display_reason_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Option<String>, bool) {
+fn display_reason_content(state: &mut Shared, run_id: &str, raw: &Value) -> (ContentState, bool) {
     let Some(artifact) = display_reason_artifact(raw) else {
-        return (None, false);
+        return (ContentState::Absent, false);
     };
     referenced_content(
         state,
@@ -319,7 +397,7 @@ fn referenced_content(
     artifact: ArtifactRef,
     accepted_media_types: &[&str],
     label: &str,
-) -> (Option<String>, bool) {
+) -> (ContentState, bool) {
     let key = (run_id.to_string(), artifact.path.clone());
     match state.artifacts.get(&key).cloned() {
         Some(ArtifactEntry::Ready(content)) => {
@@ -327,26 +405,28 @@ fn referenced_content(
                 && content.len() as u64 == artifact.bytes
                 && hex_sha256(content.as_bytes()) == artifact.sha256;
             if valid {
-                return (Some(content), false);
+                return (ContentState::Ready(content), false);
             }
-            let error = format!("{label} content does not match its reference");
+            let artifact_error = format!("{label} content does not match its reference");
             state
                 .artifacts
-                .insert(key, ArtifactEntry::Error(error.clone()));
-            state.error = Some(error);
-            (None, false)
+                .insert(key, ArtifactEntry::Error(artifact_error));
+            (
+                ContentState::Invalid(format!("{label} content is invalid")),
+                false,
+            )
         }
-        Some(ArtifactEntry::Error(error)) => {
-            state.error = Some(format!("{label} content is unavailable: {error}"));
-            (None, false)
-        }
-        Some(ArtifactEntry::Loading(_)) => (None, false),
+        Some(ArtifactEntry::Error(_)) => (
+            ContentState::Invalid(format!("{label} content is invalid")),
+            false,
+        ),
+        Some(ArtifactEntry::Loading(_)) => (ContentState::Pending, false),
         None => {
             state
                 .artifacts
                 .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
             state.content_requests.insert(key, 0);
-            (None, true)
+            (ContentState::Pending, true)
         }
     }
 }
@@ -454,11 +534,18 @@ fn discard_run_state(shared: &mut Shared, run_id: &str) {
         .retain(|(candidate, _), _| candidate != run_id);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CachedDecodeState {
+    PendingContent,
+    Invalid(String),
+}
+
 pub struct RemoteRuns {
     shared: Arc<Mutex<Shared>>,
     wake: Option<mpsc::UnboundedSender<()>>,
     worker: Option<JoinHandle<()>>,
     decoded: HashMap<String, RemoteView>,
+    decode_states: HashMap<String, (u64, CachedDecodeState)>,
 }
 
 impl RemoteRuns {
@@ -490,6 +577,7 @@ impl RemoteRuns {
             wake: Some(wake_tx),
             worker: Some(worker),
             decoded: HashMap::new(),
+            decode_states: HashMap::new(),
         })
     }
 
@@ -525,6 +613,7 @@ impl RemoteRuns {
             if old_id != run_id {
                 discard_run_state(&mut shared, &old_id);
                 self.decoded.remove(&old_id);
+                self.decode_states.remove(&old_id);
             }
         }
         shared.watched.insert(run_id.to_string());
@@ -580,9 +669,26 @@ impl RemoteRuns {
         let raw = self.shared.lock().unwrap().raw_views.get(run_id).cloned();
         let Some((_, revision, generation, raw)) = raw else {
             self.decoded.remove(run_id);
+            self.decode_states.remove(run_id);
             return None;
         };
-        let (definition_content, graph_history_content, display_reason_content, requested) = {
+        if self
+            .decoded
+            .get(run_id)
+            .is_some_and(|view| view.generation == generation)
+        {
+            self.decode_states.remove(run_id);
+            return self.decoded.get(run_id);
+        }
+        if self
+            .decode_states
+            .get(run_id)
+            .is_some_and(|(cached_generation, _)| *cached_generation == generation)
+        {
+            return self.decoded.get(run_id);
+        }
+
+        let (content, requested) = {
             let mut shared = self.shared.lock().unwrap();
             let (definition, definition_requested) =
                 workflow_definition_content(&mut shared, run_id, &raw);
@@ -590,32 +696,51 @@ impl RemoteRuns {
             let (display_reason, display_reason_requested) =
                 display_reason_content(&mut shared, run_id, &raw);
             (
-                definition,
-                graph_history,
-                display_reason,
+                ViewContent {
+                    definition,
+                    graph_history,
+                    display_reason,
+                },
                 definition_requested || graph_requested || display_reason_requested,
             )
         };
         if requested {
             self.wake();
         }
-        let stale = self
-            .decoded
-            .get(run_id)
-            .is_none_or(|view| view.generation != generation);
-        if stale {
-            if let Some(decoded) = decode_view(
-                revision,
-                generation,
-                &raw,
-                definition_content.as_deref(),
-                graph_history_content.as_deref(),
-                display_reason_content.as_deref(),
-            ) {
-                self.decoded.insert(run_id.to_string(), decoded);
+        match decode_view(revision, generation, &raw, &content) {
+            DecodeOutcome::Ready(decoded) => {
+                self.decoded.insert(run_id.to_string(), *decoded);
+                self.decode_states.remove(run_id);
+            }
+            DecodeOutcome::PendingContent => {
+                self.decode_states.insert(
+                    run_id.to_string(),
+                    (generation, CachedDecodeState::PendingContent),
+                );
+            }
+            DecodeOutcome::Invalid(reason) => {
+                self.decoded.remove(run_id);
+                self.decode_states.insert(
+                    run_id.to_string(),
+                    (
+                        generation,
+                        CachedDecodeState::Invalid(format!(
+                            "Workflow run snapshot is invalid: {reason}."
+                        )),
+                    ),
+                );
             }
         }
         self.decoded.get(run_id)
+    }
+
+    pub fn view_error(&self, run_id: &str) -> Option<String> {
+        self.decode_states
+            .get(run_id)
+            .and_then(|(_, state)| match state {
+                CachedDecodeState::Invalid(error) => Some(error.clone()),
+                CachedDecodeState::PendingContent => None,
+            })
     }
 
     fn wake(&self) {
@@ -1324,6 +1449,60 @@ mod tests {
     use crate::protocol::PatchOp;
     use crate::render::{render_graph, render_graph_lines, GraphNodeStyle, GraphView};
 
+    fn ready(outcome: DecodeOutcome) -> RemoteView {
+        match outcome {
+            DecodeOutcome::Ready(view) => *view,
+            DecodeOutcome::PendingContent => panic!("view should not need content"),
+            DecodeOutcome::Invalid(error) => panic!("view should decode: {error}"),
+        }
+    }
+
+    fn control_fixture() -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root")
+            .join("protocol/fixtures/run-view-controls-v1.json");
+        serde_json::from_slice(&std::fs::read(path).expect("control fixture"))
+            .expect("valid control fixture")
+    }
+
+    fn agent_snapshot() -> Value {
+        control_fixture()["agentSnapshot"].clone()
+    }
+
+    fn remote_runs(shared: Arc<Mutex<Shared>>) -> RemoteRuns {
+        RemoteRuns {
+            shared,
+            wake: None,
+            worker: None,
+            decoded: HashMap::new(),
+            decode_states: HashMap::new(),
+        }
+    }
+
+    fn hello_message() -> String {
+        crate::protocol::canonical_json(&json!({
+            "schema":PROTOCOL_ID,
+            "type":"hello",
+            "connectionId":"test-connection",
+            "packageVersion":env!("CARGO_PKG_VERSION")
+        }))
+        .unwrap()
+    }
+
+    fn snapshot_message(snapshot: Value) -> String {
+        crate::protocol::canonical_json(&json!({
+            "schema":PROTOCOL_ID,
+            "type":"event",
+            "subscriptionId":"run:run-agent-controls",
+            "event":"run_snapshot",
+            "revision":4,
+            "runId":"run-agent-controls",
+            "payload":snapshot
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn missing_run_watch_sets_a_visible_client_error() {
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -1340,6 +1519,231 @@ mod tests {
             shared.lock().unwrap().error.as_deref(),
             Some("Workflow run not found")
         );
+    }
+
+    #[test]
+    fn decodes_the_exact_agent_control_snapshot() {
+        let raw = agent_snapshot();
+        let view = ready(decode_view(4, 1, &raw, &ViewContent::default()));
+
+        assert_eq!(
+            view.display.controls,
+            vec!["pause", "cancel", "update", "submit"]
+        );
+        assert_eq!(view.display.active_node(&view.state), None);
+    }
+
+    #[test]
+    fn malformed_required_snapshot_sections_are_invalid() {
+        for (section, reason) in [
+            ("manifest", "manifest has invalid required fields"),
+            ("state", "state has invalid required fields"),
+            ("display", "display has invalid required fields"),
+            (
+                "workflow",
+                "workflow definition has invalid required fields",
+            ),
+        ] {
+            let mut raw = agent_snapshot();
+            raw[section] = json!({});
+            assert!(matches!(
+                decode_view(4, 1, &raw, &ViewContent::default()),
+                DecodeOutcome::Invalid(error) if error == reason
+            ));
+        }
+    }
+
+    #[test]
+    fn caches_invalid_snapshots_by_generation_and_recovers_on_a_new_snapshot() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        store_snapshot(
+            &mut shared.lock().unwrap(),
+            "run-agent-controls".to_string(),
+            4,
+            agent_snapshot(),
+        );
+        let mut remote = remote_runs(Arc::clone(&shared));
+        assert!(remote.view("run-agent-controls").is_some());
+        assert!(remote.view_error("run-agent-controls").is_none());
+
+        let private_value = "private-session-content".repeat(1_000);
+        let mut invalid = agent_snapshot();
+        invalid["display"]["controls"] = json!([{"private":private_value}]);
+        store_snapshot(
+            &mut shared.lock().unwrap(),
+            "run-agent-controls".to_string(),
+            5,
+            invalid,
+        );
+        assert!(remote.view("run-agent-controls").is_none());
+        let error = remote
+            .view_error("run-agent-controls")
+            .expect("invalid snapshot should have a visible error");
+        assert_eq!(
+            error,
+            "Workflow run snapshot is invalid: display has invalid required fields."
+        );
+        assert!(error.len() < 128);
+        let cached_generation = remote.decode_states["run-agent-controls"].0;
+        assert!(remote.view("run-agent-controls").is_none());
+        assert_eq!(
+            remote.decode_states["run-agent-controls"].0,
+            cached_generation
+        );
+
+        store_snapshot(
+            &mut shared.lock().unwrap(),
+            "run-agent-controls".to_string(),
+            6,
+            agent_snapshot(),
+        );
+        assert!(remote.view("run-agent-controls").is_some());
+        assert!(remote.view_error("run-agent-controls").is_none());
+    }
+
+    #[test]
+    fn referenced_content_is_pending_until_the_verified_artifact_arrives() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut raw = agent_snapshot();
+        let definition = serde_json::to_string(&raw["workflow"]).unwrap();
+        let path = "artifacts/sha256/agent-definition.json";
+        raw["workflow"]["content"] = json!({
+            "$artifact": {
+                "path":path,
+                "mediaType":"application/json",
+                "bytes":definition.len(),
+                "sha256":hex_sha256(definition.as_bytes())
+            }
+        });
+        store_snapshot(
+            &mut shared.lock().unwrap(),
+            "run-agent-controls".to_string(),
+            4,
+            raw,
+        );
+        let mut remote = remote_runs(Arc::clone(&shared));
+
+        assert!(remote.view("run-agent-controls").is_none());
+        assert!(remote.view_error("run-agent-controls").is_none());
+        assert!(matches!(
+            remote.decode_states["run-agent-controls"].1,
+            CachedDecodeState::PendingContent
+        ));
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .content_requests
+                .get(&("run-agent-controls".to_string(), path.to_string())),
+            Some(&0)
+        );
+
+        {
+            let mut state = shared.lock().unwrap();
+            state.artifacts.insert(
+                ("run-agent-controls".to_string(), path.to_string()),
+                ArtifactEntry::Ready(definition),
+            );
+            bump_view_generation(&mut state, "run-agent-controls");
+        }
+        assert!(remote.view("run-agent-controls").is_some());
+        assert!(remote.view_error("run-agent-controls").is_none());
+    }
+
+    #[tokio::test]
+    async fn local_transport_uses_the_shared_snapshot_decoder() {
+        for (snapshot, ready_expected) in [
+            (agent_snapshot(), true),
+            (
+                {
+                    let mut invalid = agent_snapshot();
+                    invalid.as_object_mut().unwrap().remove("manifest");
+                    invalid
+                },
+                false,
+            ),
+        ] {
+            let shared = Arc::new(Mutex::new(Shared::default()));
+            shared
+                .lock()
+                .unwrap()
+                .watched
+                .insert("run-agent-controls".to_string());
+            let (client, mut server) = tokio::io::duplex(1_048_576);
+            let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
+            let hello = hello_message();
+            let event = snapshot_message(snapshot);
+            let server_task = tokio::spawn(async move {
+                server.write_all(hello.as_bytes()).await.unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.write_all(event.as_bytes()).await.unwrap();
+                server.write_all(b"\n").await.unwrap();
+                server.shutdown().await.unwrap();
+            });
+
+            run_local_connection(client, Arc::clone(&shared), &mut wake_rx)
+                .await
+                .unwrap();
+            drop(wake_tx);
+            server_task.await.unwrap();
+            let mut remote = remote_runs(shared);
+            assert_eq!(remote.view("run-agent-controls").is_some(), ready_expected);
+            assert_eq!(
+                remote.view_error("run-agent-controls").is_some(),
+                !ready_expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_uses_the_shared_snapshot_decoder() {
+        for (snapshot, ready_expected) in [
+            (agent_snapshot(), true),
+            (
+                {
+                    let mut invalid = agent_snapshot();
+                    invalid["state"] = json!({"status":"waiting"});
+                    invalid
+                },
+                false,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let hello = hello_message();
+            let event = snapshot_message(snapshot);
+            let server_task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                socket.send(Message::Text(hello.into())).await.unwrap();
+                socket.send(Message::Text(event.into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.close(None).await.unwrap();
+            });
+            let shared = Arc::new(Mutex::new(Shared::default()));
+            shared
+                .lock()
+                .unwrap()
+                .watched
+                .insert("run-agent-controls".to_string());
+            let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
+
+            run_websocket(
+                &format!("ws://{address}"),
+                Arc::clone(&shared),
+                &mut wake_rx,
+            )
+            .await
+            .unwrap();
+            drop(wake_tx);
+            server_task.await.unwrap();
+            let mut remote = remote_runs(shared);
+            assert_eq!(remote.view("run-agent-controls").is_some(), ready_expected);
+            assert_eq!(
+                remote.view_error("run-agent-controls").is_some(),
+                !ready_expected
+            );
+        }
     }
 
     #[test]
@@ -1411,14 +1815,17 @@ mod tests {
             "possiblyInterrupted":false
         });
 
-        let view = decode_view(4, 1, &raw, None, None, None).expect("server view should decode");
+        let view = ready(decode_view(4, 1, &raw, &ViewContent::default()));
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
 
         let mut missing_display = raw;
         missing_display.as_object_mut().unwrap().remove("display");
-        assert!(decode_view(4, 1, &missing_display, None, None, None).is_none());
+        assert!(matches!(
+            decode_view(4, 1, &missing_display, &ViewContent::default()),
+            DecodeOutcome::Invalid(error) if error == "display is missing"
+        ));
     }
 
     #[test]
@@ -1476,8 +1883,15 @@ mod tests {
             }
         });
 
-        let view = decode_view(4, 1, &raw, None, None, Some(reason_content))
-            .expect("server view should decode");
+        let view = ready(decode_view(
+            4,
+            1,
+            &raw,
+            &ViewContent {
+                display_reason: ContentState::Ready(reason_content.to_string()),
+                ..ViewContent::default()
+            },
+        ));
 
         assert_eq!(view.state.status, crate::state::types::RunStatus::Waiting);
         assert_eq!(view.display.status, crate::state::types::RunStatus::Running);
@@ -1573,7 +1987,7 @@ mod tests {
         });
         let mut state = Shared::default();
         let (missing, requested) = workflow_definition_content(&mut state, "run-1", &raw);
-        assert!(missing.is_none());
+        assert_eq!(missing, ContentState::Pending);
         assert!(requested);
         assert_eq!(
             state
@@ -1596,12 +2010,9 @@ mod tests {
         let mut invalid = raw;
         invalid["workflow"]["content"]["$artifact"]["sha256"] = json!("0".repeat(64));
         let (loaded, requested) = workflow_definition_content(&mut state, "run-1", &invalid);
-        assert!(loaded.is_none());
+        assert!(matches!(loaded, ContentState::Invalid(_)));
         assert!(!requested);
-        assert!(state
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("does not match")));
+        assert!(state.error.is_none());
     }
 
     #[test]
@@ -1627,7 +2038,7 @@ mod tests {
         });
         let mut state = Shared::default();
         let (missing, requested) = graph_history_content(&mut state, "run-1", &raw);
-        assert!(missing.is_none());
+        assert_eq!(missing, ContentState::Pending);
         assert!(requested);
         state.artifacts.insert(
             ("run-1".to_string(), path.to_string()),
@@ -1661,7 +2072,7 @@ mod tests {
         });
         let mut state = Shared::default();
         let (missing, requested) = display_reason_content(&mut state, "run-1", &raw);
-        assert!(missing.is_none());
+        assert_eq!(missing, ContentState::Pending);
         assert!(requested);
         state.artifacts.insert(
             ("run-1".to_string(), path.to_string()),
@@ -1962,6 +2373,62 @@ mod tests {
         );
         assert!(!state.content_requests.contains_key(&key));
         assert_eq!(state.raw_views["run-1"].2, 2);
+    }
+
+    #[test]
+    fn bad_content_offsets_and_digests_become_bounded_run_errors() {
+        let content = b"{}";
+        for (offset, next_offset, digest) in [(1, 3, hex_sha256(content)), (0, 2, "0".repeat(64))] {
+            let path = "artifacts/sha256/content.json";
+            let key = ("run-1".to_string(), path.to_string());
+            let mut state = Shared::default();
+            state
+                .raw_views
+                .insert("run-1".to_string(), (1, 1, 1, json!({})));
+            state
+                .artifacts
+                .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
+            state.content_requests.insert(key.clone(), 0);
+
+            merge_content(
+                &mut state,
+                &json!({
+                    "schema":"pi-workflows.content-chunk.v1",
+                    "runId":"run-1",
+                    "path":path,
+                    "mediaType":"application/json",
+                    "bytes":content.len(),
+                    "sha256":digest,
+                    "offset":offset,
+                    "nextOffset":next_offset,
+                    "complete":true,
+                    "data":BASE64.encode(content)
+                }),
+            )
+            .unwrap();
+            assert!(matches!(
+                state.artifacts.get(&key),
+                Some(ArtifactEntry::Error(_))
+            ));
+            let (resolved, requested) = referenced_content(
+                &mut state,
+                "run-1",
+                ArtifactRef {
+                    path: path.to_string(),
+                    media_type: "application/json".to_string(),
+                    bytes: content.len() as u64,
+                    sha256: hex_sha256(content),
+                },
+                &["application/json"],
+                "workflow definition",
+            );
+            assert_eq!(
+                resolved,
+                ContentState::Invalid("workflow definition content is invalid".to_string())
+            );
+            assert!(!requested);
+            assert!(state.error.is_none());
+        }
     }
 
     #[test]
