@@ -13,7 +13,8 @@ import {
   applyWorkflowSettingsPatch,
   resolveInitialWorkflowSettings,
 } from "../src/workflows/settings.js";
-import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
+import type { AgentStepRequest, AgentStepSubmission } from "../src/workflows/types.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor, waitUntil } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 let originalPath = "";
@@ -143,6 +144,34 @@ function ciInspection(
   };
 }
 
+function controlDecision(route: string, reason = `Choose ${route}.`): AgentStepSubmission {
+  const complete = route === "complete";
+  const blocked = route === "blocked";
+  return {
+    output: {
+      route,
+      goalMet: complete,
+      blockingNow: blocked,
+      outsideAuthority: blocked,
+      canProceed: !complete && !blocked,
+      reason,
+      nextAction: complete || blocked ? "" : `Run the ${route} branch.`,
+      alternativesChecked: blocked ? ["No safe continuing route remains"] : [],
+      evidence: [`Current evidence supports ${route}.`],
+    },
+  };
+}
+
+function chooseFirstControlRoute(request: AgentStepRequest): AgentStepSubmission {
+  const match = /Observation: (.+)\nRecent attempts:/.exec(request.prompt);
+  if (match?.[1] === undefined)
+    throw new Error("Autoimplement controller prompt lacks observation");
+  const observation = JSON.parse(match[1]) as { availableRoutes: string[] };
+  const route = observation.availableRoutes[0];
+  if (route === undefined) throw new Error("Autoimplement controller has no available route");
+  return controlDecision(route, `Choose ${route} from the current evidence.`);
+}
+
 function summaryExecutor(): ScriptedExecutor {
   return new ScriptedExecutor()
     .respond("completedSummary", () => ({
@@ -175,8 +204,12 @@ function verificationPlan(id = "verify") {
   };
 }
 
-function commonExecutor(publication: unknown = published()): ScriptedExecutor {
+function commonExecutor(
+  publication: unknown = published(),
+  decide: (request: AgentStepRequest) => AgentStepSubmission = chooseFirstControlRoute,
+): ScriptedExecutor {
   return summaryExecutor()
+    .respond("decide", decide)
     .respond("implement", {
       output: {
         status: "implemented",
@@ -202,46 +235,6 @@ function commonExecutor(publication: unknown = published()): ScriptedExecutor {
       output: { route: "publish", summary: "checks passed", evidence: "npm test" },
     })
     .respond("publish", { output: publication });
-}
-
-function continueChallenge(
-  reason: string,
-  nextAction: string,
-  nextStage:
-    | "planDiscovery"
-    | "documentation"
-    | "implementation"
-    | "repair"
-    | "review"
-    | "ci"
-    | "delivery"
-    | "redesign" = "redesign",
-) {
-  return {
-    route: "continue",
-    blockingNow: false,
-    outsideAuthority: false,
-    canProceed: true,
-    reason,
-    nextAction,
-    nextStage,
-    alternativesChecked: ["Use the supported path", "Keep rollback ready"],
-    evidence: ["The task authorizes the required local and rollout work"],
-  };
-}
-
-function confirmedChallenge(reason: string) {
-  return {
-    route: "blocked",
-    blockingNow: true,
-    outsideAuthority: true,
-    canProceed: false,
-    reason,
-    nextAction: "",
-    nextStage: null,
-    alternativesChecked: ["Complete without the prohibited remote mutation"],
-    evidence: ["The required external authorization is absent"],
-  };
 }
 
 function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): ScriptedExecutor {
@@ -436,6 +429,25 @@ describe("built-in autoimplement", () => {
     expect(() => parseInput({ task: "demo", repository, verificationChecks: [] })).toThrow(
       "non-empty",
     );
+    expect(() =>
+      parseInput({ task: "demo", repository, verificationUntested: ["browser tests"] }),
+    ).toThrow("requires verificationChecks");
+    expect(() =>
+      parseInput({
+        task: "demo",
+        repository,
+        verificationChecks: verificationPlan().checks,
+        verificationUntested: [""],
+      }),
+    ).toThrow("non-empty");
+    expect(
+      parseInput({
+        task: "demo",
+        repository,
+        verificationChecks: verificationPlan().checks,
+        verificationUntested: ["remote browser tests"],
+      }),
+    ).toMatchObject({ verificationUntested: ["remote browser tests"] });
     expect(() =>
       parseInput({
         task: "demo",
@@ -955,24 +967,65 @@ describe("built-in autoimplement", () => {
     await expect(validate("repairCiCommand", { route: "unknown", reason: "bad" })).rejects.toThrow(
       "one of retry, blocked",
     );
+    const observation = {
+      decisionNumber: 2,
+      decisionLimit: 40,
+      consecutiveRouteAttempts: 0,
+      lastRoute: "implementation",
+      latestAttempt: null,
+      availableRoutes: ["repair", "blocked"],
+    };
     await expect(
-      validate("challengeBlocker", continueChallenge("rollout is authorized", "deploy safely")),
-    ).resolves.toMatchObject({ route: "continue", canProceed: true });
+      validate(
+        "decide",
+        {
+          route: "repair",
+          goalMet: false,
+          blockingNow: false,
+          outsideAuthority: false,
+          canProceed: true,
+          reason: "The local issue can be fixed.",
+          nextAction: "Repair the implementation.",
+          alternativesChecked: [],
+          evidence: ["The failure is local."],
+        },
+        { outputs: { observe: observation } },
+      ),
+    ).resolves.toMatchObject({ route: "repair", canProceed: true });
     await expect(
-      validate("challengeBlocker", confirmedChallenge("external authorization is required")),
+      validate(
+        "decide",
+        {
+          route: "blocked",
+          goalMet: false,
+          blockingNow: true,
+          outsideAuthority: true,
+          canProceed: false,
+          reason: "External authorization is required.",
+          nextAction: "",
+          alternativesChecked: ["Continue without the external action"],
+          evidence: ["The required authorization is absent."],
+        },
+        { outputs: { observe: observation } },
+      ),
     ).resolves.toMatchObject({ route: "blocked", outsideAuthority: true });
     await expect(
-      validate("challengeBlocker", {
-        ...confirmedChallenge("contradictory blocker"),
-        canProceed: true,
-      }),
-    ).rejects.toThrow("blocked challenge requires");
-    await expect(
-      validate("challengeBlocker", {
-        ...continueChallenge("no next action", "deploy safely"),
-        nextAction: "",
-      }),
-    ).rejects.toThrow("practical nextAction");
+      validate(
+        "decide",
+        {
+          route: "review",
+          goalMet: false,
+          blockingNow: false,
+          outsideAuthority: false,
+          canProceed: true,
+          reason: "Review next.",
+          nextAction: "Run review.",
+          alternativesChecked: [],
+          evidence: ["Verification passed."],
+        },
+        { outputs: { observe: observation } },
+      ),
+    ).rejects.toThrow("route review is not available");
     await expect(
       validate("inspectComments", { route: "unknown", summary: "bad", evidence: [] }),
     ).rejects.toThrow("route must be one of");
@@ -988,621 +1041,308 @@ describe("built-in autoimplement", () => {
     ).rejects.toThrow("must be an array");
   });
 
-  it("projects redesign evidence, plan changes, blocked reasons, and command history", async () => {
-    const makeContext = (overrides: Record<string, unknown> = {}) =>
-      ({
-        input: {
-          task: "demo",
-          scope: "repo",
-          constraints: ["safe"],
-          plan: { old: true },
-          repository,
-          preparedWorkspace: preparedWorkspaceFor(),
-          directDefaultBranchAuthorized: true,
-        },
-        outputs: {},
-        results: {},
-        settings: { merge: false, addedInstructions: [] },
-        state: { steps: [] },
-        signal: new AbortController().signal,
-        ...overrides,
-      }) as never;
-
-    const routeChallenge = autoimplementWorkflow.nodes.routeChallenge;
-    if (routeChallenge?.nodeType !== "compute") {
-      throw new Error("routeChallenge must be compute");
-    }
-    const documentationChallenge = continueChallenge(
-      "Documentation must be updated.",
-      "Update the canonical document.",
-      "documentation",
-    );
-    expect(
-      await routeChallenge.run(
-        makeContext({
-          input: { task: "demo", repository },
-          outputs: { challengeBlocker: documentationChallenge },
-        }),
-      ),
-    ).toEqual({ route: "planDiscovery" });
-    expect(
-      await routeChallenge.run(
-        makeContext({
-          input: { task: "demo", plan: { ready: true }, repository },
-          outputs: { challengeBlocker: documentationChallenge },
-        }),
-      ),
-    ).toEqual({ route: "workspace" });
-    expect(
-      await routeChallenge.run(
-        makeContext({ outputs: { challengeBlocker: documentationChallenge } }),
-      ),
-    ).toEqual({ route: "documentation" });
-
-    const documentation = autoimplementWorkflow.includes?.documentation;
-    if (documentation?.input === undefined) {
-      throw new Error("documentation input mapper is missing");
-    }
-    expect(await documentation.input(makeContext())).toMatchObject({
-      task: "demo",
-      plan: { old: true },
-      directDefaultBranchAuthorized: true,
+  it("uses supplied verification checks and preserves explicit untested work", async () => {
+    const routes = ["implementation", "verification", "blocked"];
+    let routeIndex = 0;
+    const executor = commonExecutor(published(), () => {
+      const route = routes[routeIndex++];
+      if (route === undefined) throw new Error("unexpected controller visit");
+      return controlDecision(route, `Choose ${route}.`);
+    }).respond("localVerification/judge", {
+      output: {
+        route: "blocked",
+        reason: "Remote browser evidence is missing.",
+        evidence: ["Remote browser tests remain untested."],
+      },
+    });
+    const checks = verificationPlan().checks;
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-supplied-verification"),
+    });
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      preparedWorkspace: preparedWorkspaceFor(),
+      verificationChecks: checks,
+      verificationUntested: ["Remote browser tests remain untested."],
     });
 
-    const redesign = autoimplementWorkflow.includes?.redesign;
-    if (redesign?.input === undefined) throw new Error("redesign input mapper is missing");
+    expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "Choose blocked.",
+    });
     expect(
-      await redesign.input(
-        makeContext({
-          outputs: { adoptPlan: { plan: { revised: true } } },
+      state.steps.find((step) => step.nodeId === "localVerification/blocked")?.output,
+    ).toMatchObject({
+      route: "blocked",
+      untestedChecks: [{ summary: "Remote browser tests remain untested." }],
+    });
+    expect(
+      executor.requests.some(
+        (request) => request.contract.nodeId === "localVerification/planChecks",
+      ),
+    ).toBe(false);
+  });
+
+  it("uses one controller for all branch choices and returns", async () => {
+    const compiled = compileWorkflowDefinition(autoimplementWorkflow);
+    const edge = (from: string) => compiled.edges.find((candidate) => candidate.from === from);
+    const decide = autoimplementWorkflow.nodes.decide;
+    const observe = autoimplementWorkflow.nodes.observe;
+    expect(decide?.nodeType).toBe("agent");
+    expect(observe?.nodeType).toBe("compute");
+    expect(edge("dispatch")).toMatchObject({
+      switch: {
+        on: "$.route",
+        cases: {
+          planDiscovery: "findPlan",
+          workspace: "workspace",
+          documentation: "documentation",
+          implementation: "implement",
+          repair: "fix",
+          verification: "localVerification",
+          publication: "routeVerifiedWorkspace",
+          review: "selectReviewCommands",
+          addressP2: "addressP2",
+          comments: "inspectComments",
+          ci: "inspectCi",
+          delivery: "finalizeDelivery",
+          redesign: "redesign",
+          complete: "prepareCompleted",
+          blocked: "prepareBlocked",
+        },
+      },
+    });
+    expect(edge("classifyImplementation")).toMatchObject({ to: "observe" });
+    expect(edge("localVerification/__piw_exit_ready")).toMatchObject({ to: "observe" });
+    expect(edge("localVerification/__piw_exit_blocked")).toMatchObject({ to: "observe" });
+    expect(edge("publicationResult")).toMatchObject({ to: "observe" });
+    expect(edge("reviewResult")).toMatchObject({ to: "observe" });
+    expect(edge("ciResult")).toMatchObject({ to: "observe" });
+    expect(autoimplementWorkflow.nodes.timeoutFallback).toBeUndefined();
+    expect(autoimplementWorkflow.nodes.challengeBlocker).toBeUndefined();
+
+    if (observe?.nodeType !== "compute") throw new Error("observe must be compute");
+    const input = {
+      task: "demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      preparedWorkspace: preparedWorkspaceFor(),
+    };
+    expect(
+      await Promise.resolve(
+        observe.run({
+          input,
+          outputs: {},
+          results: {},
+          state: {
+            steps: [{ nodeId: "prepare", outcome: "ok", output: { task: "demo", repository } }],
+          },
+          settings: { merge: false, addedInstructions: [] },
+          signal: new AbortController().signal,
+        } as never),
+      ),
+    ).toMatchObject({ availableRoutes: ["implementation", "redesign", "blocked"] });
+
+    expect(
+      await Promise.resolve(
+        observe.run({
+          input,
+          outputs: {
+            observe: {
+              decisionNumber: 1,
+              decisionLimit: 40,
+              consecutiveRouteAttempts: 0,
+              lastRoute: null,
+              latestAttempt: null,
+              availableRoutes: ["implementation", "redesign", "blocked"],
+            },
+          },
+          results: {},
           state: {
             steps: [
               {
-                nodeId: "classifyVerification",
-                output: { route: "redesign", evidence: "new failure" },
+                nodeId: "decide",
+                outcome: "ok",
+                output: {
+                  route: "implementation",
+                  goalMet: false,
+                  blockingNow: false,
+                  outsideAuthority: false,
+                  canProceed: true,
+                  reason: "Implement next.",
+                  nextAction: "Implement.",
+                  alternativesChecked: [],
+                  evidence: ["The plan is ready."],
+                },
               },
+              { nodeId: "implement", outcome: "timed_out", output: null, error: "deadline" },
             ],
           },
-        }),
+          settings: { merge: false, addedInstructions: [] },
+          signal: new AbortController().signal,
+        } as never),
       ),
     ).toMatchObject({
-      task: "demo",
-      scope: "repo",
-      constraints: ["safe"],
-      directDefaultBranchAuthorized: true,
-      previousPlan: { revised: true },
-      newEvidence: { route: "redesign", evidence: "new failure" },
-      approval: { mode: "auto", audience: "operator", timeoutMinutes: 10 },
+      latestAttempt: { nodeId: "implement", outcome: "timed_out" },
+      availableRoutes: ["implementation", "repair", "redesign", "blocked"],
     });
-
-    const adopt = autoimplementWorkflow.nodes.adoptPlan;
-    if (adopt?.nodeType !== "compute") throw new Error("adoptPlan must be compute");
-    const ready = {
-      exit: "ready",
-      output: {
-        status: "ready",
-        plan: { revised: true },
-        planDigest: "sha256:plan",
-        documents: ["docs/plan.md"],
-        revision: 1,
-        approval: { provenance: "skipped", revision: 1 },
-        documentation: { state: "current", files: ["docs/plan.md"], digests: {}, evidence: null },
-      },
-    };
-    expect(await adopt.run(makeContext({ outputs: { redesign: ready } }))).toMatchObject({
-      plan: { revised: true },
-      planDigest: "sha256:plan",
-      documents: ["docs/plan.md"],
-    });
-    expect(() =>
-      adopt.run(
-        makeContext({ outputs: { redesign: { exit: "blocked", output: { reason: "no plan" } } } }),
-      ),
-    ).toThrow("ready plan");
-
-    const blocked = autoimplementWorkflow.nodes.prepareBlocked;
-    if (blocked?.nodeType !== "compute") throw new Error("blocked must be compute");
-    expect(
-      await blocked.run(
-        makeContext({
-          state: {
-            steps: [
-              { nodeId: "other", output: {} },
-              { nodeId: "classifyCi", output: { blocker: "CI blocked" } },
-            ],
-          },
-        }),
-      ),
-    ).toMatchObject({ reason: "CI blocked" });
-    expect(await blocked.run(makeContext())).toMatchObject({
-      reason: "Autoimplementation could not continue within the authorized scope.",
-    });
-
-    const track = autoimplementWorkflow.nodes.trackCi;
-    if (track?.nodeType !== "action" || !("run" in track)) {
-      throw new Error("trackCi must be a function action");
-    }
-    const pending = ciInspection("pending");
-    expect(
-      await track.run(
-        makeContext({
-          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
-          outputs: { inspectCi: { route: "pending", ...pending } },
-          publishUpdate: async () => ({ updateId: "u1", seq: 1, at: "now", type: "x", key: "y" }),
-        }),
-      ),
-    ).toMatchObject({ route: "assess", batch: { items: [{ id: repositoryId(repository) }] } });
-
-    await installCommand("gh", "printf '%s\\n' 'checks failed'; exit 1");
-    expect(
-      await track.run(
-        makeContext({
-          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
-          outputs: { inspectCi: { route: "pending", ...pending } },
-          publishUpdate: async () => ({ updateId: "u2", seq: 2, at: "now", type: "x", key: "y" }),
-        }),
-      ),
-    ).toMatchObject({
-      route: "assess",
-      batch: { items: [{ outcome: "failed", exitCode: 1 }] },
-    });
-
-    const review = autoimplementWorkflow.nodes.runReview;
-    if (review?.nodeType !== "action" || !("run" in review)) {
-      throw new Error("runReview must be a function action");
-    }
-    await installCommand("pi-reviewer", "printf '%s\\n' 'P1 finding'; exit 1");
-    expect(
-      await review.run(
-        makeContext({
-          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
-          outputs: {
-            selectReviewCommands: {
-              route: "run",
-              repositories: [
-                {
-                  id: repositoryId(repository),
-                  repository,
-                  branch: "feat/demo",
-                  baseBranch: "main",
-                  headRevision: "abc123",
-                  pr: "https://example.test/pr/1",
-                },
-              ],
-              commands: [
-                {
-                  id: repositoryId(repository),
-                  command: "pi-reviewer",
-                  args: ["--base", "main"],
-                  cwd: repository,
-                  timeoutMs: 600_000,
-                  maxOutputChars: 1_000_000,
-                },
-              ],
-            },
-          },
-          publishUpdate: async () => ({ updateId: "u1", seq: 1, at: "now", type: "x", key: "y" }),
-        }),
-      ),
-    ).toMatchObject({
-      route: "assess",
-      batch: { items: [{ outcome: "failed", exitCode: 1, stdout: "P1 finding\n" }] },
-    });
-
-    const delivery = autoimplementWorkflow.nodes.finalizeDelivery;
-    if (delivery?.nodeType !== "agent") throw new Error("finalizeDelivery must be agent");
-    expect(
-      await delivery.prompt(
-        makeContext({ input: { task: "demo", merge: false }, outputs: { publish: published() } }),
-      ),
-    ).toContain("without merging");
-    expect(
-      await delivery.prompt(
-        makeContext({
-          input: { task: "demo", merge: true },
-          settings: { merge: true, addedInstructions: [] },
-          outputs: { publish: published() },
-        }),
-      ),
-    ).toContain("merge each");
-    expect(() => delivery.validate?.({ status: "invalid" }, makeContext())).toThrow(
-      "delivery status",
-    );
-    expect(() =>
-      delivery.validate?.(
-        { status: "completed", merged: true, reason: "merged" },
-        makeContext({ input: { task: "demo", merge: false } }),
-      ),
-    ).toThrow("explicit merge: true");
-    expect(
-      delivery.validate?.(
-        {
-          status: "completed",
-          merged: false,
-          pr: "https://example.test/pr/1",
-          reportComment: "done",
-          reason: "ready",
-        },
-        makeContext({
-          input: { task: "demo", merge: false },
-          outputs: { publish: published() },
-        }),
-      ),
-    ).toMatchObject({ repositories: [{ repository, merged: false }] });
-
-    const secondRepository = path.join(path.dirname(repository), "second-repository");
-    const multiPublication = {
-      repositories: [
-        ...published().repositories,
-        {
-          repository: secondRepository,
-          branch: "feat/second",
-          baseBranch: "main",
-          headRevision: "def456",
-          pr: "https://example.test/pr/2",
-          pushed: true,
-        },
-      ],
-    };
-    expect(() =>
-      delivery.validate?.(
-        {
-          status: "completed",
-          merged: false,
-          pr: "https://example.test/pr/1",
-          reportComment: "done",
-          reason: "ready",
-          repositories: [
-            {
-              repository,
-              pr: "https://example.test/pr/1",
-              merged: false,
-              reportComment: "done",
-              reason: "ready",
-            },
-          ],
-        },
-        makeContext({
-          input: { task: "demo", merge: false },
-          outputs: { publish: multiPublication },
-        }),
-      ),
-    ).toThrow("does not match published repository and PR");
   });
 
-  it("challenges the Bob artifact mismatch and continues through redesign", async () => {
-    const executor = summaryExecutor()
-      .respond(
-        "implement",
-        {
-          output: {
-            status: "blocked",
-            summary: "Bob owns an incompatible artifact, so deployment cannot continue.",
-            files: [],
-            issueKind: "design",
-            evidence: "The current artifact does not match the supported package.",
+  it("returns a design issue to the controller and follows the redesign branch", async () => {
+    const revisedPlan = { steps: ["use supported artifact"] };
+    const executor = addRedesignResponses(
+      summaryExecutor()
+        .respond(
+          "decide",
+          controlDecision("implementation"),
+          controlDecision("redesign"),
+          controlDecision("implementation"),
+          controlDecision("verification"),
+          controlDecision("publication"),
+          controlDecision("review"),
+          controlDecision("comments"),
+          controlDecision("ci"),
+          controlDecision("delivery"),
+          controlDecision("complete"),
+        )
+        .respond(
+          "implement",
+          {
+            output: {
+              status: "issue",
+              summary: "The planned artifact is unavailable.",
+              files: [],
+              issueKind: "design",
+              evidence: "The supported artifact differs.",
+            },
           },
-        },
-        {
-          output: {
-            status: "implemented",
-            summary: "Deployed through the supported cutover with rollback ready.",
-            files: ["deploy/cutover.ts"],
-            issueKind: null,
-            evidence: "The supported artifact is active.",
+          {
+            output: {
+              status: "implemented",
+              summary: "Implemented the supported path.",
+              files: ["src/change.ts"],
+              issueKind: null,
+              evidence: "complete",
+            },
           },
-        },
-      )
-      .respond(
-        "classifyImplementation",
-        {
-          output: {
-            route: "blocked",
-            summary: "Artifact ownership prevents deployment.",
-            evidence: "Bob artifact mismatch",
+        )
+        .respond(
+          "classifyImplementation",
+          {
+            output: {
+              route: "redesign",
+              summary: "The plan needs the supported artifact.",
+              evidence: "The planned artifact is unavailable.",
+            },
           },
-        },
-        { output: { route: "verify", summary: "cutover complete", evidence: "deployed" } },
-      )
-      .respond("challengeBlocker", {
-        output: continueChallenge(
-          "The mismatch needs an authorized supported cutover, not an external permission.",
-          "Revise the rollout plan and deploy the supported artifact with rollback ready.",
-        ),
-      })
-      .respond("localVerification/planChecks", { output: verificationPlan("verify-cutover") })
-      .respond("verify", {
-        output: {
-          passed: true,
-          commands: [{ command: "npm test", outcome: "passed" }],
-          failures: [],
-          untested: [],
-        },
-      })
-      .respond("classifyVerification", {
-        output: { route: "publish", summary: "verified", evidence: "npm test" },
-      })
-      .respond("publish", {
-        output: published("cutover123", "feat/cutover", "https://example.test/pr/2"),
-      })
-      .respond("assessReview", { output: cleanReview("cutover123") })
-      .respond("inspectComments", {
-        output: { route: "ci", summary: "clear", evidence: [] },
-      })
-      .respond("inspectCi", {
-        output: ciInspection("green", "cutover123", "https://example.test/pr/2"),
-      })
-      .respond("finalizeDelivery", {
-        output: {
-          status: "completed",
-          merged: false,
-          pr: "https://example.test/pr/2",
-          reportComment: "done",
-          reason: "ready without merge",
-        },
-      });
-    addRedesignResponses(executor, [
-      {
-        summary: "Use the supported cutover.",
-        steps: ["prepare rollback", "deploy supported artifact"],
-        revision: 1,
-      },
-    ]);
+          {
+            output: { route: "verify", summary: "ready", evidence: "implementation complete" },
+          },
+        )
+        .respond("localVerification/planChecks", { output: verificationPlan() })
+        .respond("verify", {
+          output: {
+            passed: true,
+            commands: [{ command: "node verification", outcome: "passed" }],
+            failures: [],
+            untested: [],
+          },
+        })
+        .respond("classifyVerification", {
+          output: { route: "publish", summary: "checks passed", evidence: "node verification" },
+        })
+        .respond("publish", { output: published() })
+        .respond("assessReview", { output: cleanReview() })
+        .respond("inspectComments", {
+          output: { route: "ci", summary: "no actionable comments", evidence: [] },
+        })
+        .respond("inspectCi", { output: ciInspection("green") })
+        .respond("finalizeDelivery", {
+          output: {
+            status: "completed",
+            merged: false,
+            pr: "https://example.test/pr/1",
+            reportComment: "ready",
+            reason: "ready",
+          },
+        }),
+      [revisedPlan],
+    );
     const engine = new WorkflowEngine({
       executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-bob"),
+      databasePath: await makeStateDatabasePath("autoimplement-controller-redesign"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
-      task: "Resolve the Bob artifact mismatch and deploy safely",
-      ...documentedPlan({ steps: ["deploy Bob artifact"] }),
-      scope: "repository deployment and rollback",
-      constraints: ["Safe deployment and rollback are authorized"],
+      task: "implement supported artifact",
+      ...documentedPlan({ steps: ["use missing artifact"] }),
       repository,
+      preparedWorkspace: preparedWorkspaceFor(),
       merge: false,
     });
 
     expect(state.status, state.error).toBe("completed");
-    expect(state.finalOutput).toMatchObject({ status: "completed" });
-    expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
+    expect(state.finalOutput).toMatchObject({ status: "completed", plan: revisedPlan });
     expect(state.steps.map((step) => step.nodeId)).toContain("redesign/design/frame");
     expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(2);
-    const nodeIds = state.steps.map((step) => step.nodeId);
-    expect(nodeIds.indexOf("workspace/ready")).toBeGreaterThanOrEqual(0);
-    expect(nodeIds.indexOf("workspace/ready")).toBeLessThan(nodeIds.indexOf("implement"));
-
-    const challengeRequest = executor.requests.find(
-      (request) => request.contract.nodeId === "challengeBlocker",
-    );
-    expect(challengeRequest?.prompt).toContain("Are you really blocked?");
-    expect(challengeRequest?.prompt).toContain("Is this really a blocker right now?");
-    expect(challengeRequest?.prompt).toContain(
-      "Can you find a safe way to move forward and finish this?",
-    );
-    expect(challengeRequest?.prompt).toContain(
-      "Are you getting stuck on something trivial, procedural, reversible, or already authorized?",
-    );
-    expect(challengeRequest?.prompt).toContain("Bob artifact mismatch");
     expect(
-      executor.requests.find((request) => request.contract.nodeId === "implement")?.prompt,
-    ).toContain(`"repository":"${repository}"`);
-
-    const redesignRequest = executor.requests.find(
-      (request) => request.contract.nodeId === "redesign/design/frame",
-    );
-    expect(redesignRequest?.prompt).toContain(
-      "Revise the rollout plan and deploy the supported artifact with rollback ready.",
-    );
+      executor.requests.filter((request) => request.contract.nodeId === "decide"),
+    ).toHaveLength(10);
   });
 
-  it("allows a confirmed missing external authorization to stop", async () => {
+  it("uses blocked only after the controller records proof and alternatives", async () => {
     const executor = summaryExecutor()
+      .respond("decide", controlDecision("implementation"), {
+        output: {
+          route: "blocked",
+          goalMet: false,
+          blockingNow: true,
+          outsideAuthority: true,
+          canProceed: false,
+          reason: "The required external authorization is absent.",
+          nextAction: "",
+          alternativesChecked: ["Finish without the prohibited remote change"],
+          evidence: ["The task does not grant that authorization."],
+        },
+      })
       .respond("implement", {
         output: {
           status: "blocked",
-          summary: "The task requires a prohibited remote mutation.",
+          summary: "External authorization is required.",
           files: [],
-          issueKind: "design",
-          evidence: "No external authorization is present.",
+          issueKind: null,
+          evidence: "No authorization exists.",
         },
       })
       .respond("classifyImplementation", {
         output: {
           route: "blocked",
-          summary: "Required remote mutation lacks authorization.",
-          evidence: "The non-mutating paths do not meet the task.",
+          summary: "External authorization is required.",
+          evidence: "No authorization exists.",
         },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The required remote mutation is outside current authority."),
       });
     const engine = new WorkflowEngine({
       executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-confirmed-blocker"),
+      databasePath: await makeStateDatabasePath("autoimplement-controller-blocked"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
-      task: "Complete the protected remote mutation",
-      ...documentedPlan({ steps: ["mutate protected remote"] }),
-      scope: "local repository only",
-      constraints: ["Do not mutate the protected remote without approval"],
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change external state"] }),
       repository,
-      merge: false,
+      preparedWorkspace: preparedWorkspaceFor(),
     });
 
-    expect(state.status).toBe("completed");
+    expect(state.status, state.error).toBe("completed");
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
-      reason: "Required remote mutation lacks authorization.",
+      reason: "The required external authorization is absent.",
     });
-  });
-
-  it("limits blocker challenges to three and supplies prior challenge context", async () => {
-    const executor = summaryExecutor()
-      .respond("implement", {
-        output: {
-          status: "blocked",
-          summary: "The same unsupported blocker was asserted again.",
-          files: [],
-          issueKind: "design",
-          evidence: "claim only",
-        },
-      })
-      .respond("classifyImplementation", {
-        output: {
-          route: "blocked",
-          summary: "Cannot continue.",
-          evidence: "No new evidence.",
-        },
-      })
-      .respond(
-        "challengeBlocker",
-        { output: continueChallenge("challenge one", "revise plan one") },
-        { output: continueChallenge("challenge two", "revise plan two") },
-        { output: continueChallenge("challenge three", "revise plan three") },
-      );
-    addRedesignResponses(executor, [
-      { summary: "revision one", revision: 1 },
-      { summary: "revision two", revision: 2 },
-      { summary: "revision three", revision: 3 },
-    ]);
-    const engine = new WorkflowEngine({
-      executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-challenge-limit"),
-    });
-
-    const { state } = await engine.run(autoimplementWorkflow, {
-      task: "Finish despite repeated unsupported blocker claims",
-      ...documentedPlan({ summary: "initial plan", revision: 0 }),
-      repository,
-      merge: false,
-    });
-
-    const challengeRequests = executor.requests.filter(
-      (request) => request.contract.nodeId === "challengeBlocker",
-    );
-    expect(challengeRequests).toHaveLength(3);
-    expect(challengeRequests[2]?.prompt).toContain("challenge one");
-    expect(challengeRequests[2]?.prompt).toContain("challenge two");
-    expect(state.finalOutput).toMatchObject({
-      status: "blocked",
-      reason: "Blocker challenge reached the 3-attempt workflow safety limit.",
-      evidence: { evidence: { attempts: 3 } },
-    });
-  }, 30_000);
-
-  it("challenges a missing-plan claim with qualified evidence", async () => {
-    const executor = summaryExecutor()
-      .respond("findPlan", {
-        output: {
-          route: "blocked",
-          documents: [],
-          reason: "No clear selected plan exists.",
-          evidence: "The referenced plan was not found.",
-        },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("No plan can be adopted without inventing one."),
-      });
-    const engine = new WorkflowEngine({
-      executor,
-      databasePath: await makeStateDatabasePath("autoimplement-missing-plan-challenge"),
-    });
-    const { state } = await engine.run(autoimplementWorkflow, {
-      task: "Implement an existing plan",
-      repository,
-      merge: false,
-    });
-    expect(state.finalOutput).toMatchObject({
-      status: "blocked",
-      reason: "No clear selected plan exists.",
-      evidence: {
-        schema: "pi-workflows.blocker-claim.v1",
-        sourceNode: "findPlan",
-        evidence: "The referenced plan was not found.",
-      },
-    });
-    expect(executor.requests.map((request) => request.contract.nodeId)).toContain(
-      "challengeBlocker",
-    );
-  });
-
-  it("routes an included Autodoc blocker through the shared challenge", async () => {
-    const executor = summaryExecutor()
-      .respond("documentation/inspectDocumentation", {
-        output: {
-          route: "blocked",
-          files: [],
-          digests: {},
-          reason: "Repository rules prohibit this documentation target.",
-          evidence: "No safe canonical file exists.",
-        },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The repository rule is outside current authority."),
-      });
-    const engine = new WorkflowEngine({
-      executor,
-      databasePath: await makeStateDatabasePath("autoimplement-autodoc-blocker"),
-    });
-    const { state } = await engine.run(autoimplementWorkflow, {
-      task: "Implement the documented plan",
-      plan: { steps: ["one"] },
-      repository,
-      merge: false,
-    });
-    expect(state.finalOutput).toMatchObject({
-      status: "blocked",
-      reason: "Repository rules prohibit this documentation target.",
-      evidence: {
-        sourceNode: "autodoc/inspectDocumentation",
-        evidence: {
-          sourceNode: "autodoc/inspectDocumentation",
-          evidence: "No safe canonical file exists.",
-        },
-      },
-    });
-    expect(executor.requests.map((request) => request.contract.nodeId)).toContain(
-      "challengeBlocker",
-    );
-  });
-
-  it("routes model blockers through the challenge and preserves hard stops", () => {
-    const edge = (from: string) =>
-      autoimplementWorkflow.edges.find((candidate) => candidate.from === from);
-
-    expect(edge("classifyImplementation")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-    expect(edge("localVerification.blocked")).toMatchObject({ to: "createBlockerClaim" });
-    expect(edge("repairReviewCommand")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-    expect(edge("routeInspectCommentsResult")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-    expect(edge("routeInspectCiResult")).toMatchObject({
-      switch: { cases: { unavailable: "createBlockerClaim" } },
-    });
-    expect(edge("repairCiCommand")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-    expect(edge("assessTrackedCi")).toMatchObject({
-      switch: { cases: { unavailable: "createBlockerClaim" } },
-    });
-    expect(edge("classifyCi")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-    expect(edge("routeFinalizeDeliveryResult")).toMatchObject({
-      switch: { cases: { blocked: "createBlockerClaim" } },
-    });
-
-    expect(Object.hasOwn(autoimplementWorkflow.includes ?? {}, "approval")).toBe(false);
-    expect(edge("redesign.blocked")).toMatchObject({ to: "prepareBlocked" });
-    expect(edge("documentation.blocked")).toMatchObject({ to: "createBlockerClaim" });
-    expect(edge("challengeBlocker")).toMatchObject({
-      switch: { cases: { continue: "routeChallenge", blocked: "prepareBlocked" } },
-    });
+    expect(state.steps.map((step) => step.nodeId)).not.toContain("challengeBlocker");
   });
 
   it("addresses P2 findings without running a second review round", async () => {
@@ -1843,17 +1583,17 @@ describe("built-in autoimplement", () => {
         },
       ],
     };
-    const executor = commonExecutor(publication)
-      .respond("timeoutFallback", {
-        output: {
-          route: "blocked",
-          reason: "Publication included an unprepared repository.",
-          evidence: ["The second repository did not match the prepared workspace."],
-        },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The publication scope mismatch cannot proceed safely."),
-      })
+    const executor = commonExecutor(publication, (request) => {
+      const match = /Observation: (.+)\nRecent attempts:/.exec(request.prompt);
+      if (match?.[1] === undefined) return chooseFirstControlRoute(request);
+      const observation = JSON.parse(match[1]) as {
+        latestAttempt?: { nodeId?: string; outcome?: string };
+      };
+      return observation.latestAttempt?.nodeId === "publish" &&
+        observation.latestAttempt.outcome === "failed"
+        ? controlDecision("blocked", "Publication included an unprepared repository.")
+        : chooseFirstControlRoute(request);
+    })
       .respond("assessReview", {
         output: {
           repositories: [repository, secondRepository].map((cwd) => ({
@@ -1939,8 +1679,32 @@ describe("built-in autoimplement", () => {
     expect(state.steps.some((step) => step.nodeId === "runReview")).toBe(false);
   });
 
-  it("routes a timed-out implementation through the shared fallback", async () => {
+  it("returns a timed-out implementation to the controller and retries safely", async () => {
+    const verificationCheck = {
+      id: "verify",
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: repository,
+      timeoutMs: 10_000,
+      maxOutputChars: 100_000,
+      readOnly: true,
+      baseEligible: false,
+      changedFileScope: false,
+      findingFormat: "text" as const,
+    };
     const executor = summaryExecutor()
+      .respond(
+        "decide",
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("verification"),
+        controlDecision("publication"),
+        controlDecision("review"),
+        controlDecision("comments"),
+        controlDecision("ci"),
+        controlDecision("delivery"),
+        controlDecision("complete"),
+      )
       .respond(
         "implement",
         { hang: true },
@@ -1951,36 +1715,17 @@ describe("built-in autoimplement", () => {
             files: ["src/change.ts"],
             repositories: [repository],
             issueKind: null,
-            evidence: "worktree inspection showed the remaining work",
+            evidence: "complete",
           },
         },
       )
-      .respond("timeoutFallback", {
-        output: {
-          route: "retry",
-          reason: "The timed-out implementation has incomplete local work.",
-          evidence: ["The current diff still has the planned incomplete change."],
-        },
-      })
       .respond("classifyImplementation", {
-        output: { route: "verify", summary: "ready", evidence: "implementation complete" },
-      })
-      .respond("localVerification/planChecks", { output: verificationPlan() })
-      .respond("verify", {
-        output: {
-          passed: true,
-          commands: [{ command: "node verification", outcome: "passed" }],
-          failures: [],
-          untested: [],
-        },
-      })
-      .respond("classifyVerification", {
-        output: { route: "publish", summary: "checks passed", evidence: "verification" },
+        output: { route: "verify", summary: "ready", evidence: "complete" },
       })
       .respond("publish", { output: published() })
       .respond("assessReview", { output: cleanReview() })
       .respond("inspectComments", {
-        output: { route: "ci", summary: "no actionable comments", evidence: [] },
+        output: { route: "ci", summary: "clear", evidence: [] },
       })
       .respond("inspectCi", { output: ciInspection("green") })
       .respond("finalizeDelivery", {
@@ -1988,220 +1733,90 @@ describe("built-in autoimplement", () => {
           status: "completed",
           merged: false,
           pr: "https://example.test/pr/1",
-          reportComment: "https://example.test/pr/1#comment",
+          reportComment: "ready",
           reason: "ready",
         },
       });
     const engine = new WorkflowEngine({
       executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-fallback"),
+      databasePath: await makeStateDatabasePath("autoimplement-controller-timeout"),
     });
 
-    const { state } = await engine.run(autoimplementWithTimeout("implement", 100), {
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 50), {
       task: "implement demo",
       ...documentedPlan({ steps: ["change code"] }),
       repository,
+      preparedWorkspace: preparedWorkspaceFor(),
+      verificationChecks: [verificationCheck],
       merge: false,
     });
 
     expect(state.status, state.error).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ status: "completed" });
     expect(
       state.steps.filter((step) => step.nodeId === "implement").map((step) => step.outcome),
     ).toEqual(["timed_out", "ok"]);
-    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(1);
-    expect(
-      executor.requests.find((request) => request.contract.nodeId === "timeoutFallback")?.prompt,
-    ).toContain("read-only fallback step");
+    expect(state.steps.filter((step) => step.nodeId === "decide")).toHaveLength(9);
   });
 
-  it("stops after three timeout fallback executions", async () => {
+  it("stops a repeated route after three no-progress attempts", async () => {
     const executor = summaryExecutor()
-      .respond("implement", { hang: true }, { hang: true }, { hang: true }, { hang: true })
       .respond(
-        "timeoutFallback",
-        {
-          output: {
-            route: "retry",
-            reason: "Implementation remains incomplete.",
-            evidence: ["The current diff is incomplete."],
-          },
-        },
-        {
-          output: {
-            route: "retry",
-            reason: "Implementation remains incomplete.",
-            evidence: ["The current diff is still incomplete."],
-          },
-        },
-        {
-          output: {
-            route: "retry",
-            reason: "Implementation remains incomplete.",
-            evidence: ["The current diff remains incomplete."],
-          },
-        },
+        "decide",
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("implementation"),
+        controlDecision("blocked", "The bounded retry limit is exhausted."),
       )
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The bounded recovery limit is exhausted."),
-      });
+      .respond("implement", { hang: true });
     const engine = new WorkflowEngine({
       executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-limit"),
+      databasePath: await makeStateDatabasePath("autoimplement-controller-bound"),
     });
 
-    const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 20), {
       task: "implement demo",
       ...documentedPlan({ steps: ["change code"] }),
       repository,
-      merge: false,
+      preparedWorkspace: preparedWorkspaceFor(),
     });
 
-    expect(state.status).toBe("completed");
-    expect((state.finalOutput as { status: string }).status).toBe("blocked");
-    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(3);
-    expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(4);
+    expect(state.status, state.error).toBe("completed");
     expect(state.finalOutput).toMatchObject({
-      evidence: {
-        schema: "pi-workflows.blocker-claim.v1",
-        sourceNode: "timeoutFallbackGuard",
-        reason: expect.stringContaining("safety limit"),
-      },
+      status: "blocked",
+      reason: "The bounded retry limit is exhausted.",
     });
-    expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
+    expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(3);
+    const lastObservation = state.steps.filter((step) => step.nodeId === "observe").at(-1)
+      ?.output as { availableRoutes: string[] };
+    expect(lastObservation.availableRoutes).not.toContain("implementation");
   });
 
-  it("challenges a fallback blocker and rejects stale forward routes", async () => {
+  it("keeps explicit cancellation terminal", async () => {
     const executor = summaryExecutor()
-      .respond("implement", { hang: true })
-      .respond("timeoutFallback", {
-        output: {
-          route: "blocked",
-          reason: "No safe route exists.",
-          evidence: ["Repository inspection found an unresolved conflict."],
-        },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The unresolved conflict is outside current authority."),
-      });
+      .respond("decide", controlDecision("implementation"))
+      .respond("implement", { hang: true });
     const engine = new WorkflowEngine({
       executor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-blocked"),
+      databasePath: await makeStateDatabasePath("autoimplement-controller-cancelled"),
     });
-
-    const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
+    const running = engine.run(autoimplementWithTimeout("implement", 1_000), {
       task: "implement demo",
       ...documentedPlan({ steps: ["change code"] }),
       repository,
-      merge: false,
+      preparedWorkspace: preparedWorkspaceFor(),
     });
-
-    expect(state.status).toBe("completed");
-    expect(state.finalOutput).toMatchObject({ status: "blocked", reason: "No safe route exists." });
-    expect(
-      executor.requests.some((request) => request.contract.nodeId === "challengeBlocker"),
-    ).toBe(true);
-
-    const fallback = autoimplementWorkflow.nodes.timeoutFallback;
-    if (fallback?.nodeType !== "agent" || fallback.validate === undefined) {
-      throw new Error("timeoutFallback must be a validated agent node");
-    }
-    await expect(
-      Promise.resolve().then(() =>
-        fallback.validate?.(
-          {
-            route: "review",
-            reason: "A prior publication exists.",
-            evidence: ["The old PR is open."],
-          },
-          {
-            input: { task: "demo", plan: {} },
-            outputs: { publish: published("old-head") },
-            results: {},
-            state: {
-              steps: [
-                { nodeId: "publish", outcome: "ok", output: published("old-head") },
-                { nodeId: "implement", outcome: "timed_out", output: null },
-              ],
-            },
-          } as never,
-        ),
-      ),
-    ).rejects.toThrow("route review is not safe after timed-out implement");
-
-    await expect(
-      Promise.resolve().then(() =>
-        fallback.validate?.(
-          {
-            route: "review",
-            reason: "The old PR can be reviewed.",
-            evidence: ["The old PR is open."],
-          },
-          {
-            input: { task: "demo", plan: {} },
-            outputs: { publish: published("old-head") },
-            results: {},
-            state: {
-              steps: [
-                { nodeId: "publish", outcome: "ok", output: published("old-head") },
-                { nodeId: "implement", outcome: "ok", output: { status: "implemented" } },
-                { nodeId: "inspectComments", outcome: "timed_out", output: null },
-              ],
-            },
-          } as never,
-        ),
-      ),
-    ).rejects.toThrow("without a current published head");
+    await waitUntil(() =>
+      executor.requests.some((request) => request.contract.nodeId === "implement"),
+    );
+    engine.cancel();
+    const { state } = await running;
+    expect(state.status).toBe("cancelled");
+    expect(state.steps.filter((step) => step.nodeId === "decide")).toHaveLength(1);
+    expect(state.steps.filter((step) => step.nodeId === "observe")).toHaveLength(1);
   });
 
-  it("recovers ordinary implementation failures but keeps cancellation terminal", async () => {
-    const failedExecutor = summaryExecutor()
-      .respond("implement", { error: "implementation failed" })
-      .respond("timeoutFallback", {
-        output: {
-          route: "blocked",
-          reason: "The failed mutation cannot be replayed safely.",
-          evidence: ["Repository inspection was inconclusive."],
-        },
-      })
-      .respond("challengeBlocker", {
-        output: confirmedChallenge("The uncertain mutation is outside current authority."),
-      });
-    const failedEngine = new WorkflowEngine({
-      executor: failedExecutor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-failed"),
-    });
-    const failed = await failedEngine.run(autoimplementWorkflow, {
-      task: "implement demo",
-      ...documentedPlan({ steps: ["change code"] }),
-      repository,
-      merge: false,
-    });
-    expect(failed.state.status).toBe("completed");
-    expect(failed.state.finalOutput).toMatchObject({
-      status: "blocked",
-      reason: "The failed mutation cannot be replayed safely.",
-    });
-    expect(failed.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(true);
-
-    const cancelledExecutor = summaryExecutor().respond("implement", { hang: true });
-    const cancelledEngine = new WorkflowEngine({
-      executor: cancelledExecutor,
-      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-cancelled"),
-    });
-    const cancelledPromise = cancelledEngine.run(autoimplementWithTimeout("implement", 1_000), {
-      task: "implement demo",
-      ...documentedPlan({ steps: ["change code"] }),
-      repository,
-      merge: false,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    cancelledEngine.cancel();
-    const cancelled = await cancelledPromise;
-    expect(cancelled.state.status).toBe("cancelled");
-    expect(cancelled.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
-  });
-
-  it("recovers timed-out default-branch delivery without opening a pull request", async () => {
+  it("returns timed-out default-branch delivery to the controller", async () => {
     await git(repository, ["switch", "main"]);
     const prepared = {
       ...preparedWorkspaceFor(),
@@ -2222,6 +1837,14 @@ describe("built-in autoimplement", () => {
       findingFormat: "text" as const,
     };
     const executor = summaryExecutor()
+      .respond(
+        "decide",
+        controlDecision("implementation"),
+        controlDecision("verification"),
+        controlDecision("publication"),
+        controlDecision("publication"),
+        controlDecision("complete"),
+      )
       .respond("implement", {
         output: {
           status: "implemented",
@@ -2234,9 +1857,6 @@ describe("built-in autoimplement", () => {
       })
       .respond("classifyImplementation", {
         output: { route: "verify", summary: "ready", evidence: "done" },
-      })
-      .respond("localVerification/planChecks", {
-        output: { checks: [verificationCheck], untested: [] },
       })
       .respond(
         "finalizeDefaultBranch",
@@ -2252,19 +1872,13 @@ describe("built-in autoimplement", () => {
             reason: "No commit or push authority.",
           },
         },
-      )
-      .respond("timeoutFallback", {
-        output: {
-          route: "retry",
-          reason: "Default-branch delivery needs a verified retry.",
-          evidence: ["The repository still has the verified local change and no new commit."],
-        },
-      });
+      );
     const engine = new WorkflowEngine({
       executor,
       databasePath: await makeStateDatabasePath("autoimplement-default-branch"),
     });
-    const { state } = await engine.run(autoimplementWithTimeout("finalizeDefaultBranch", 1_000), {
+
+    const { state } = await engine.run(autoimplementWithTimeout("finalizeDefaultBranch", 50), {
       task: "Verify direct default-branch work",
       ...documentedPlan({ steps: ["verify"] }),
       repository,
@@ -2273,6 +1887,7 @@ describe("built-in autoimplement", () => {
       verificationChecks: [verificationCheck],
       merge: false,
     });
+
     expect(state.finalOutput).toMatchObject({
       status: "completed",
       reviewRounds: [],
@@ -2281,24 +1896,17 @@ describe("built-in autoimplement", () => {
     });
     expect(executor.requests.some((request) => request.contract.nodeId === "publish")).toBe(false);
     expect(
-      executor.requests.some(
-        (request) => request.contract.nodeId === "localVerification/planChecks",
-      ),
-    ).toBe(false);
-    expect(
       state.steps
         .filter((step) => step.nodeId === "finalizeDefaultBranch")
         .map((step) => step.outcome),
     ).toEqual(["timed_out", "ok"]);
-    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(1);
   });
 
-  it("uses the eight-hour implementation timeout and shared outcome routes", () => {
+  it("uses the eight-hour implementation timeout and shared controller returns", () => {
     expect(autoimplementWorkflow.nodes.implement?.timeoutMs).toBe(8 * 60 * 60_000);
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
-    expect(
-      compiled.edges.find((candidate) => candidate.from === "routeTimeoutFallback"),
-    ).toMatchObject({ switch: { cases: { blocked: "createBlockerClaim" } } });
+    expect(autoimplementWorkflow.nodes.timeoutFallback).toBeUndefined();
+    expect(autoimplementWorkflow.nodes.challengeBlocker).toBeUndefined();
     for (const nodeId of [
       "implement",
       "fix",
@@ -2307,6 +1915,8 @@ describe("built-in autoimplement", () => {
       "verifyP2",
       "inspectComments",
       "inspectCi",
+      "trackCi",
+      "repairCiCommand",
       "opportunisticTest",
       "finalizeDefaultBranch",
       "finalizeDelivery",
@@ -2315,21 +1925,28 @@ describe("built-in autoimplement", () => {
       expect(edge).toMatchObject({
         switch: {
           on: "$result.outcome",
-          cases: {
-            timed_out: "timeoutFallbackGuard",
-            failed: "timeoutFallbackGuard",
-          },
+          cases: { timed_out: "observe", failed: "observe" },
         },
       });
+      expect(
+        (edge as { switch: { cases: Record<string, string> } }).switch.cases,
+      ).not.toHaveProperty("cancelled");
     }
   });
 
   it("routes completed CI batches through per-PR assessment", () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     const track = compiled.nodes.trackCi;
-    const edge = compiled.edges.find((candidate) => candidate.from === "trackCi");
+    const trackOutcome = compiled.edges.find((candidate) => candidate.from === "trackCi");
+    const batchRoute = compiled.edges.find((candidate) => candidate.from === "routeTrackCiResult");
     expect(track?.nodeType).toBe("action");
-    expect(edge).toMatchObject({
+    expect(trackOutcome).toMatchObject({
+      switch: {
+        on: "$result.outcome",
+        cases: { ok: "routeTrackCiResult", timed_out: "observe", failed: "observe" },
+      },
+    });
+    expect(batchRoute).toMatchObject({
       switch: {
         on: "$.route",
         cases: { assess: "assessTrackedCi", repair: "repairCiCommand" },
