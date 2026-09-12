@@ -287,6 +287,14 @@ export class WorkflowMessageStore {
           `Workflow message ${options.workflowMessageId} already has open turn ${open.workflowTurnId}`,
         );
       }
+      // One Pi session can hold at most one open workflow turn. A second one is
+      // an integrity error, never a silent choice between open turns.
+      const sessionOpen = this.openTurnsForSession(options.targetSessionId)[0];
+      if (sessionOpen !== undefined) {
+        throw new Error(
+          `Workflow session ${options.targetSessionId} already has open turn ${sessionOpen.workflowTurnId}`,
+        );
+      }
       this.state.connection
         .prepare(
           `INSERT INTO workflow_turns(

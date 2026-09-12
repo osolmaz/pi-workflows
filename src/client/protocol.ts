@@ -63,7 +63,6 @@ export const CLIENT_OUTCOMES = [
 export const CLIENT_EVENTS = [
   "runs",
   "run_snapshot",
-  "run_patch",
   "run_page",
   "session_snapshot",
   "unavailable",

@@ -28,7 +28,11 @@ import type { WorkflowRunListPage, WorkflowRunSummary, WorkflowRunView } from ".
 
 const CONNECT_TIMEOUT_MS = 2_000;
 const START_TIMEOUT_MS = 10_000;
-const RECONNECT_DELAY_MS = 250;
+/** Capped exponential reconnect delay with jitter; the first retry is fastest. */
+const RECONNECT_BASE_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 10_000;
+/** After this many failed attempts the client reports a blocker and stops looping. */
+const RECONNECT_MAX_ATTEMPTS = 12;
 const RESOLVER_TIMEOUT_MS = 30_000;
 const CLIENT_PACKAGE_VERSION = runtimePackageVersion();
 
@@ -43,6 +47,12 @@ type Subscription = {
   payload: JsonValue;
   listener: (event: ClientEvent) => void;
   runListGeneration: number;
+};
+
+/** Bounded reason code and safe message for one failed subscription. */
+export type SubscriptionFailure = {
+  reasonCode: "connection_lost" | "reconnect_exhausted" | "projection_failed";
+  message: string;
 };
 
 export class WorkflowClientVersionError extends Error {
@@ -71,6 +81,7 @@ export class WorkflowClient {
   private hello: ClientHello | null = null;
   private closed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly subscriptions = new Map<string, Subscription>();
 
@@ -624,6 +635,8 @@ export class WorkflowClient {
           throw new Error("Workflow server hello timed out");
         }),
       ]);
+      // A successful hello starts a fresh reconnect budget.
+      this.reconnectAttempts = 0;
       await this.restoreSubscriptions();
       return hello;
     } catch (error) {
@@ -638,6 +651,9 @@ export class WorkflowClient {
     subscription: Subscription,
     event: ClientEvent,
   ): Promise<void> {
+    // One accepted view proves the connection works again, so the reconnect
+    // budget resets here as well as after hello.
+    if (event.event !== "unavailable") this.reconnectAttempts = 0;
     if (subscription.operation !== "view.runs.watch" || event.event !== "runs") {
       subscription.listener(event);
       return;
@@ -712,28 +728,56 @@ export class WorkflowClient {
     for (const pending of this.pending.values()) pending.reject(reason);
     this.pending.clear();
     if (!this.closed) {
-      for (const [subscriptionId, subscription] of this.subscriptions) {
-        try {
-          subscription.listener({
-            schema: CLIENT_PROTOCOL_SCHEMA,
-            type: "event",
-            subscriptionId,
-            event: "unavailable",
-            payload: { message: "Workflow server connection is unavailable." },
-          });
-        } catch {
-          // One renderer cannot block reconnection for other subscriptions.
-        }
+      this.reportSubscriptionFailure(
+        { reasonCode: "connection_lost", message: "Workflow server connection is unavailable." },
+        false,
+      );
+    }
+  }
+
+  /**
+   * Report one bounded failure to every subscriber. The extension keeps its last
+   * view for display and loses command authority until a fresh snapshot arrives.
+   */
+  private reportSubscriptionFailure(failure: SubscriptionFailure, clear: boolean): void {
+    for (const [subscriptionId, subscription] of this.subscriptions) {
+      try {
+        subscription.listener({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "event",
+          subscriptionId,
+          event: "unavailable",
+          payload: { schema: "pi-workflows.subscription-failure.v1", ...failure },
+        });
+      } catch {
+        // One renderer cannot block reconnection for other subscriptions.
       }
+      if (clear) this.subscriptions.delete(subscriptionId);
     }
   }
 
   private scheduleReconnect(): void {
     if (this.closed || this.subscriptions.size === 0 || this.reconnectTimer !== null) return;
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      // A fast loop would hide the blocker. Report it once and wait for new work.
+      this.reportSubscriptionFailure({
+        reasonCode: "reconnect_exhausted",
+        message: `Workflow server did not answer after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start the workflow server, then open or resume a session.`,
+      }, false);
+      return;
+    }
+    const capped = Math.min(
+      RECONNECT_MAX_DELAY_MS,
+      RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts,
+    );
+    // Full jitter over the upper half of the window keeps one reconnect storm
+    // from repeating on the same instant across sessions.
+    const delayMs = Math.round(capped / 2 + Math.random() * (capped / 2));
+    this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect().catch(() => this.scheduleReconnect());
-    }, RECONNECT_DELAY_MS);
+    }, delayMs);
     this.reconnectTimer.unref?.();
   }
 

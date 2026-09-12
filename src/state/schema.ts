@@ -578,6 +578,9 @@ CREATE TABLE workflow_turns (
 
 CREATE UNIQUE INDEX workflow_turns_open_message_idx
   ON workflow_turns(workflow_message_id) WHERE state = 'started';
+-- One Pi session owns at most one open workflow turn at a time.
+CREATE UNIQUE INDEX workflow_turns_open_session_idx
+  ON workflow_turns(target_session_id) WHERE state = 'started';
 CREATE INDEX workflow_turns_session_idx ON workflow_turns(target_session_id, state, started_at);
 
 CREATE TABLE session_terminal_views (

@@ -13,6 +13,7 @@ export class SessionWorkflowView {
   private shownScroll = 0;
   private maxScroll = 0;
   private focus: string | undefined;
+  private staleReason: string | null = null;
   private visible = false;
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
@@ -34,7 +35,18 @@ export class SessionWorkflowView {
       this.focus = focus;
     }
     this.session = session;
+    this.staleReason = null;
     this.notifyTransition(previousRun, session, ctx);
+    this.render(ctx);
+  }
+
+  /**
+   * Keep the last view for display while the connection is lost. Every state
+   * change needs a fresh snapshot, so this view no longer authorizes commands.
+   */
+  markStale(message: string, ctx: ExtensionContext): void {
+    if (this.session === null) return;
+    this.staleReason = message;
     this.render(ctx);
   }
 
@@ -65,6 +77,7 @@ export class SessionWorkflowView {
     this.shownScroll = 0;
     this.maxScroll = 0;
     this.focus = undefined;
+    this.staleReason = null;
     this.lastNoticeKey = null;
     this.clearWidget(ctx);
   }
@@ -104,7 +117,7 @@ export class SessionWorkflowView {
         input.updates,
         this.actionHint,
         run.display.status,
-        run.display.reason,
+        this.staleReason ?? run.display.reason,
         run.display.controls,
         this.scrollHint,
       );
@@ -125,7 +138,7 @@ export class SessionWorkflowView {
       const focus = run.currentNode ?? run.waitingOn;
       ctx.ui.setStatus(
         WIDGET_KEY,
-        `${run.workflowName} [${run.display.status}]${focus === null ? "" : ` ${focus}`}`,
+        `${run.workflowName} [${run.display.status}]${focus === null ? "" : ` ${focus}`}${this.staleReason === null ? "" : " · stale"}`,
       );
       this.visible = true;
     });

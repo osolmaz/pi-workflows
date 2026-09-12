@@ -56,11 +56,16 @@ export {
 export { renderDecisionText, renderTelegramParts } from "../channels/telegram.js";
 
 const INTERACTION_POLL_MS = 1_000;
+/** Retry schedule for one session subscription whose view failed to build. */
+const SESSION_PROJECTION_BASE_RETRY_MS = 1_000;
+const SESSION_PROJECTION_MAX_RETRY_MS = 30_000;
 // Keep one model-facing tool result comfortably below Pi provider message limits.
 // The offset keeps every discovered workflow available across pages.
 const MAX_WORKFLOW_LIST_ITEMS = 50;
 const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const sessionSnapshots = new Map<string, WorkflowSessionView>();
+/** Sessions whose last view is display-only until a fresh snapshot arrives. */
+const staleSessionIds = new Set<string>();
 // Shortcut configuration problems wait for the first session so the user sees them once.
 let pendingShortcutNotices: string[] = [];
 
@@ -174,6 +179,12 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
   let sessionConnectTask: Promise<void> | null = null;
+  // A connection loss keeps the last view for display but removes authority.
+  let sessionConnectionId: string | null = null;
+  // A failed session projection retries with its own capped backoff, so one
+  // broken view cannot become a fast retry loop.
+  let sessionSubscriptionFailures = 0;
+  let sessionSubscriptionRetryAt = 0;
   let serverUnavailableNotified = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
@@ -631,7 +642,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       if (
         generation !== sessionGeneration ||
         sessionContext !== ctx ||
-        sessionUnsubscribe !== null ||
+        Date.now() < sessionSubscriptionRetryAt ||
+        (sessionUnsubscribe !== null && sessionConnectionId === sessionClient.connectionId) ||
         sessionConnectTask !== null
       ) {
         return;
@@ -644,12 +656,35 @@ export default function piWorkflows(pi: ExtensionAPI): void {
             (event) => {
               if (generation !== sessionGeneration || sessionContext !== ctx) return;
               if (event.event === "unavailable") {
-                sessionSnapshots.delete(sessionId);
-                sessionView.clear(ctx);
+                staleSessionIds.add(sessionId);
+                const failure = subscriptionFailure(event.payload);
+                sessionView.markStale(failure.message, ctx);
+                if (failure.reasonCode === "projection_failed") {
+                  sessionSubscriptionFailures += 1;
+                  sessionSubscriptionRetryAt =
+                    Date.now() +
+                    Math.min(
+                      SESSION_PROJECTION_MAX_RETRY_MS,
+                      SESSION_PROJECTION_BASE_RETRY_MS *
+                        2 ** (sessionSubscriptionFailures - 1),
+                    );
+                } else {
+                  sessionSubscriptionFailures = 0;
+                  sessionSubscriptionRetryAt = 0;
+                }
+                // A non-null callback is no proof of health after a connection
+                // loss: drop it so the next poll re-arms the subscription.
+                const unsubscribe = sessionUnsubscribe;
+                sessionUnsubscribe = null;
+                sessionConnectionId = null;
+                if (unsubscribe !== null) void unsubscribe().catch(() => undefined);
                 return;
               }
               if (!isWorkflowSessionView(event.payload)) return;
               const session = event.payload;
+              staleSessionIds.delete(sessionId);
+              sessionSubscriptionFailures = 0;
+              sessionSubscriptionRetryAt = 0;
               sessionSnapshots.set(sessionId, session);
               workflowMessages.updateView(session);
               sessionView.update(session, ctx);
@@ -670,6 +705,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
             return;
           }
           sessionUnsubscribe = unsubscribe;
+          sessionConnectionId = sessionClient.connectionId ?? null;
           serverUnavailableNotified = false;
           const capability = await herdrViewer.probe();
           if (generation !== sessionGeneration || sessionContext !== ctx) return;
@@ -779,10 +815,12 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     workflowMessages.clear();
     sessionView.clear(ctx);
     sessionSnapshots.delete(ctx.sessionManager.getSessionId());
+    staleSessionIds.delete(ctx.sessionManager.getSessionId());
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
     if (sessionUnsubscribe !== null) await sessionUnsubscribe().catch(() => undefined);
     sessionUnsubscribe = null;
+    sessionConnectionId = null;
     sessionConnectTask = null;
     serverUnavailableNotified = false;
     await client.close();
@@ -1221,6 +1259,7 @@ function sessionCommandPayload(ctx: ExtensionContext): {
   const session = sessionSnapshots.get(targetSessionId);
   if (
     session === undefined ||
+    staleSessionIds.has(targetSessionId) ||
     !session.coordinatorActive ||
     session.coordinatorEpoch === null ||
     session.branchReportRequired
@@ -1231,7 +1270,9 @@ function sessionCommandPayload(ctx: ExtensionContext): {
 }
 
 function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueView | undefined {
-  const session = sessionSnapshots.get(ctx.sessionManager.getSessionId());
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (staleSessionIds.has(sessionId)) return undefined;
+  const session = sessionSnapshots.get(sessionId);
   if (session?.run === null || session?.run === undefined || !isRecord(session.run.queue)) {
     return undefined;
   }
@@ -1439,6 +1480,25 @@ function isTerminalDisplay(status: string): boolean {
 
 function validRunId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value);
+}
+
+/** Bounded reason code and safe text for one failed subscription. */
+function subscriptionFailure(payload: unknown): { reasonCode: string | null; message: string } {
+  if (!isRecord(payload)) return { reasonCode: null, message: "Workflow server connection is unavailable." };
+  const reasonCode = payload.reasonCode;
+  const message = typeof payload.message === "string" ? payload.message : undefined;
+  const reason =
+    reasonCode === "connection_lost"
+      ? "Connection lost"
+      : reasonCode === "reconnect_exhausted"
+        ? "Reconnect attempts exhausted"
+        : reasonCode === "projection_failed"
+          ? "Workflow server could not build this session view"
+          : "Workflow server connection is unavailable";
+  return {
+    reasonCode: typeof reasonCode === "string" ? reasonCode : null,
+    message: message === undefined ? `${reason}.` : `${reason}: ${message.slice(0, 300)}`,
+  };
 }
 
 function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {

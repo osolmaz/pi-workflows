@@ -1233,47 +1233,85 @@ export class WorkflowServer {
     connection.publishing = true;
     try {
       for (const subscription of connection.subscriptions.values()) {
-        const payload =
-          subscription.kind === "runs"
-            ? toJsonValue(this.views.list(0, subscription.limit))
-            : subscription.kind === "run"
-              ? toJsonValue(this.views.run(subscription.target ?? ""))
-              : toJsonValue(
-                  this.views.session(
-                    subscription.target ?? "",
-                    this.sessionCoordinatorView(connection, subscription.target ?? ""),
-                  ),
-                );
-        const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
-        if (subscription.digest === digest) continue;
-        subscription.digest = digest;
-        subscription.revision += 1;
-        const event: ClientEvent = {
-          schema: CLIENT_PROTOCOL_SCHEMA,
-          type: "event",
-          subscriptionId: subscription.id,
-          event:
-            subscription.kind === "runs"
-              ? "runs"
-              : subscription.kind === "run"
-                ? "run_snapshot"
-                : "session_snapshot",
-          revision: subscription.revision,
-          ...(subscription.kind === "run" && subscription.target !== undefined
-            ? { runId: subscription.target }
-            : {}),
-          payload,
-        };
-        if (!connection.socket.write(encodeProtocolLine(event))) {
-          await waitForSocketDrain(connection.socket);
-          if (connection.socket.destroyed) return;
+        // One failed projection fails only its own subscription. The connection
+        // stays open, and the client decides when to ask again.
+        try {
+          await this.publishSubscription(connection, subscription);
+        } catch (error) {
+          connection.subscriptions.delete(subscription.id);
+          this.log(
+            `client view error for subscription ${subscription.id}: ${errorMessage(error)}`,
+          );
+          this.failSubscription(connection, subscription.id, errorMessage(error));
         }
       }
-    } catch (error) {
-      this.log(`client view error: ${errorMessage(error)}`);
-      connection.socket.destroy();
     } finally {
       connection.publishing = false;
+    }
+  }
+
+  private failSubscription(
+    connection: ClientConnection,
+    subscriptionId: string,
+    message: string,
+  ): void {
+    const event: ClientEvent = {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId,
+      event: "unavailable",
+      payload: {
+        schema: "pi-workflows.subscription-failure.v1",
+        reasonCode: "projection_failed",
+        message: message.slice(0, 300),
+      },
+    };
+    try {
+      if (!connection.socket.write(encodeProtocolLine(event))) {
+        void waitForSocketDrain(connection.socket).catch(() => undefined);
+      }
+    } catch {
+      // A closed socket needs no failure notice.
+    }
+  }
+
+  private async publishSubscription(
+    connection: ClientConnection,
+    subscription: ClientSubscription,
+  ): Promise<void> {
+    const payload =
+      subscription.kind === "runs"
+        ? toJsonValue(this.views.list(0, subscription.limit))
+        : subscription.kind === "run"
+          ? toJsonValue(this.views.run(subscription.target ?? ""))
+          : toJsonValue(
+              this.views.session(
+                subscription.target ?? "",
+                this.sessionCoordinatorView(connection, subscription.target ?? ""),
+              ),
+            );
+    const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
+    if (subscription.digest === digest) return;
+    subscription.digest = digest;
+    subscription.revision += 1;
+    const event: ClientEvent = {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: subscription.id,
+      event:
+        subscription.kind === "runs"
+          ? "runs"
+          : subscription.kind === "run"
+            ? "run_snapshot"
+            : "session_snapshot",
+      revision: subscription.revision,
+      ...(subscription.kind === "run" && subscription.target !== undefined
+        ? { runId: subscription.target }
+        : {}),
+      payload,
+    };
+    if (!connection.socket.write(encodeProtocolLine(event))) {
+      await waitForSocketDrain(connection.socket);
     }
   }
 
