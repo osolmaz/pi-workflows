@@ -561,8 +561,11 @@ recent failed node when there is one, otherwise the last row. Detail text belong
 so the failure the widget shows is never outside the loaded window.
 
 The compact run carries the newest progress updates of its run, up to 16 keys, because a run keeps
-up to 1,024 current updates and the oldest keys are the least useful ones for the widget. Complete
-update history stays on the run's update page.
+up to 1,024 current updates and the oldest keys are the least useful ones for the widget. The
+current-updates read already keeps the newest record per type and key, so one busy key cannot hide
+another track; the bound removes the least recent keys only. Complete update history stays on the
+run's update page. `test/server-view.test.ts` "keeps one progress record per key however often one
+key publishes" proves it with five tracks and twenty updates for one key.
 
 ### Acceptance evidence
 
