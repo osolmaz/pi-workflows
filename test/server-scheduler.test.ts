@@ -240,11 +240,7 @@ export default defineWorkflow({ name: "agent", startAt: "work", nodes: { work: a
         targetSessionId: "scheduler-session",
         coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
       };
-      expect(
-        (
-          await reportBranch(test.client, authority)
-        ).outcome,
-      ).toBe("accepted");
+      expect((await reportBranch(test.client, authority)).outcome).toBe("accepted");
       const submitted = test.client.request({
         operation: "interaction.submit",
         idempotencyKey: "result",

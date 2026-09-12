@@ -221,7 +221,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     if (!agentRunning) return;
     const message = workflowMessages.activeTurnMessage();
     if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
-    const contract = agentContractForWorkflowMessage(message, workflowMessages.verifiedContent(message));
+    const contract = agentContractForWorkflowMessage(
+      message,
+      workflowMessages.verifiedContent(message),
+    );
     if (contract === undefined && message.kind !== "followUp" && message.kind !== "terminal") {
       return;
     }
@@ -665,8 +668,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
                     Date.now() +
                     Math.min(
                       SESSION_PROJECTION_MAX_RETRY_MS,
-                      SESSION_PROJECTION_BASE_RETRY_MS *
-                        2 ** (sessionSubscriptionFailures - 1),
+                      SESSION_PROJECTION_BASE_RETRY_MS * 2 ** (sessionSubscriptionFailures - 1),
                     );
                 } else {
                   sessionSubscriptionFailures = 0;
@@ -1484,7 +1486,8 @@ function validRunId(value: string): boolean {
 
 /** Bounded reason code and safe text for one failed subscription. */
 function subscriptionFailure(payload: unknown): { reasonCode: string | null; message: string } {
-  if (!isRecord(payload)) return { reasonCode: null, message: "Workflow server connection is unavailable." };
+  if (!isRecord(payload))
+    return { reasonCode: null, message: "Workflow server connection is unavailable." };
   const reasonCode = payload.reasonCode;
   const message = typeof payload.message === "string" ? payload.message : undefined;
   const reason =

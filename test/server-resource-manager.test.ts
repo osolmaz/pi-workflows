@@ -85,7 +85,7 @@ export default defineWorkflow({
   settings: workflowSettings({
     initial: { mode: "old" },
     parse: (value) => value,
-    paths: [allowSettingsPath("/mode", { replace: ["controller"] })],
+    paths: [allowSettingsPath("/mode", { replace: ["resource_manager"] })],
   }),
   startAt: "wait",
   nodes: { wait: checkpoint({ summary: "wait" }) },
