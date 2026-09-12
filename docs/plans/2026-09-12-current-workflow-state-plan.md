@@ -544,7 +544,10 @@ count. Rows are the canonical snapshot order. The default window starts `SESSION
 before the node the widget shows as working. When the run has no working node, that node is the most
 recent failed node, or the last row, which is the row the widget highlights. One
 row's `statusDetail`, `error`, `summary`, and human-decision summary are bounded by
-`SESSION_NODE_TEXT_BYTES`; the complete text stays in the detailed run view.
+`SESSION_TEXT_BYTES`; the complete text stays in the detailed run view. A row whose own identity is
+larger than the window budget is left out and the window starts at the next row, so an unbounded
+node id cannot break the frame. `test/server-view.test.ts` "leaves out a node row that cannot fit
+the frame by itself" drives a 200 KiB node id.
 
 The widget asks for the adjacent window with `view.session.window`, which moves the node cursor of
 the live session subscription. `null` returns the window to the one that follows the working node.
