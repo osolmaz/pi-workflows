@@ -3,8 +3,7 @@ import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 
 export const RESOURCE_RUNNER_LAUNCH_SCHEMA = "pi-workflows.resource-runner-launch.v1" as const;
 export const RESOURCE_RUNNER_MESSAGE_SCHEMA = "pi-workflows.resource-runner-message.v1" as const;
-export const RESOURCE_RUNNER_RESPONSE_SCHEMA =
-  "pi-workflows.resource-runner-response.v1" as const;
+export const RESOURCE_RUNNER_RESPONSE_SCHEMA = "pi-workflows.resource-runner-response.v1" as const;
 
 export type ResourceRunnerLaunchEnvelope = {
   schema: typeof RESOURCE_RUNNER_LAUNCH_SCHEMA;

@@ -563,7 +563,8 @@ export class ServerViewStore {
     const rows: WorkflowSessionNodeRow[] = [];
     for (const [nodeId, node] of Object.entries(records)) {
       const facts = byNode.get(nodeId);
-      const detail = nodeId === state.currentNode || nodeId === state.waitingOn || nodeId === failure;
+      const detail =
+        nodeId === state.currentNode || nodeId === state.waitingOn || nodeId === failure;
       rows.push({
         nodeId,
         nodeType: typeof node.nodeType === "string" ? node.nodeType : "unknown",
@@ -582,7 +583,8 @@ export class ServerViewStore {
         durationMs: facts?.durationMs ?? null,
         error: detail ? this.readAttemptError(facts?.errorHash ?? null) : null,
         humanDecision: sessionHumanDecision(node, state, nodeId),
-        summary: nodeId === state.waitingOn && typeof node.summary === "string" ? node.summary : null,
+        summary:
+          nodeId === state.waitingOn && typeof node.summary === "string" ? node.summary : null,
         assistantResponse: isAssistantResponseNode(node),
         outcome: state.results[nodeId]?.outcome ?? null,
       });
@@ -1373,25 +1375,26 @@ function sessionHumanDecision(
   if (human === undefined) return null;
   const request = humanDecisionRequest(state.finalOutput);
   const current = request !== undefined && request.nodeId === nodeId ? request : undefined;
-  const audience = current?.audience ?? (typeof human.audience === "string" ? human.audience : "human");
-    const choices = isJsonObject(human.choices)
-      ? Object.entries(human.choices).flatMap(([value, choice]) =>
-          isJsonObject(choice) && typeof choice.label === "string"
-            ? [{ value, label: choice.label }]
-            : [],
-        )
-      : [];
-    const choiceValue =
-      state.humanDecision !== undefined && state.humanDecision.nodeId === nodeId
-        ? state.humanDecision.response.choice
-        : null;
-    return {
-      audience,
-      summary: current?.summary ?? null,
-      choices,
-      choiceValue,
-      presentationDigest: current?.presentationDigest ?? null,
-    };
+  const audience =
+    current?.audience ?? (typeof human.audience === "string" ? human.audience : "human");
+  const choices = isJsonObject(human.choices)
+    ? Object.entries(human.choices).flatMap(([value, choice]) =>
+        isJsonObject(choice) && typeof choice.label === "string"
+          ? [{ value, label: choice.label }]
+          : [],
+      )
+    : [];
+  const choiceValue =
+    state.humanDecision !== undefined && state.humanDecision.nodeId === nodeId
+      ? state.humanDecision.response.choice
+      : null;
+  return {
+    audience,
+    summary: current?.summary ?? null,
+    choices,
+    choiceValue,
+    presentationDigest: current?.presentationDigest ?? null,
+  };
 }
 
 function humanDecisionRequest(

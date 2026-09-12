@@ -108,13 +108,7 @@
         "type": { "const": "event" },
         "subscriptionId": { "$ref": "#/$defs/opaqueId" },
         "event": {
-          "enum": [
-            "runs",
-            "run_snapshot",
-            "run_page",
-            "session_snapshot",
-            "unavailable"
-          ]
+          "enum": ["runs", "run_snapshot", "run_page", "session_snapshot", "unavailable"]
         },
         "revision": { "$ref": "#/$defs/revision" },
         "runId": { "$ref": "#/$defs/opaqueId" },

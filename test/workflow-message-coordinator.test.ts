@@ -159,9 +159,10 @@ describe("WorkflowMessageCoordinator", () => {
       expect(beforeTurnEnd).toHaveBeenCalledWith(
         expect.objectContaining({ workflowMessageId: message.workflowMessageId }),
         {
-        stopReason: "completed",
-        responseSessionEntryId: "workflow-reply",
-      });
+          stopReason: "completed",
+          responseSessionEntryId: "workflow-reply",
+        },
+      );
       expect(
         request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
       ).toHaveLength(2);
@@ -276,11 +277,12 @@ describe("WorkflowMessageCoordinator", () => {
       beforeTurnEnd,
     });
     expect(beforeTurnEnd).toHaveBeenCalledWith(
-        expect.objectContaining({ workflowMessageId: message.workflowMessageId }),
-        {
-      stopReason: "completed",
-      responseSessionEntryId: "response-during-ack",
-    });
+      expect.objectContaining({ workflowMessageId: message.workflowMessageId }),
+      {
+        stopReason: "completed",
+        responseSessionEntryId: "response-during-ack",
+      },
+    );
     expect(
       request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
     ).toHaveLength(2);
@@ -635,7 +637,9 @@ describe("WorkflowMessageCoordinator", () => {
     });
     await coordinator.synchronize(
       { sendMessage } as never,
-      clientDouble(vi.fn(async (options: Record<string, unknown>) => acceptedServerRequest(options))),
+      clientDouble(
+        vi.fn(async (options: Record<string, unknown>) => acceptedServerRequest(options)),
+      ),
       ctx,
     );
     for (const tool of ["read", "list_sessions"])
@@ -763,7 +767,10 @@ describe("WorkflowMessageCoordinator", () => {
     await sync();
     coordinator.updateView({
       ...current,
-      workflowMessage: current.workflowMessage === null ? null : { ...current.workflowMessage, deliveryCancelled: true },
+      workflowMessage:
+        current.workflowMessage === null
+          ? null
+          : { ...current.workflowMessage, deliveryCancelled: true },
     });
     await sync();
     await sync();
@@ -847,7 +854,10 @@ describe("WorkflowMessageCoordinator", () => {
       await waiting;
       coordinator.updateView({
         ...current,
-        workflowMessage: current.workflowMessage === null ? null : { ...current.workflowMessage, deliveryCancelled: true },
+        workflowMessage:
+          current.workflowMessage === null
+            ? null
+            : { ...current.workflowMessage, deliveryCancelled: true },
       });
       // The extension invokes this before its serialized presentation queue.
       coordinator.abortCancelledTurn(ctx);
@@ -882,15 +892,11 @@ describe("WorkflowMessageCoordinator", () => {
       });
     });
 
-    await coordinator.synchronize(
-      { sendMessage } as never,
-      clientDouble(request),
-      {
-        isIdle: () => true,
-        hasPendingMessages: () => false,
-        sessionManager: { getBranch: () => branch },
-      } as never,
-    );
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never);
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     // The branch report confirms the delivery, so the message Pi holds is sent.

@@ -190,10 +190,6 @@ function isTerminalStatus(status: string): boolean {
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function safelyUpdateUi(ctx: ExtensionContext, update: () => void): void {
   try {
     if (ctx.hasUI) update();

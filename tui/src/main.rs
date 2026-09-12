@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
 
-/// Terminal viewer and client relay for hosted pi-workflows state.
+/// Terminal viewer and client relay for workflow server state.
 #[derive(Parser)]
 #[command(name = "piw", version, about)]
 struct Cli {

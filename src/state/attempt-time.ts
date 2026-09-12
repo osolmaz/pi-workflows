@@ -78,7 +78,9 @@ export class AttemptTime {
   private sampleInterval(interval: Interval): void {
     const anchor = this.anchors.get(intervalKey(interval));
     if (anchor === undefined) {
-      throw new Error("Active interval belongs to a previous workflow server; recover it before sampling");
+      throw new Error(
+        "Active interval belongs to a previous workflow server; recover it before sampling",
+      );
     }
     const elapsedMs = Math.max(interval.elapsedMs, this.clock.monotonic() - anchor, 0);
     this.state.connection

@@ -97,7 +97,7 @@ export async function runCommandBatch(
   let nextIndex = 0;
   let completed = 0;
 
-  const worker = async () => {
+  const runSlot = async () => {
     while (!signal?.aborted) {
       const index = nextIndex;
       if (index >= total) return;
@@ -118,7 +118,7 @@ export async function runCommandBatch(
   };
 
   const runnerCount = Math.min(request.maxConcurrency, total);
-  await Promise.all(Array.from({ length: runnerCount }, worker));
+  await Promise.all(Array.from({ length: runnerCount }, runSlot));
 
   for (let index = 0; index < total; index += 1) {
     if (results[index] !== undefined) continue;
