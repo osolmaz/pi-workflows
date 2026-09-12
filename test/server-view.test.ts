@@ -1499,6 +1499,103 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("reads the newest progress keys when a run publishes many tracks", async () => {
+    const projectPath = await makeTempDir("many-tracks-project");
+    const databasePath = path.join(await makeTempDir("many-tracks-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // More tracks than one view page holds, so the head of the update set is far
+    // behind the newest keys.
+    const trackCount = 300;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "many-tracks",
+        startAt: "work",
+        nodes: { work: compute({ run: () => "done" }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-many-tracks";
+    const sessionId = "session-many-tracks";
+    const attemptId = "many-tracks-attempt";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:many-tracks",
+      workflowSource: {
+        root: { kind: "builtin", id: "many-tracks", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "many-tracks",
+      claimToken: "claim-many-tracks",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, created_at, updated_at) VALUES (?, ?, 'work', 1, 'compute', 'running', 1000, 1000, 1000)`,
+      )
+      .run(attemptId, runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-many-tracks"),
+    });
+    // The schedule arrives before every track, so a page of the update head would
+    // miss it as well.
+    runs.publishUpdateSynchronous(runId, "work", attemptId, {
+      type: "monitor.schedule",
+      key: "next-check",
+      data: {
+        schema: "pi-workflows.monitor-schedule.v1",
+        lastCheckAt: "2026-01-01T00:00:00.000Z",
+        nextCheckAt: "2026-01-01T01:00:00.000Z",
+        everyMinutes: 60,
+      },
+    });
+    for (let index = 0; index < trackCount; index += 1) {
+      runs.publishUpdateSynchronous(runId, "work", attemptId, {
+        type: "progress",
+        key: `track-${String(index).padStart(3, "0")}`,
+        data: {
+          schema: "pi-workflows.progress.v1",
+          status: "running",
+          completed: index,
+          total: trackCount,
+          unit: "items",
+        },
+      });
+    }
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    // The compact run carries the newest tracks, not the oldest page of them.
+    const newest = Array.from(
+      { length: 16 },
+      (_, index) => `track-${String(trackCount - 16 + index).padStart(3, "0")}`,
+    );
+    expect(run.progressUpdates.map((update) => update.key)).toEqual(newest);
+    // A schedule published before every track stays visible.
+    expect(run.monitorSchedule?.nextCheckAt).toBe("2026-01-01T01:00:00.000Z");
+    state.close();
+  }, 60_000);
+
   it.each([
     {
       placement: "first",
