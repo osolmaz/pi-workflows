@@ -28,6 +28,7 @@ export type WidgetRunInput = {
  */
 export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
   const runningNode = displayedRunningNode(run);
+  const runningRow = run.nodes.find((row) => row.nodeId === runningNode);
   const nodes: Record<string, WorkflowDefinitionSnapshot["nodes"][string]> = {};
   const results: WorkflowRunState["results"] = {};
   const steps: WorkflowStepRecord[] = [];
@@ -83,6 +84,10 @@ export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
     ...(currentNode === undefined ? {} : { currentNode }),
     ...(waitingOn === undefined ? {} : { waitingOn }),
     ...(currentSettingsChangeNumber === undefined ? {} : { currentSettingsChangeNumber }),
+    // The widget appends the running node's elapsed segment from this value.
+    ...(runningRow?.startedAt === null || runningRow?.startedAt === undefined
+      ? {}
+      : { currentNodeStartedAt: runningRow.startedAt }),
     ...(run.error === null ? {} : { error: run.error }),
     ...(humanDecision === undefined ? {} : { humanDecision }),
     ...(finalOutput === undefined ? {} : { finalOutput }),
