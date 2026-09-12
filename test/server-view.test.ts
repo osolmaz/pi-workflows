@@ -1483,6 +1483,75 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("leaves out a node row that cannot fit the frame by itself", async () => {
+    const projectPath = await makeTempDir("node-huge-project");
+    const databasePath = path.join(await makeTempDir("node-huge-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A valid node id has no length limit, and this one must sort first so the
+    // default window starts on it.
+    const hugeId = `a${"x".repeat(200 * 1024)}`;
+    const nodeIds = [hugeId, "node-000", "node-001", "node-002"];
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "node-huge-row",
+        startAt: hugeId,
+        nodes: Object.fromEntries(
+          nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+        ),
+        edges: nodeIds.slice(1).map((nodeId, index) => ({
+          from: nodeIds[index] ?? hugeId,
+          to: nodeId,
+        })),
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-node-huge-row";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:node-huge-row",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-huge-row", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-huge-row",
+      claimToken: "claim-node-huge-row",
+      leaseMs: 60_000,
+      originSessionId: "session-node-huge-row",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-node-huge-row"),
+    });
+    // The run is claimed but never started, so the default window follows the
+    // first row, which is the row that cannot fit.
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session("session-node-huge-row", null);
+    const run = view.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.nodeTotal).toBe(nodeIds.length);
+    // The window starts after the row it cannot carry, so the frame stays bounded.
+    expect(run.nodeStart).toBe(1);
+    expect(run.nodes.map((row) => row.nodeId)).toEqual(nodeIds.slice(1));
+    expect(Buffer.byteLength(canonicalJson(run.nodes), "utf8")).toBeLessThan(64 * 1024);
+    const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
+    expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    state.close();
+  }, 60_000);
+
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
     const projectPath = await makeTempDir("server-view-project");
     const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");

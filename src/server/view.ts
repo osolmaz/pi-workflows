@@ -1803,16 +1803,24 @@ function boundedNodeWindow(
   if (total === 0) return { start: 0, total: 0, items: [] };
   const first = Math.min(Math.max(0, Math.floor(start)), total - 1);
   const items: WorkflowSessionNodeRow[] = [];
+  let windowStart = first;
   let bytes = 0;
   for (let index = first; index < total && items.length < VIEW_PAGE_ITEMS; index += 1) {
     const row = rows[index] as WorkflowSessionNodeRow;
     const rowBytes = Buffer.byteLength(canonicalJson(toJson(row)), "utf8") + 1;
-    // One row always fits, so a single large row cannot stall the window.
+    // A row must fit by itself, or the window would never move past it. A row
+    // whose own identity exceeds the budget is left out, and the window starts at
+    // the next row instead, so one long node id cannot break the frame the client
+    // needs. Complete node history stays in the detailed run view.
+    if (rowBytes > VIEW_PAGE_BYTES) {
+      if (items.length === 0) windowStart = index + 1;
+      continue;
+    }
     if (items.length > 0 && bytes + rowBytes > VIEW_PAGE_BYTES) break;
     bytes += rowBytes;
     items.push(row);
   }
-  return { start: first, total, items };
+  return { start: windowStart, total, items };
 }
 
 function toJson(value: unknown): JsonValue {
