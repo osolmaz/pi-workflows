@@ -335,6 +335,97 @@ describe("WorkflowClient", () => {
     }
   });
 
+  it("moves the session node window and keeps it across a reconnect", async () => {
+    const databasePath = path.join(await makeTempDir("client-node-window"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const requests: ClientRequest[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `node-window-${sockets.length}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          requests.push(message);
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true },
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    try {
+      await client.watchSession("session-window", () => undefined, {
+        subscriptionId: "window-subscription",
+        coordinator: true,
+      });
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "window-subscription", sessionId: "session-window" },
+      });
+      const firstWatch = requests.at(-1);
+      expect(
+        (firstWatch?.payload as { nodeCursor?: unknown } | undefined)?.nodeCursor,
+      ).toBeUndefined();
+      await expect(client.setSessionNodeWindow("session-window", 128)).resolves.toBe(true);
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.window",
+        payload: { subscriptionId: "window-subscription", nodeCursor: 128 },
+      });
+      await expect(client.setSessionNodeWindow("session-window", null)).resolves.toBe(true);
+      expect(requests.at(-1)).toMatchObject({
+        payload: { subscriptionId: "window-subscription", nodeCursor: null },
+      });
+      await expect(client.setSessionNodeWindow("missing-session", 1)).resolves.toBe(false);
+
+      await client.setSessionNodeWindow("session-window", 64);
+      const watched = requests.filter(
+        (request) => request.operation === "view.session.watch",
+      ).length;
+      // A reconnect restores the window with the coordinator claim intact.
+      sockets.at(-1)?.destroy();
+      await waitUntil(
+        () =>
+          requests.filter((request) => request.operation === "view.session.watch").length > watched,
+        10_000,
+      );
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "window-subscription",
+          sessionId: "session-window",
+          coordinator: true,
+          nodeCursor: 64,
+        },
+      });
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 30_000);
+
   it("discards incomplete and stale run-list pages", async () => {
     const databasePath = path.join(await makeTempDir("client-run-page-errors"), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);

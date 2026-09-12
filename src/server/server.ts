@@ -188,6 +188,8 @@ type ClientSubscription = {
   target?: string;
   revision: number;
   limit?: number;
+  /** First node row this session snapshot must start at. */
+  nodeCursor?: number;
   digest?: string;
 };
 
@@ -714,6 +716,24 @@ export class WorkflowServer {
           if (payload.coordinator !== undefined && payload.coordinator !== false) {
             throw new Error("view.session.watch coordinator must be a boolean");
           }
+          // A node-window change is part of the subscription, so it must arrive
+          // as a fresh snapshot instead of waiting for the next publish poll.
+          this.publishViews();
+          return clientResponse(request.requestId, "accepted", { subscribed: true });
+        }
+        case "view.session.window": {
+          const payload = requireRecord(request.payload, "view.session.window payload");
+          const subscriptionId = requireString(payload.subscriptionId, "subscriptionId");
+          const subscription = connection.subscriptions.get(subscriptionId);
+          if (subscription === undefined || subscription.kind !== "session") {
+            throw new Error("view.session.window needs a session subscription");
+          }
+          if (payload.nodeCursor === null) delete subscription.nodeCursor;
+          else
+            subscription.nodeCursor = requireNonNegativeInteger(payload.nodeCursor, "nodeCursor");
+          // The same window can repeat, and the next publish poll must not be
+          // the reason a scrolled widget waits for its rows.
+          this.publishViews();
           return clientResponse(request.requestId, "accepted", { subscribed: true });
         }
         case "view.run.unwatch": {
@@ -906,11 +926,16 @@ export class WorkflowServer {
       kind === "runs" && payload.limit !== undefined
         ? requirePositiveInteger(payload.limit, "limit")
         : undefined;
+    const nodeCursor =
+      kind !== "session" || payload.nodeCursor === undefined
+        ? undefined
+        : requireNonNegativeInteger(payload.nodeCursor, "nodeCursor");
     connection.subscriptions.set(id, {
       id,
       kind,
       ...(target === undefined ? {} : { target }),
       ...(limit === undefined ? {} : { limit }),
+      ...(nodeCursor === undefined ? {} : { nodeCursor }),
       revision: 0,
     });
   }
@@ -1292,6 +1317,7 @@ export class WorkflowServer {
               this.views.session(
                 subscription.target ?? "",
                 this.sessionCoordinatorView(connection, subscription.target ?? ""),
+                subscription.nodeCursor,
               ),
             );
     const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
@@ -1628,6 +1654,7 @@ export class WorkflowServer {
       case "view.page":
       case "view.content":
       case "view.session.watch":
+      case "view.session.window":
       case "workflowMessage.reportBranch":
       case "workflowTurn.report":
       case "run.changeSettings":

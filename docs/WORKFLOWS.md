@@ -589,7 +589,10 @@ The origin Pi session shows its active run in the workflow widget. The extension
 renders each bounded server session snapshot immediately. It does not wait for
 complete step, trace, session, settings, follow-up, or update history, and it
 does not hydrate large run content for this compact view. Detailed clients load
-that data through the shared protocol only when they need it. `Shift+Up` and
+that data through the shared protocol only when they need it. The snapshot
+carries a bounded window of node rows. Scrolling past an edge of that window
+moves the live session subscription with `view.session.window`, so the widget
+shows the adjacent window instead of the complete topology. `Shift+Up` and
 `Shift+Down` scroll the widget by default; see
 [Widget scroll shortcuts](#widget-scroll-shortcuts) to remap or remove them. A
 sent step message is open only while its
@@ -650,7 +653,9 @@ modifiers and uses `up` and `down` renders as one label, which for the keys abov
 is `ctrl+alt+↑/↓ scroll`, and the default pair renders as `shift+↑/↓ scroll`.
 Other pairs are listed in full, for example `ctrl+up · alt+down`. The segment is
 omitted when both directions are off. The extension reads the file when it
-loads, so run `/reload` after a change.
+loads, so run `/reload` after a change. Scrolling down at the last loaded node
+asks the server for the next node window, and scrolling up at the first loaded
+node asks for the previous one.
 
 The reason this file exists is another package that also uses `shift+up` or
 `shift+down`, such as `pi-background-tasks`. Remap or remove those two keys here

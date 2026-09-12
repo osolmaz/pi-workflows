@@ -17,9 +17,21 @@ export class SessionWorkflowView {
   private visible = false;
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
+  private pageNodes: ((cursor: number | null) => void) | undefined;
+  /** Window the widget already asked for, so repeated key presses ask once. */
+  private requestedNodeCursor: number | null = null;
 
   /** `scrollHint` is the effective scroll key label resolved from the configuration file. */
   constructor(private readonly scrollHint?: string) {}
+
+  /**
+   * Serve a node window that starts at `cursor`. The session view holds one
+   * bounded window, so scrolling past an edge asks the server for the adjacent
+   * window instead of keeping the complete node history.
+   */
+  setNodePager(pageNodes: (cursor: number | null) => void): void {
+    this.pageNodes = pageNodes;
+  }
 
   update(session: WorkflowSessionView, ctx: ExtensionContext): void {
     const run = session.run;
@@ -33,6 +45,8 @@ export class SessionWorkflowView {
     if (previousRun?.runId !== run.runId || this.focus !== focus) {
       this.scroll = null;
       this.focus = focus;
+      // A new run follows its own focus again, so the next request is new too.
+      if (previousRun?.runId !== run.runId) this.requestedNodeCursor = null;
     }
     this.session = session;
     this.staleReason = null;
@@ -83,9 +97,32 @@ export class SessionWorkflowView {
   }
 
   private scrollBy(ctx: ExtensionContext, delta: number): void {
-    if (this.session?.run === null || this.session === null) return;
+    const run = this.session?.run;
+    if (this.session === null || run === null || run === undefined) return;
     const current = this.scroll ?? this.shownScroll;
-    this.scroll = Math.max(0, Math.min(this.maxScroll, current + delta));
+    const next = Math.max(0, Math.min(this.maxScroll, current + delta));
+    // Scrolling past an edge of the loaded window asks for the adjacent window.
+    // Down shows the top of the next window, which continues where the last one
+    // ended. Up shows the bottom of the previous window, where the user was.
+    const end = run.nodeStart + run.nodes.length;
+    if (delta > 0 && next >= this.maxScroll && end < run.nodeTotal) {
+      if (this.requestedNodeCursor !== end) {
+        this.requestedNodeCursor = end;
+        this.scroll = 0;
+        this.pageNodes?.(end);
+      }
+      return;
+    }
+    if (delta < 0 && next <= 0 && run.nodeStart > 0) {
+      const start = Math.max(0, run.nodeStart - run.nodes.length);
+      if (this.requestedNodeCursor !== start) {
+        this.requestedNodeCursor = start;
+        this.scroll = Number.MAX_SAFE_INTEGER;
+        this.pageNodes?.(start);
+      }
+      return;
+    }
+    this.scroll = next;
     this.render(ctx);
   }
 

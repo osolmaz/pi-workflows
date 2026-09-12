@@ -75,6 +75,18 @@ const CONTENT_CHUNK_BYTES = 192 * 1024;
 const CONTENT_CACHE_BYTES = 64 * 1024 * 1024;
 const VIEW_CACHE_ITEMS = 64;
 const TERMINAL_VIEW_RETENTION_MS = 60_000;
+/**
+ * Rows of context the widget window keeps above the node it follows. The widget
+ * is about ten lines, so a few earlier rows are enough for orientation.
+ */
+const SESSION_NODE_LEAD = 4;
+/**
+ * Text one session node row may carry. The widget renders one line per node and
+ * truncates it to the terminal width, and the 1 MiB client frame budget is the
+ * external limit that requires this bound. Complete node text stays available
+ * through the detailed run view and its node history.
+ */
+const SESSION_NODE_TEXT_BYTES = 4 * 1024;
 
 export class ServerViewStore {
   private readonly contentRecords = new Map<string, ContentRecord>();
@@ -349,33 +361,45 @@ export class ServerViewStore {
   session(
     sessionId: string,
     coordinator: { epoch: string; active: boolean; branchReportRequired: boolean } | null = null,
+    nodeCursor?: number,
   ): WorkflowSessionView {
     return this.state.readTransaction(() => {
       const activeQueue = this.queue.findSessionReservationView(sessionId);
       const retainedRunId =
         activeQueue === undefined ? this.retainedTerminalRunId(sessionId) : undefined;
       const runId = activeQueue?.runId ?? retainedRunId;
+      // Selection is one metadata read. The key must name the exact message,
+      // because a status or entry change can land in the same millisecond as the
+      // write that made it current, and then the aggregate facts stay equal.
+      const selected = this.currentWorkflowMessageSummary(sessionId);
       const version = [
         runId ?? "-",
         runId === undefined ? "-" : this.runVersion(runId),
         this.pendingSessionRevision(sessionId),
         this.sessionMessageRevision(sessionId),
+        selected === undefined || runId === undefined
+          ? "-"
+          : [selected.workflowMessageId, selected.status, selected.piSessionEntryId ?? "-"].join(
+              ":",
+            ),
         this.openTurnRevision(sessionId),
         coordinator?.epoch ?? "-",
         coordinator?.active === true ? "active" : "idle",
         coordinator?.branchReportRequired === true ? "report" : "reported",
+        nodeCursor === undefined ? "-" : `${nodeCursor}`,
       ].join("|");
       const cached = this.sessionCache.get(sessionId);
       if (cached?.version === version) {
         refreshCacheEntry(this.sessionCache, sessionId, cached);
         return cached.view;
       }
-      const message = this.currentWorkflowMessage(sessionId);
+      const message =
+        selected === undefined ? undefined : this.workflowMessages.materialize(selected);
       const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
       const view: WorkflowSessionView = {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
-        run: runId === undefined ? null : this.sessionRun(runId),
+        run: runId === undefined ? null : this.sessionRun(runId, nodeCursor),
         interaction: this.currentInteraction(sessionId),
         workflowMessage:
           message === undefined
@@ -499,7 +523,7 @@ export class ServerViewStore {
    * Bounded current run projection for Pi. It carries the semantic facts for the
    * status line and widget and leaves complete history to the detailed view.
    */
-  sessionRun(runId: string): WorkflowSessionRunView | null {
+  sessionRun(runId: string, nodeCursor?: number): WorkflowSessionRunView | null {
     const queue = this.queue.getWorkflowRunView(runId);
     const counts = this.runs.readRunViewCounts(runId);
     if (queue === undefined || counts === null) return null;
@@ -517,7 +541,8 @@ export class ServerViewStore {
     if (loaded === null) return null;
     const state = loaded.state;
     const display = this.projectDisplay(runId, this.display(queue, state));
-    const nodeTotal = Object.keys(nodeRecords(loaded.snapshot)).length;
+    const rows = this.sessionNodeRows(runId, loaded.snapshot, state);
+    const window = boundedNodeWindow(rows, nodeCursor ?? defaultNodeWindowStart(rows, state));
     return {
       schema: SESSION_RUN_VIEW_SCHEMA,
       runId,
@@ -531,9 +556,9 @@ export class ServerViewStore {
       currentNode: state.currentNode ?? null,
       waitingOn: state.waitingOn ?? null,
       error: state.error ?? null,
-      nodes: this.sessionNodeRows(runId, loaded.snapshot, state),
-      nodeStart: 0,
-      nodeTotal,
+      nodes: window.items,
+      nodeStart: window.start,
+      nodeTotal: window.total,
       progressUpdates: sessionProgressUpdates(state.updates ?? []),
       monitorEstimate: toJson(state.outputs.estimate ?? null),
       monitorSchedule: sessionMonitorSchedule(state.updates ?? []),
@@ -608,7 +633,7 @@ export class ServerViewStore {
             : (facts?.lastSettingsChangeNumber ?? null),
         statusDetail:
           nodeId === state.currentNode && typeof state.statusDetail === "string"
-            ? state.statusDetail
+            ? boundNodeText(state.statusDetail)
             : null,
         // The widget shows the current node, or the waiting node while the run
         // is running, as the node it is working on. Both need their start time
@@ -618,10 +643,12 @@ export class ServerViewStore {
             ? (facts?.startedAt ?? null)
             : null,
         durationMs: facts?.durationMs ?? null,
-        error: detail ? this.readAttemptError(facts?.errorHash ?? null) : null,
+        error: detail ? boundNodeText(this.readAttemptError(facts?.errorHash ?? null)) : null,
         humanDecision: sessionHumanDecision(node, state, nodeId),
         summary:
-          nodeId === state.waitingOn && typeof node.summary === "string" ? node.summary : null,
+          nodeId === state.waitingOn && typeof node.summary === "string"
+            ? boundNodeText(node.summary)
+            : null,
         assistantResponse: isAssistantResponseNode(node),
         outcome: state.results[nodeId]?.outcome ?? null,
       });
@@ -1429,7 +1456,7 @@ function sessionHumanDecision(
       : null;
   return {
     audience,
-    summary: current?.summary ?? null,
+    summary: current?.summary === undefined ? null : boundNodeText(current.summary),
     choices,
     choiceValue,
     presentationDigest: current?.presentationDigest ?? null,
@@ -1675,6 +1702,48 @@ export function workflowPageStart(total: number, cursor?: number): number {
 
 function clampCursor(cursor: number, total: number): number {
   return total === 0 ? 0 : Math.min(cursor, total - 1);
+}
+
+/** Text one session node row may carry, bounded by the client frame budget. */
+function boundNodeText(value: string | null): string | null {
+  if (value === null) return null;
+  if (Buffer.byteLength(value, "utf8") <= SESSION_NODE_TEXT_BYTES) return value;
+  return Buffer.from(value, "utf8").subarray(0, SESSION_NODE_TEXT_BYTES).toString("utf8");
+}
+
+/** The window follows the node the widget shows as working, with a little lead. */
+function defaultNodeWindowStart(
+  rows: readonly WorkflowSessionNodeRow[],
+  state: WorkflowRunState,
+): number {
+  const focus = state.currentNode ?? state.waitingOn;
+  const index = focus === undefined ? -1 : rows.findIndex((row) => row.nodeId === focus);
+  return index < 0 ? 0 : Math.max(0, index - SESSION_NODE_LEAD);
+}
+
+/**
+ * Byte- and item-bounded node rows that start at the requested row. Widget
+ * scrolling asks for the row after the last one it holds, so a window always
+ * begins where the caller asked and grows forward.
+ */
+function boundedNodeWindow(
+  rows: readonly WorkflowSessionNodeRow[],
+  start: number,
+): { start: number; total: number; items: WorkflowSessionNodeRow[] } {
+  const total = rows.length;
+  if (total === 0) return { start: 0, total: 0, items: [] };
+  const first = Math.min(Math.max(0, Math.floor(start)), total - 1);
+  const items: WorkflowSessionNodeRow[] = [];
+  let bytes = 0;
+  for (let index = first; index < total && items.length < VIEW_PAGE_ITEMS; index += 1) {
+    const row = rows[index] as WorkflowSessionNodeRow;
+    const rowBytes = Buffer.byteLength(canonicalJson(toJson(row)), "utf8") + 1;
+    // One row always fits, so a single large row cannot stall the window.
+    if (items.length > 0 && bytes + rowBytes > VIEW_PAGE_BYTES) break;
+    bytes += rowBytes;
+    items.push(row);
+  }
+  return { start: first, total, items };
 }
 
 function toJson(value: unknown): JsonValue {

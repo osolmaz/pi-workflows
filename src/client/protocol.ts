@@ -44,6 +44,7 @@ export const CLIENT_OPERATIONS = [
   "view.page",
   "view.content",
   "view.session.watch",
+  "view.session.window",
   "state.status",
   "state.verify",
   "state.backup",

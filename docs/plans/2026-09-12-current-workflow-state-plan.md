@@ -531,6 +531,20 @@ changes the DDL in place, as allowed above.
 Complete message history is reachable through the `workflow_messages` run page. It obeys the same
 item limit, byte budget, and digest-bound content reference rule as every other history page.
 
+### Bounded node window
+
+The session view carries a bounded window of node rows with its first row index and the complete row
+count. Rows are the canonical snapshot order. The default window starts `SESSION_NODE_LEAD` rows
+before the node the widget shows as working, so the widget still shows the context of that node. One
+row's `statusDetail`, `error`, `summary`, and human-decision summary are bounded by
+`SESSION_NODE_TEXT_BYTES`; the complete text stays in the detailed run view.
+
+The widget asks for the adjacent window with `view.session.window`, which moves the node cursor of
+the live session subscription. `null` returns the window to the one that follows the working node.
+The extension resets the cursor when the run changes, so a window never outlives its run. A paged
+window therefore replaces the loaded rows instead of growing them, and no client holds the complete
+topology.
+
 ### Acceptance evidence
 
 | Criterion                                                | Evidence                                                                                                                                                                                                                                      |
@@ -546,6 +560,6 @@ item limit, byte budget, and digest-bound content reference rule as every other 
 | Delivery, reminder, terminal, and follow-up behavior     | The same extension and coordinator tests, with `deliveryCancelled` on the one current message.                                                                                                                                                |
 | Oversized frame cannot close the connection or loop fast | `publishConnection` isolates one subscription; the client re-arms with capped backoff (`RECONNECT_MAX_ATTEMPTS`, 250 ms to 10 s) and reports `reconnect_exhausted`.                                                                           |
 | A stale snapshot renders but cannot authorize            | The extension keeps the last view, adds the `stale` marker, and refuses commands and branch reports for a stale session id.                                                                                                                   |
-| Bounded widget scrolling                                 | The widget adapter rebuilds only current rows; `test/extension.test.ts` widget cases cover focus, scroll, and follow-up pages.                                                                                                                |
+| Bounded widget scrolling                                 | The widget adapter rebuilds only the rows the server sends. `test/server-view.test.ts` pages a 300-node workflow and reaches every node through bounded windows; `test/extension.test.ts` scrolls the widget to the next window; `test/client.test.ts` moves and restores the window through the protocol.                                                                                |
 | One version-1 path, no compatibility code                | `run_patch` is removed from the client schema, the TypeScript client, and the Rust client. No alias or second message path exists.                                                                                                            |
 | Pi core and Pi session schemas unchanged                 | No file outside this repository changed. The extension sends workflow messages through the existing Pi session API.                                                                                                                           |

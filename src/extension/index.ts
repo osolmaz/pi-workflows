@@ -66,6 +66,10 @@ const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const sessionSnapshots = new Map<string, WorkflowSessionView>();
 /** Sessions whose last view is display-only until a fresh snapshot arrives. */
 const staleSessionIds = new Set<string>();
+/** Whether the widget holds a node window the user scrolled to. */
+let sessionPagedWindow = false;
+/** Run the current node window belongs to, so a new run follows its focus again. */
+let sessionWindowRunId: string | null = null;
 // Shortcut configuration problems wait for the first session so the user sees them once.
 let pendingShortcutNotices: string[] = [];
 
@@ -640,6 +644,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     const sessionClient = client;
+    sessionView.setNodePager((cursor) => {
+      if (generation !== sessionGeneration || staleSessionIds.has(sessionId)) return;
+      sessionPagedWindow = true;
+      void sessionClient.setSessionNodeWindow(sessionId, cursor).catch(() => undefined);
+    });
 
     const connectSession = (): void => {
       if (
@@ -688,6 +697,14 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               sessionSubscriptionFailures = 0;
               sessionSubscriptionRetryAt = 0;
               sessionSnapshots.set(sessionId, session);
+              // A paged node window belongs to one run. A different run follows
+              // the node the widget shows as working again.
+              const runId = session.run?.runId ?? null;
+              if (sessionPagedWindow && runId !== sessionWindowRunId) {
+                sessionPagedWindow = false;
+                void sessionClient.setSessionNodeWindow(sessionId, null).catch(() => undefined);
+              }
+              sessionWindowRunId = runId;
               workflowMessages.updateView(session);
               sessionView.update(session, ctx);
               const ownedMessage = session.workflowMessage;
