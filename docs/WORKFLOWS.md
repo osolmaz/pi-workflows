@@ -787,6 +787,7 @@ step id, attempt id, durable request id, and expected output shape:
 ---
 Workflow step contract (workflow: autoimplement, step: review, attempt: 6f9d…)
 
+This step is your work now. Nothing else will start it, so do not sleep or poll for another step.
 Complete this step by calling the `workflow` tool exactly once with:
 {"action": "submit", "requestId": "request-EXACT_ID_FROM_CONTRACT", "output": <your result>}
 Expected output: { "route": "clean" | "issues_found", "reason": "short justification" }
@@ -801,9 +802,12 @@ wrong-kind, or other-session request is rejected, as is output that fails
 `validate`. The server never selects the oldest pending request.
 Acceptance resolves the step and the engine advances. In an interactive Pi
 session, each agent prompt arrives as a `pi-workflows-step` custom message
-with `triggerTurn: true`. The model receives the complete prompt, while the
-conversation shows a compact workflow and node card. Expanding tool output with
-Ctrl+O shows the exact contract and full prompt. Step messages with reason `resumed` use the same card and keep the active attempt ID.
+with `triggerTurn: true`. The coordinator sends a step only while Pi is idle, so
+a pending step starts a new model turn and the model ends its current turn
+instead of sleeping or polling for it. The model receives the complete prompt,
+while the conversation shows a compact workflow and node card. Expanding tool
+output with Ctrl+O shows the exact contract and full prompt. Step messages with
+reason `resumed` use the same card and keep the active attempt ID.
 
 Headless RPC execution receives the same complete prompt without TUI metadata.
 Workflow notifications use a custom message with `triggerTurn: false`, so a
