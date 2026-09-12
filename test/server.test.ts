@@ -9,6 +9,7 @@ import { WorkflowClient } from "../src/client/client.js";
 import {
   encodeProtocolLine,
   maxSocketPathBytes,
+  NdjsonFrameDecoder,
   parseClientMessage,
   type ClientRequest,
   type ClientResponse,
@@ -902,8 +903,73 @@ describe("global workflow server", () => {
       const publishing = privateServer.publishConnection(connection);
       await waitUntil(() => write.mock.calls.length === 1, 5_000);
       expect(connection.publishing).toBe(true);
+      // A change that arrives during a pass queues another pass. It publishes
+      // nothing while the snapshot digest stays the same.
       await privateServer.publishConnection(connection);
       expect(write).toHaveBeenCalledTimes(1);
+      socket.emit("drain");
+      await publishing;
+      expect(connection.publishing).toBe(false);
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      socket.destroy();
+      await server.stop();
+    }
+  });
+
+  it("publishes the asked node window after a pass already running", async () => {
+    const databasePath = path.join(await makeTempDir("server-view-window-queue"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
+    const socket = new net.Socket();
+    const frames: unknown[] = [];
+    const decoder = new NdjsonFrameDecoder();
+    // Backpressure keeps the first pass in flight while the window request
+    // arrives, which is the case a poll tick must not be responsible for.
+    const write = vi.spyOn(socket, "write").mockImplementation((chunk: string | Uint8Array) => {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+      for (const frame of decoder.push(bytes)) frames.push(parseClientMessage(frame));
+      return false;
+    });
+    const subscription = {
+      id: "session-window",
+      kind: "session" as const,
+      revision: 0,
+      target: "session-window-queue",
+      nodeCursor: undefined as number | undefined,
+    };
+    const connection = {
+      id: "window-viewer",
+      socket,
+      subscriptions: new Map([[subscription.id, subscription]]),
+      publishing: false,
+      publishQueued: false,
+    };
+    const privateServer = server as unknown as {
+      publishConnection: (target: typeof connection) => Promise<void>;
+      views: { session: (target: string, coordinator: unknown, cursor?: number) => unknown };
+    };
+    privateServer.views = {
+      session: (_target: string, _coordinator: unknown, cursor?: number) => ({
+        nodeStart: cursor ?? 0,
+      }),
+    };
+    try {
+      const publishing = privateServer.publishConnection(connection);
+      await waitUntil(() => write.mock.calls.length === 1, 5_000);
+      expect(connection.publishing).toBe(true);
+      // The widget asks for another window while that pass is still writing.
+      subscription.nodeCursor = 3;
+      await privateServer.publishConnection(connection);
+      socket.emit("drain");
+      await waitUntil(
+        () =>
+          frames.some((frame) => {
+            const event = frame as { type?: unknown; payload?: { nodeStart?: unknown } };
+            return event.type === "event" && event.payload?.nodeStart === 3;
+          }),
+        5_000,
+      );
       socket.emit("drain");
       await publishing;
       expect(connection.publishing).toBe(false);

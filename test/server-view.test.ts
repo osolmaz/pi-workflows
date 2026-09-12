@@ -1594,6 +1594,64 @@ describe("current session state", () => {
     60_000,
   );
 
+  it("reports a node whose leftover unfinished attempt was superseded", async () => {
+    const projectPath = await makeTempDir("superseded-project");
+    const databasePath = path.join(await makeTempDir("superseded-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-superseded-attempt";
+    const sessionId = "session-superseded-attempt";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "superseded" },
+      runnerId: "superseded",
+      claimToken: "claim-superseded",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    // A crash can leave an unfinished attempt row behind while a later attempt of
+    // the same node succeeds. The node then reports its newest attempt.
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, finished_at, created_at, updated_at) VALUES
+         ('superseded-stale', ?, 'reply', 1, 'agent', 'running', 1000, NULL, 1000, 1000),
+         ('superseded-done', ?, 'reply', 2, 'agent', 'completed', 2000, 2100, 2000, 2100)`,
+      )
+      .run(runId, runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-superseded"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    const reply = run.nodes.find((row) => row.nodeId === "reply");
+    expect(reply?.attempts).toBe(2);
+    expect(reply?.state).toBe("ok");
+    expect(reply?.startedAt).toBeNull();
+    state.close();
+  }, 60_000);
+
   it("keeps a cancelled step current until Pi confirms its delivery", async () => {
     const projectPath = await makeTempDir("cancelled-delivery-project");
     const databasePath = path.join(await makeTempDir("cancelled-delivery-state"), "state.sqlite");

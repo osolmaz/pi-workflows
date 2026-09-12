@@ -633,6 +633,12 @@ export class ServerViewStore {
       }
       if (isActiveAttemptStatus(attempt.status)) facts.activeStatus = attempt.status;
       else {
+        // Attempts are ordered by number, so a finished attempt means no earlier
+        // attempt is still active. A leftover unfinished row from a superseded
+        // attempt must not report the node as working after a later attempt
+        // succeeded.
+        facts.activeStatus = null;
+        facts.startedAt = null;
         facts.lastStatus = attempt.status;
         facts.errorHash = attempt.errorHash;
       }

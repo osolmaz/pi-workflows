@@ -198,6 +198,8 @@ type ClientConnection = {
   socket: Socket;
   subscriptions: Map<string, ClientSubscription>;
   publishing: boolean;
+  /** Set when a change must publish after the pass that is already running. */
+  publishQueued: boolean;
 };
 
 type SessionCoordinator = {
@@ -581,6 +583,7 @@ export class WorkflowServer {
       socket,
       subscriptions: new Map(),
       publishing: false,
+      publishQueued: false,
     };
     this.connections.set(socket, connection);
     socket.write(
@@ -1276,18 +1279,27 @@ export class WorkflowServer {
   }
 
   private async publishConnection(connection: ClientConnection): Promise<void> {
+    // A change that arrives while a pass runs must publish too, or an explicit
+    // request would wait for the next poll tick to reach its client. The running
+    // pass therefore repeats until no further pass was asked for.
+    connection.publishQueued = true;
     if (connection.publishing || connection.socket.destroyed) return;
     connection.publishing = true;
     try {
-      for (const subscription of connection.subscriptions.values()) {
-        // One failed projection fails only its own subscription. The connection
-        // stays open, and the client decides when to ask again.
-        try {
-          await this.publishSubscription(connection, subscription);
-        } catch (error) {
-          connection.subscriptions.delete(subscription.id);
-          this.log(`client view error for subscription ${subscription.id}: ${errorMessage(error)}`);
-          this.failSubscription(connection, subscription.id, errorMessage(error));
+      while (connection.publishQueued && !connection.socket.destroyed) {
+        connection.publishQueued = false;
+        for (const subscription of connection.subscriptions.values()) {
+          // One failed projection fails only its own subscription. The connection
+          // stays open, and the client decides when to ask again.
+          try {
+            await this.publishSubscription(connection, subscription);
+          } catch (error) {
+            connection.subscriptions.delete(subscription.id);
+            this.log(
+              `client view error for subscription ${subscription.id}: ${errorMessage(error)}`,
+            );
+            this.failSubscription(connection, subscription.id, errorMessage(error));
+          }
         }
       }
     } finally {
