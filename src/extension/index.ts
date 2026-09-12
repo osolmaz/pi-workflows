@@ -504,6 +504,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     label: "Workflow",
     description: [
       "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete hosted workflow runs.",
+      "A pending step starts a new model turn after your current turn ends. After you start a run, end your turn so the step can be delivered. Do not sleep, poll, or wait for a step inside your turn.",
       "Protected human decisions cannot be answered with this model-facing tool.",
       "When the user asks to continue or resume the active workflow, call workflow resume immediately.",
       "Use update or submit only when a workflow step contract asks for it, and pass its exact requestId.",
@@ -845,7 +846,7 @@ async function executeCommand(
         },
       });
       return {
-        message: `Created hosted workflow ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract.`,
+        message: `Created hosted workflow ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract. The first step arrives as a new model turn. End this turn now so it can be delivered, and do not wait for it inside this turn.`,
         details: { action: "start", runId, response: response.receipt ?? null },
       };
     }

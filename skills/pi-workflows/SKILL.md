@@ -27,6 +27,8 @@ When the user asks to continue or resume the active workflow, call `workflow` wi
 
 Use `start` only once for one requested run. Before starting, load the matching workflow skill when one exists and build its complete input. Include scope, authority, constraints, identifiers, and finish criteria required by that skill. Do not start with placeholders that still need user or model repair.
 
+After the start call, end your turn. The first step arrives as a new model turn, so do not wait for it inside your current turn.
+
 For a workflow without a specialized skill, inspect its input contract and make one complete call. For example:
 
 ```json

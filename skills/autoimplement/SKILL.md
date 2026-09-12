@@ -10,6 +10,8 @@ compatibility: Requires Pi Workflows and the built-in autoimplement workflow.
 
 Use the built-in `autoimplement` workflow when it is available. At top level, list workflows, build the complete input, and start `autoimplement` once. Do not start with a partial input and repair it in later turns.
 
+After the start call, end your turn. The first step arrives as a new model turn.
+
 Build the input as follows:
 
 - `task`: Preserve the user's requested end state.

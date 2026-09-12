@@ -1917,6 +1917,7 @@ export function appendStepContract(prompt: string, contract: AgentStepContract):
     "",
     "While this step is active, you may publish non-completing updates with:",
     `{"action": "update", "requestId": ${JSON.stringify(requestId)}, "update": {"type": "...", "key": "...", "data": {...}}}`,
+    "This step is your work now. Nothing else will start it, so do not sleep or poll for another step.",
     "Complete this step by calling the `workflow` tool exactly once with:",
     `{"action": "submit", "requestId": ${JSON.stringify(requestId)}, "output": <your result>}`,
     `Expected output: ${typeof expectedOutput === "string" ? expectedOutput : "a JSON object with your result"}`,
