@@ -55,7 +55,6 @@ const OUTCOMES: &[&str] = &[
 const EVENTS: &[&str] = &[
     "runs",
     "run_snapshot",
-    "run_patch",
     "run_page",
     "session_snapshot",
     "unavailable",
@@ -293,15 +292,6 @@ pub enum PageKind {
     Settings,
     FollowUps,
     Updates,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TargetPatch {
-    #[serde(rename = "targetType")]
-    pub target_type: String,
-    #[serde(rename = "targetKey")]
-    pub target_key: String,
-    pub patch: Vec<PatchOp>,
 }
 
 /// RFC 6902 ops we use, plus `append` (add a batch of items to an array).

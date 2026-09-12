@@ -2,8 +2,7 @@
 
 use crate::layout::{layout_graph, GraphLayout};
 use crate::protocol::{
-    apply_patch, encode_request, parse_server_message, ClientRequest, PageKind, ServerMessage,
-    TargetPatch, PROTOCOL_ID,
+    encode_request, parse_server_message, ClientRequest, PageKind, ServerMessage, PROTOCOL_ID,
 };
 use crate::state::types::{
     as_artifact_ref, ArtifactRef, DefinitionSnapshot, Manifest, RunState, StepRecord,
@@ -431,59 +430,6 @@ fn referenced_content(
     }
 }
 
-fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<()> {
-    let mut next = view.clone();
-    for target in targets {
-        if target.target_key.ends_with(":tail") {
-            let pointer = if target.target_type == "timeline" {
-                if target.target_key.starts_with("session:") {
-                    "/session/eventPage"
-                } else {
-                    "/tracePage"
-                }
-            } else if target.target_key.starts_with("entries:") {
-                "/session/entryPage"
-            } else {
-                "/session/eventPage"
-            };
-            if next.pointer(pointer).is_none_or(|page| !is_tail_page(page)) {
-                continue;
-            }
-        }
-        let document = match target.target_type.as_str() {
-            "timeline" if target.target_key.starts_with("session:") => {
-                next.pointer_mut("/session/eventPage")
-            }
-            "timeline" => next.pointer_mut("/tracePage"),
-            "conversation" if target.target_key.starts_with("entries:") => {
-                next.pointer_mut("/session/entryPage")
-            }
-            "conversation" if target.target_key.starts_with("events:") => {
-                next.pointer_mut("/session/eventPage")
-            }
-            "conversation" => next.pointer_mut("/session"),
-            "summary" | "graph" | "replay" | "inspector" => Some(&mut next),
-            _ => None,
-        }
-        .with_context(|| format!("projection target is not loaded: {}", target.target_key))?;
-        apply_patch(document, &target.patch).map_err(anyhow::Error::msg)?;
-    }
-    *view = next;
-    Ok(())
-}
-
-fn is_tail_page(page: &Value) -> bool {
-    let Some(start) = page.get("start").and_then(Value::as_u64) else {
-        return false;
-    };
-    let Some(total) = page.get("total").and_then(Value::as_u64) else {
-        return false;
-    };
-    let Some(items) = page.get("items").and_then(Value::as_array) else {
-        return false;
-    };
-    start.saturating_add(items.len() as u64) == total
-}
 
 #[derive(Debug, Clone)]
 enum ArtifactEntry {
@@ -1048,27 +994,6 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
                     event.payload,
                 );
             }
-            "run_patch" => {
-                let Some(run_id) = event.run_id else {
-                    return Ok(());
-                };
-                let targets: Vec<TargetPatch> = serde_json::from_value(event.payload)?;
-                let mut state = shared.lock().unwrap();
-                if let Some((event_revision, view_revision, generation, view)) =
-                    state.raw_views.get_mut(&run_id)
-                {
-                    if event.revision == Some(*event_revision + 1)
-                        && apply_target_patches(view, &targets).is_ok()
-                    {
-                        *event_revision += 1;
-                        *view_revision = view
-                            .get("revision")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(view_revision.saturating_add(1));
-                        *generation = generation.wrapping_add(1);
-                    }
-                }
-            }
             _ => {}
         },
         ServerMessage::Response(response) => {
@@ -1446,7 +1371,7 @@ fn page_name(kind: PageKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::PatchOp;
+    use crate::protocol::{apply_patch, PatchOp};
     use crate::render::{render_graph, render_graph_lines, GraphNodeStyle, GraphView};
 
     fn ready(outcome: DecodeOutcome) -> RemoteView {
@@ -2444,24 +2369,5 @@ mod tests {
             assert!(!requested);
             assert!(state.error.is_none());
         }
-    }
-
-    #[test]
-    fn a_bad_patch_keeps_the_last_good_view() {
-        let mut view = json!({"presentationRevision":1});
-        let before = view.clone();
-        let result = apply_target_patches(
-            &mut view,
-            &[TargetPatch {
-                target_type: "graph".to_string(),
-                target_key: String::new(),
-                patch: vec![PatchOp::Replace {
-                    path: "/missing/value".to_string(),
-                    value: json!(2),
-                }],
-            }],
-        );
-        assert!(result.is_err());
-        assert_eq!(view, before);
     }
 }
