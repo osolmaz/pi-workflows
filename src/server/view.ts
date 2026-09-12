@@ -453,6 +453,17 @@ export class ServerViewStore {
     for (const message of [...messages].reverse()) {
       if (message.status === "sent" && this.needsPiWork(message)) return message;
     }
+    // A cancelled step whose delivery Pi has not confirmed stays current, so the
+    // extension can stop the turn it already started from that message. Once Pi
+    // reports a turn, the delivery is reconciled and the message stops being
+    // current.
+    for (const message of [...messages].reverse()) {
+      if (message.kind !== "step" || !this.hasCancelledSource(message)) continue;
+      if (this.workflowMessages.latestTurnForMessage(message.workflowMessageId) !== undefined) {
+        continue;
+      }
+      return message;
+    }
     // A retained terminal message stays current until its delivery or first turn finishes.
     const retainedRunId = this.retainedTerminalRunId(sessionId);
     if (retainedRunId !== undefined) {
@@ -1811,10 +1822,15 @@ function boundedNodeWindow(
     // A row must fit by itself, or the window would never move past it. A row
     // whose own identity exceeds the budget is left out, and the window starts at
     // the next row instead, so one long node id cannot break the frame the client
-    // needs. Complete node history stays in the detailed run view.
+    // needs. A window that already holds rows stops here, so its rows stay
+    // contiguous and the next cursor is exact. Complete node history stays in the
+    // detailed run view.
     if (rowBytes > VIEW_PAGE_BYTES) {
-      if (items.length === 0) windowStart = index + 1;
-      continue;
+      if (items.length === 0) {
+        windowStart = index + 1;
+        continue;
+      }
+      break;
     }
     if (items.length > 0 && bytes + rowBytes > VIEW_PAGE_BYTES) break;
     bytes += rowBytes;
