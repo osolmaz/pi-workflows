@@ -1103,6 +1103,82 @@ describe("current session state", () => {
     expect(reachable).toHaveLength(nodeCount);
     expect(new Set(reachable).size).toBe(nodeCount);
     expect(reachable).toContain(failedNodeId);
+    // A run stops at its first failure, so this run holds one bad result.
+    const results = runs.readRunState("run-node-window")?.results ?? {};
+    expect(Object.values(results).filter((result) => result.outcome !== "ok")).toHaveLength(1);
+    state.close();
+  }, 60_000);
+
+  it("opens a node window on the end of a run that has no working node", async () => {
+    const projectPath = await makeTempDir("node-tail-project");
+    const databasePath = path.join(await makeTempDir("node-tail-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const nodeCount = 300;
+    const nodeIds = Array.from(
+      { length: nodeCount },
+      (_value, index) => `node-${String(index).padStart(3, "0")}`,
+    );
+    const workflow = defineWorkflow({
+      name: "node-tail-window",
+      startAt: nodeIds[0] ?? "node-000",
+      maxSteps: nodeCount + 2,
+      nodes: Object.fromEntries(
+        nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+      ),
+      edges: nodeIds.slice(1).map((nodeId, index) => ({
+        from: nodeIds[index] ?? "node-000",
+        to: nodeId,
+      })),
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-node-tail",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:node-tail-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-tail-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-tail",
+      claimToken: "claim-node-tail",
+      leaseMs: 60_000,
+      originSessionId: "session-node-tail",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-node-tail", "claim-node-tail"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      compiled,
+      {},
+      { runId: "run-node-tail" },
+    );
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session("session-node-tail", null).run;
+    if (run === null) throw new Error("session run missing");
+    // This run has no working node, and the widget focuses its last row, so the
+    // first window holds the end of the topology instead of its start.
+    expect(run.nodeTotal).toBe(nodeCount);
+    expect(run.nodeStart).toBe(nodeCount - 5);
+    expect(run.nodes.map((row) => row.nodeId)).toEqual(nodeIds.slice(-5));
+    state.close();
+    expect(run.nodeStart).toBe(nodeCount - 5);
+    expect(run.nodes.at(-1)?.nodeId).toBe(`node-${nodeCount - 1}`);
+    expect(run.nodes.length).toBeLessThan(10);
     state.close();
   }, 60_000);
 

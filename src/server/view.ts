@@ -540,9 +540,13 @@ export class ServerViewStore {
     });
     if (loaded === null) return null;
     const state = loaded.state;
+    const failureNodeId = this.sessionFailureNodeId(state);
     const display = this.projectDisplay(runId, this.display(queue, state));
-    const rows = this.sessionNodeRows(runId, loaded.snapshot, state);
-    const window = boundedNodeWindow(rows, nodeCursor ?? defaultNodeWindowStart(rows, state));
+    const rows = this.sessionNodeRows(runId, loaded.snapshot, state, failureNodeId);
+    const window = boundedNodeWindow(
+      rows,
+      nodeCursor ?? defaultNodeWindowStart(rows, state, failureNodeId),
+    );
     return {
       schema: SESSION_RUN_VIEW_SCHEMA,
       runId,
@@ -576,6 +580,7 @@ export class ServerViewStore {
     runId: string,
     snapshot: unknown,
     state: WorkflowRunState,
+    failureNodeId: string | undefined,
   ): WorkflowSessionNodeRow[] {
     const attempts = this.state.connection
       .prepare(
@@ -615,7 +620,7 @@ export class ServerViewStore {
       byNode.set(attempt.nodeId, facts);
     }
     const records = nodeRecords(snapshot);
-    const failure = this.sessionFailureNodeId(state);
+    const failure = failureNodeId;
     const rows: WorkflowSessionNodeRow[] = [];
     for (const [nodeId, node] of Object.entries(records)) {
       const facts = byNode.get(nodeId);
@@ -663,11 +668,13 @@ export class ServerViewStore {
     return blob.content.toString("utf8").slice(0, 512);
   }
 
+  /** The last node that did not finish cleanly, in completion order. */
   private sessionFailureNodeId(state: WorkflowRunState): string | undefined {
+    let failed: string | undefined;
     for (const [nodeId, result] of Object.entries(state.results)) {
-      if (result.outcome !== "ok") return nodeId;
+      if (result.outcome !== "ok") failed = nodeId;
     }
-    return undefined;
+    return failed;
   }
 
   clearTerminal(sessionId: string, runId?: string, now: number = Date.now()): string | null {
@@ -1714,12 +1721,24 @@ function boundNodeText(value: string | null): string | null {
   return Buffer.from(value, "utf8").subarray(0, SESSION_NODE_TEXT_BYTES).toString("utf8");
 }
 
-/** The window follows the node the widget shows as working, with a little lead. */
+/**
+ * The window follows the node the widget shows as working, with a little lead.
+ * A run with no working node shows the node that carries the failure the widget
+ * highlights, or its end, so the useful rows are in the first window.
+ */
 function defaultNodeWindowStart(
   rows: readonly WorkflowSessionNodeRow[],
   state: WorkflowRunState,
+  failureNodeId?: string,
 ): number {
-  const focus = state.currentNode ?? state.waitingOn;
+  // The widget projects the same rows, so a row that reports work is the row it
+  // shows as working even when the run state itself carries no working node.
+  let rowFocus: string | undefined;
+  for (const row of rows) {
+    if (row.state === "running" || row.state === "waiting") rowFocus = row.nodeId;
+  }
+  const focus =
+    state.currentNode ?? state.waitingOn ?? rowFocus ?? failureNodeId ?? rows.at(-1)?.nodeId;
   const index = focus === undefined ? -1 : rows.findIndex((row) => row.nodeId === focus);
   return index < 0 ? 0 : Math.max(0, index - SESSION_NODE_LEAD);
 }
