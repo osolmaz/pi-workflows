@@ -163,6 +163,7 @@ function makePi(options: {
 async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
   testHome = await makeTempDir("pi-workflows-hosted-extension-home");
   vi.stubEnv("HOME", testHome);
+  vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", shortcutsConfigDir());
   const cwd = await makeTempDir("pi-workflows-hosted-extension-project");
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
@@ -181,6 +182,67 @@ export default defineWorkflow({
 });\n`,
   );
   return { cwd, workflowPath };
+}
+
+/** Shortcut configuration lives in the stubbed temp config directory, never the real one. */
+function shortcutsConfigDir(): string {
+  if (testHome === undefined) throw new Error("the test home directory is not configured");
+  return path.join(testHome, "pi-workflows-config");
+}
+
+function shortcutsConfigPath(): string {
+  return path.join(shortcutsConfigDir(), "shortcuts.json");
+}
+
+async function writeShortcutsConfig(config: Record<string, unknown>): Promise<string> {
+  await fs.mkdir(shortcutsConfigDir(), { recursive: true });
+  const filePath = shortcutsConfigPath();
+  await fs.writeFile(filePath, JSON.stringify({ schema: "pi-workflows.shortcuts.v1", ...config }));
+  return filePath;
+}
+
+function renderedWidget(fake: ReturnType<typeof makePi>): string {
+  const widget = fake.widgets.findLast((value) => typeof value === "function") as
+    | ((tui: unknown, theme: unknown) => { render: (width: number) => string[] })
+    | undefined;
+  if (widget === undefined) throw new Error("no widget was rendered");
+  return widget(undefined, {
+    bold: (text: string) => text,
+    fg: (_color: string, text: string) => text,
+  })
+    .render(80)
+    .join("\n");
+}
+
+/** Eleven nodes overflow the widget window, so the scroll keys change what is visible. */
+async function writeTallWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "tall.workflow.ts");
+  const nodeLines = Array.from(
+    { length: 10 },
+    (_value, index) => `    n${index}: compute({ run: () => ${index} }),`,
+  ).join("\n");
+  const edgeLines = Array.from(
+    { length: 10 },
+    (_value, index) => `    { from: "${index === 0 ? "ask" : `n${index - 1}`}", to: "n${index}" },`,
+  ).join("\n");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "hosted-tall",
+  startAt: "ask",
+  nodes: {
+    ask: agent({ prompt: () => "Return a result." }),
+${nodeLines}
+  },
+  edges: [
+${edgeLines}
+  ],
+});\n`,
+  );
+  return workflowPath;
 }
 
 async function writeValidatedWorkflow(cwd: string): Promise<string> {
@@ -1454,5 +1516,94 @@ export default defineResourceManager({
     expect(restarted.sent).toEqual([]);
     expect(branch).toHaveLength(1);
     await restarted.emit("session_shutdown");
+  }, 60_000);
+
+  it("registers the default scroll shortcuts when no shortcuts file exists", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+
+    expect([...fake.shortcuts.keys()]).toEqual(["ctrl+shift+r", "shift+up", "shift+down"]);
+  });
+
+  it("registers only the configured scroll keys", async () => {
+    const { cwd } = await setupProject();
+
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    expect([...makePi({ cwd }).shortcuts.keys()]).toEqual([
+      "ctrl+shift+r",
+      "ctrl+alt+up",
+      "ctrl+alt+down",
+    ]);
+
+    await writeShortcutsConfig({ scrollUp: null, scrollDown: null });
+    expect([...makePi({ cwd }).shortcuts.keys()]).toEqual(["ctrl+shift+r"]);
+
+    await writeShortcutsConfig({ scrollUp: "ctrl+up", scrollDown: "ctrl+up" });
+    expect([...makePi({ cwd }).shortcuts.keys()]).toEqual(["ctrl+shift+r", "ctrl+up"]);
+
+    await writeShortcutsConfig({ scrollUp: "ctrl+shift+r", scrollDown: "ctrl+alt+down" });
+    expect([...makePi({ cwd }).shortcuts.keys()]).toEqual(["ctrl+shift+r", "ctrl+alt+down"]);
+  });
+
+  it("warns once about an unusable shortcuts file and registers nothing for it", async () => {
+    const { cwd } = await setupProject();
+    const configPath = await writeShortcutsConfig({ scrollUp: "meta+up" });
+    const fake = makePi({ cwd });
+    expect([...fake.shortcuts.keys()]).toEqual(["ctrl+shift+r", "shift+down"]);
+
+    await fake.emit("session_start");
+
+    const warnings = fake.notifications.filter((notice) =>
+      notice.message.includes("shortcuts.json"),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.level).toBe("warning");
+    expect(warnings[0]?.message).toContain(configPath);
+    expect(warnings[0]?.message).toContain('"meta+up"');
+
+    await fake.emit("session_start");
+    expect(
+      fake.notifications.filter((notice) => notice.message.includes("shortcuts.json")),
+    ).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("stays quiet for a usable shortcuts file", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const fake = makePi({ cwd });
+
+    await fake.emit("session_start");
+
+    expect(
+      fake.notifications.filter((notice) => notice.message.includes("shortcuts.json")),
+    ).toEqual([]);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("binds the configured scroll key to the widget window and shows the same keys", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const workflowPath = await writeTallWorkflow(cwd);
+    const fake = makePi({ cwd });
+    expect([...fake.shortcuts.keys()]).toEqual(["ctrl+shift+r", "ctrl+alt+up", "ctrl+alt+down"]);
+
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    const rendered = (): string =>
+      fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
+    await waitUntil(() => rendered().includes("ctrl+alt+↑/↓ scroll"), 30_000);
+
+    const before = rendered();
+    fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
+    const scrolledUp = rendered();
+    expect(scrolledUp).not.toBe(before);
+    expect(scrolledUp).toContain("ƒ n0");
+
+    fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+    const scrolledBack = rendered();
+    expect(scrolledBack).not.toBe(scrolledUp);
+    expect(scrolledBack).toContain("ƒ n3");
+    await fake.emit("session_shutdown");
   }, 60_000);
 });

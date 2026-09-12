@@ -21,6 +21,9 @@ export class SessionWorkflowView {
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
 
+  /** `scrollHint` is the effective scroll key label resolved from the configuration file. */
+  constructor(private readonly scrollHint?: string) {}
+
   update(session: WorkflowSessionView, ctx: ExtensionContext): void {
     const run = session.run;
     if (
@@ -112,6 +115,7 @@ export class SessionWorkflowView {
         run.display.status,
         run.display.reason,
         run.display.controls,
+        this.scrollHint,
       );
       this.shownScroll = view.scroll;
       this.maxScroll = view.maxScroll;

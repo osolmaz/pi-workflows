@@ -257,6 +257,8 @@ replay, and reconnecting remote viewing. See
 
 Inside Pi, a compact widget above the editor shows one line per workflow node,
 with glyphs for node status and type. Scroll it with `shift+↑` / `shift+↓`.
+Remap or remove those keys with the optional
+[shortcuts file](docs/WORKFLOWS.md#widget-scroll-shortcuts).
 Use `piw` when you need the full boxed graph and its edges.
 
 ## Herdr integration

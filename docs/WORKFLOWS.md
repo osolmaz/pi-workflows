@@ -590,7 +590,9 @@ renders each bounded server session snapshot immediately. It does not wait for
 complete step, trace, session, settings, follow-up, or update history, and it
 does not hydrate large run content for this compact view. Detailed clients load
 that data through the shared protocol only when they need it. `Shift+Up` and
-`Shift+Down` scroll the widget. A sent step message is open only while its
+`Shift+Down` scroll the widget by default; see
+[Widget scroll shortcuts](#widget-scroll-shortcuts) to remap or remove them. A
+sent step message is open only while its
 interaction is pending and its run is not paused. Because public `agent_start`
 has no message payload, any model turn that starts in that state is workflow
 work. If Escape ends that turn with Pi's public `aborted` stop reason, one
@@ -609,6 +611,55 @@ headless RPC bridge offers only `update` and `submit`, so a resource manager chi
 cannot recursively control unrelated runs. ResourceManager code can use its narrow
 `ctx.workflows` methods for child runs, settings, and follow-up records. Those
 methods also commit through the global server.
+
+### Widget scroll shortcuts
+
+The widget registers `Shift+Up` and `Shift+Down` by default. An optional
+`shortcuts.json` file in the extension config directory changes those keys
+without patching the package. The default directory is `~/.config/pi-workflows`,
+where `/workflow-channel` also keeps its `channels.json`; the
+`PI_WORKFLOWS_CONFIG_DIR` environment variable moves both files.
+
+```json
+{
+  "schema": "pi-workflows.shortcuts.v1",
+  "scrollUp": "ctrl+alt+up",
+  "scrollDown": "ctrl+alt+down"
+}
+```
+
+Each field takes one Pi key id: modifiers from `ctrl`, `shift`, `alt`, and
+`super`, joined with `+` before a key name such as `up`, `pageUp`, `j`, or `f5`.
+Modifier order and letter case do not matter. Rules:
+
+- Without the file, both directions keep the default keys.
+- An omitted field keeps its default. `null` leaves that direction
+  unregistered, so both `null` values turn keyboard scrolling off.
+- `ctrl+shift+r` stays reserved for `/piw`.
+- When both fields resolve to the same key, only the scroll-up direction stays
+  registered.
+- A file that is unreadable, is not valid JSON, or lacks the `pi-workflows.shortcuts.v1`
+  schema registers neither direction and warns once per session with the file
+  path.
+- A value that is not a documented `modifier+key` id, or a key reserved for
+  `/piw`, leaves that one direction unregistered and warns once with the value.
+  The other direction keeps its resolved key.
+
+The widget shows the keys in effect in its controls line. A pair that shares its
+modifiers and uses `up` and `down` renders as one label, which for the keys above
+is `ctrl+alt+↑/↓ scroll`, and the default pair renders as `shift+↑/↓ scroll`.
+Other pairs are listed in full, for example `ctrl+up · alt+down`. The segment is
+omitted when both directions are off. The extension reads the file when it
+loads, so run `/reload` after a change.
+
+The reason this file exists is another package that also uses `shift+up` or
+`shift+down`, such as `pi-background-tasks`. Remap or remove those two keys here
+and that package keeps them, so Pi reports no conflict that names pi-workflows.
+Turning both directions off leaves hidden rows out of keyboard reach: the
+controls line keeps showing how many rows are hidden, and `/piw` opens the whole
+run in the viewer. A remapped combination can also fail to reach Pi, for example
+a `super` key in a terminal that does not report the modifier, so prefer keys
+that the terminal sends reliably.
 
 ### Built-in plain summary
 
