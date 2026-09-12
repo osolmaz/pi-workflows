@@ -22,6 +22,7 @@ function followUpMessage(status: "pending" | "sent" = "pending"): WorkflowMessag
     kind: "followUp",
     sourceId: "run-1",
     contentDigest: contentDigestOf(content),
+    triggerTurn: content.triggerTurn,
     order: 1,
     status,
     piSessionEntryId: status === "sent" ? "entry-1" : null,

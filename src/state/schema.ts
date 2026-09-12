@@ -541,6 +541,8 @@ CREATE TABLE workflow_messages (
   kind TEXT NOT NULL CHECK (kind IN ('step', 'decision', 'notification', 'terminal', 'followUp')),
   source_id TEXT NOT NULL,
   content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  -- Mirrored from the content so message selection never reads every content blob.
+  trigger_turn INTEGER NOT NULL CHECK (trigger_turn IN (0, 1)),
   order_number INTEGER NOT NULL CHECK (order_number > 0),
   status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'cancelled')),
   pi_session_entry_id TEXT,

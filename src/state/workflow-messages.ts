@@ -21,15 +21,24 @@ export type WorkflowMessageContent = {
   triggerTurn: boolean;
 };
 
-export type WorkflowMessage = {
+export type WorkflowMessage = WorkflowMessageSummary & {
   schema: typeof WORKFLOW_MESSAGE_SCHEMA;
+  content: WorkflowMessageContent;
+};
+
+/**
+ * One workflow message without its content. Selection and page reads use these
+ * rows so a long session never loads every stored content blob.
+ */
+export type WorkflowMessageSummary = {
   workflowMessageId: string;
   runId: string;
   targetSessionId: string;
   kind: WorkflowMessageKind;
   sourceId: string;
   contentDigest: string;
-  content: WorkflowMessageContent;
+  /** Mirrored from the content, so selection never reads the blob. */
+  triggerTurn: boolean;
   order: number;
   status: WorkflowMessageStatus;
   piSessionEntryId: string | null;
@@ -73,6 +82,7 @@ type WorkflowMessageRow = {
   kind: WorkflowMessageKind;
   sourceId: string;
   contentHash: Buffer;
+  triggerTurn: number;
   orderNumber: number;
   status: WorkflowMessageStatus;
   piSessionEntryId: string | null;
@@ -122,8 +132,8 @@ export class WorkflowMessageStore {
         .prepare(
           `INSERT INTO workflow_messages(
              workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
-             order_number, status, pi_session_entry_id, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)`,
+             trigger_turn, order_number, status, pi_session_entry_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)`,
         )
         .run(
           workflowMessageId,
@@ -132,6 +142,7 @@ export class WorkflowMessageStore {
           options.kind,
           options.sourceId,
           contentHash,
+          options.content.triggerTurn ? 1 : 0,
           order,
           now,
           now,
@@ -145,7 +156,8 @@ export class WorkflowMessageStore {
       .prepare(
         `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
                 target_session_id AS targetSessionId, kind, source_id AS sourceId,
-                content_hash AS contentHash, order_number AS orderNumber, status,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
                 pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
                 updated_at AS updatedAt
          FROM workflow_messages WHERE workflow_message_id = ?`,
@@ -161,31 +173,83 @@ export class WorkflowMessageStore {
   }
 
   listSession(targetSessionId: string): WorkflowMessage[] {
+    return this.listSessionSummaries(targetSessionId).map((summary) => this.materialize(summary));
+  }
+
+  /** Message metadata for one session, in durable order, without content. */
+  listSessionSummaries(targetSessionId: string): WorkflowMessageSummary[] {
     const rows = this.state.connection
       .prepare(
         `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
                 target_session_id AS targetSessionId, kind, source_id AS sourceId,
-                content_hash AS contentHash, order_number AS orderNumber, status,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
                 pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
                 updated_at AS updatedAt
          FROM workflow_messages WHERE target_session_id = ? ORDER BY order_number`,
       )
       .all(targetSessionId);
-    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessage(row));
+    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));
   }
 
-  listRun(runId: string): WorkflowMessage[] {
+  /** Message metadata count for one run, without reading content. */
+  countForRun(runId: string): number {
+    const row = this.state.connection
+      .prepare("SELECT count(*) AS count FROM workflow_messages WHERE run_id = ?")
+      .get(runId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  /**
+   * A bounded metadata page of one run's messages, without content. The caller
+   * reads content only for the rows it shows.
+   */
+  listRunSummaryPage(
+    runId: string,
+    range: { start: number; limit: number },
+  ): WorkflowMessageSummary[] {
+    if (range.limit <= 0) return [];
     const rows = this.state.connection
       .prepare(
         `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
                 target_session_id AS targetSessionId, kind, source_id AS sourceId,
-                content_hash AS contentHash, order_number AS orderNumber, status,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
+                pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM workflow_messages WHERE run_id = ?
+         ORDER BY target_session_id, order_number LIMIT ? OFFSET ?`,
+      )
+      .all(runId, range.limit, range.start);
+    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));
+  }
+
+  /** Read one message's content by its recorded digest. */
+  materialize(summary: WorkflowMessageSummary): WorkflowMessage {
+    const content = this.state.readJson(Buffer.from(summary.contentDigest, "hex"));
+    if (!isWorkflowMessageContent(content))
+      throw new Error("Stored workflow message content is invalid");
+    return { schema: WORKFLOW_MESSAGE_SCHEMA, ...summary, content };
+  }
+
+  listRun(runId: string): WorkflowMessage[] {
+    return this.listRunSummaries(runId).map((summary) => this.materialize(summary));
+  }
+
+  /** Message metadata for one run, without content. */
+  listRunSummaries(runId: string): WorkflowMessageSummary[] {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
+                target_session_id AS targetSessionId, kind, source_id AS sourceId,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
                 pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
                 updated_at AS updatedAt
          FROM workflow_messages WHERE run_id = ? ORDER BY target_session_id, order_number`,
       )
       .all(runId);
-    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessage(row));
+    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));
   }
 
   latestForSource(kind: WorkflowMessageKind, sourceId: string): WorkflowMessage | undefined {
@@ -193,7 +257,8 @@ export class WorkflowMessageStore {
       .prepare(
         `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
                 target_session_id AS targetSessionId, kind, source_id AS sourceId,
-                content_hash AS contentHash, order_number AS orderNumber, status,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
                 pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
                 updated_at AS updatedAt
          FROM workflow_messages WHERE kind = ? AND source_id = ?
@@ -437,13 +502,20 @@ export class WorkflowMessageStore {
       throw new Error("Stored workflow message content is invalid");
     return {
       schema: WORKFLOW_MESSAGE_SCHEMA,
+      ...this.mapMessageSummary(row),
+      content,
+    };
+  }
+
+  private mapMessageSummary(row: WorkflowMessageRow): WorkflowMessageSummary {
+    return {
       workflowMessageId: row.workflowMessageId,
       runId: row.runId,
       targetSessionId: row.targetSessionId,
       kind: row.kind,
       sourceId: row.sourceId,
       contentDigest: row.contentHash.toString("hex"),
-      content,
+      triggerTurn: row.triggerTurn === 1,
       order: row.orderNumber,
       status: row.status,
       piSessionEntryId: row.piSessionEntryId,
@@ -557,6 +629,7 @@ function isWorkflowMessageRow(value: unknown): value is WorkflowMessageRow {
     isWorkflowMessageKind(value.kind) &&
     typeof value.sourceId === "string" &&
     Buffer.isBuffer(value.contentHash) &&
+    (value.triggerTurn === 0 || value.triggerTurn === 1) &&
     typeof value.orderNumber === "number" &&
     isWorkflowMessageStatus(value.status) &&
     (value.piSessionEntryId === null || typeof value.piSessionEntryId === "string") &&

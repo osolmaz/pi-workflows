@@ -640,7 +640,14 @@ describe("global workflow server", () => {
   });
 
   it("reports a socket path above the operating system limit before it listens", async () => {
-    const databasePath = path.join("/tmp", "p".repeat(maxSocketPathBytes("linux")), "state.sqlite");
+    // The long path stays inside a unique temp directory so this test never
+    // reuses state written by another schema revision.
+    const longComponent = "p".repeat(maxSocketPathBytes("linux"));
+    const databasePath = path.join(
+      await makeTempDir("server-long-path"),
+      longComponent,
+      "state.sqlite",
+    );
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await expect(server.start()).rejects.toThrow(/operating system limit/);
   });

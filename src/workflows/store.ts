@@ -450,6 +450,7 @@ export type WorkflowRunViewCounts = {
   settings: number;
   followUps: number;
   updates: number;
+  workflowMessages: number;
 };
 
 export type WorkflowRunViewRange = {
@@ -2415,6 +2416,7 @@ export class WorkflowRunStore {
          )`,
         runId,
       ),
+      workflowMessages: this.workflowMessages.countForRun(runId),
     };
   }
 
