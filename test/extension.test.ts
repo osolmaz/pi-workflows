@@ -578,10 +578,10 @@ describe("pi-workflows hosted extension", () => {
     const { cwd } = await setupProject();
     let listener: ((event: ClientEvent) => void) | undefined;
     vi.spyOn(WorkflowClient.prototype, "ensureAvailable").mockResolvedValue({
-      schema: "pi-workflows.client.v1",
-      type: "hello",
-      connectionId: "widget-refresh-connection",
-      packageVersion: "test",
+        schema: "pi-workflows.client.v1",
+        type: "hello",
+        connectionId: "widget-refresh-connection",
+        packageVersion: "test",
     });
     vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(
       async (_sessionId, next) => {

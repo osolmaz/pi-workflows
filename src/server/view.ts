@@ -380,13 +380,15 @@ export class ServerViewStore {
       );
       if (open !== undefined) return open;
     }
-    // Oldest delivered message whose delivery or model turn Pi still owes.
-    for (const message of messages) {
-      if (message.status === "sent" && this.needsPiWork(message)) return message;
-    }
-    // Next pending message in durable order that may be delivered now.
+    // Pi first checks whether the next message is already on its branch, then
+    // delivers it. A pending message therefore outranks a delivered one, which
+    // is how a reminder or resumed step replaces its own earlier message.
     for (const message of messages) {
       if (message.status === "pending" && this.isMessageEligible(message)) return message;
+    }
+    // Otherwise Pi keeps the newest delivered message it still owes work for.
+    for (const message of [...messages].reverse()) {
+      if (message.status === "sent" && this.needsPiWork(message)) return message;
     }
     // A retained terminal message stays current until its delivery or first turn finishes.
     const retainedRunId = this.retainedTerminalRunId(sessionId);
@@ -454,12 +456,12 @@ export class ServerViewStore {
   private openTurnRevision(sessionId: string): string {
     const row = this.state.connection
       .prepare(
-        `SELECT count(*) AS count, COALESCE(max(updated_at), 0) AS updatedAt
+        `SELECT count(*) AS count, COALESCE(max(started_at), 0) AS startedAt
          FROM workflow_turns WHERE target_session_id = ? AND state = 'started'`,
       )
       .get(sessionId);
     if (!isObjectRecord(row)) throw new Error("Session turn revision is invalid");
-    return `${row.count}:${row.updatedAt}`;
+    return `${row.count}:${row.startedAt}`;
   }
 
   /**

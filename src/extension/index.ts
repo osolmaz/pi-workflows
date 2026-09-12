@@ -1446,14 +1446,13 @@ function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {
     isRecord(value) &&
     value.schema === "pi-workflows.session-view.v1" &&
     typeof value.sessionId === "string" &&
-    Array.isArray(value.pendingInteractions) &&
-    Array.isArray(value.workflowMessages) &&
-    Array.isArray(value.cancelledWorkflowMessageIds) &&
-    value.cancelledWorkflowMessageIds.every((id) => typeof id === "string") &&
-    typeof value.coordinatorEpoch === "string" &&
+    (value.interaction === null || isRecord(value.interaction)) &&
+    (value.workflowMessage === null || isRecord(value.workflowMessage)) &&
+    (value.openWorkflowTurn === null || isRecord(value.openWorkflowTurn)) &&
+    (value.run === null || isRecord(value.run)) &&
+    (value.coordinatorEpoch === null || typeof value.coordinatorEpoch === "string") &&
     typeof value.coordinatorActive === "boolean" &&
-    typeof value.branchReportRequired === "boolean" &&
-    (value.run === null || isRecord(value.run))
+    typeof value.branchReportRequired === "boolean"
   );
 }
 
