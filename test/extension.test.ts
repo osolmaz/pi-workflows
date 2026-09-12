@@ -14,6 +14,7 @@ import {
 import type { ClientEvent } from "../src/client/protocol.js";
 import type { WorkflowDisplayStatus, WorkflowSessionView } from "../src/client/view.js";
 import piWorkflows from "../src/extension/index.js";
+import { WorkflowMessageCoordinator } from "../src/extension/workflow-message-coordinator.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
@@ -1665,6 +1666,53 @@ export default defineResourceManager({
     expect(rendered()).toMatch(/ƒ n2\d\d/);
     await fake.emit("session_shutdown");
   }, 120_000);
+
+  it("fences workflow delivery when the session subscription is lost", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeValidatedWorkflow(cwd);
+    const fence = vi.spyOn(WorkflowMessageCoordinator.prototype, "fence");
+    const watchSession = WorkflowClient.prototype.watchSession;
+    vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(async function (
+      this: WorkflowClient,
+      sessionId: string,
+      listener: (event: ClientEvent) => void,
+      options?: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number },
+    ) {
+      let dropped = false;
+      return await watchSession.call(
+        this,
+        sessionId,
+        (event) => {
+          listener(event);
+          // One lost subscription: the client keeps its last snapshot for display
+          // and removes the authority to deliver from it.
+          if (dropped || event.event !== "session_snapshot") return;
+          dropped = true;
+          listener({
+            schema: CLIENT_PROTOCOL_SCHEMA,
+            type: "event",
+            subscriptionId: event.subscriptionId,
+            event: "unavailable",
+            payload: {
+              schema: "pi-workflows.subscription-failure.v1",
+              reasonCode: "connection_lost",
+              message: "Workflow server connection is unavailable.",
+            },
+          });
+        },
+        options,
+      );
+    });
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fence.mock.calls.length > 0, 30_000);
+    // The last snapshot stays for display, and no message is delivered from it.
+    await waitUntil(() => fake.widgets.some((value) => typeof value === "function"), 30_000);
+    expect(renderedWidget(fake)).toContain("workflow server-validated");
+    expect(fake.sent).toHaveLength(0);
+    await fake.emit("session_shutdown");
+  }, 60_000);
 
   it("re-arms the session subscription after a failure during the first publish", async () => {
     const { cwd } = await setupProject();

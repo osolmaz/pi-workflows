@@ -1078,6 +1078,84 @@ describe("WorkflowClient", () => {
     }
   });
 
+  it("counts a refused subscription restore toward reconnect exhaustion", async () => {
+    const databasePath = path.join(await makeTempDir("client-restore"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    let connections = 0;
+    let refuseRestores = false;
+    const connectionTimes: number[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      connections += 1;
+      connectionTimes.push(Date.now());
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `restore-${connections}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          const refused = refuseRestores;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              ...(refused
+                ? { outcome: "notFound", error: "Workflow run is not available" }
+                : {
+                    outcome: "accepted",
+                    receipt: { subscribed: true, coordinatorEpoch: "restore-epoch" },
+                  }),
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    const failures: string[] = [];
+    try {
+      await client.watchSession("session-restore", (event) => {
+        if (event.event !== "unavailable") return;
+        const payload = event.payload as { reasonCode?: string };
+        if (typeof payload.reasonCode === "string") failures.push(payload.reasonCode);
+      });
+      // Every later restore is refused, so the client never proves that it holds
+      // its view again. Its reconnect budget must therefore grow instead of
+      // resetting on each successful handshake.
+      refuseRestores = true;
+      const connectionsBefore = connections;
+      sockets.at(-1)?.destroy();
+      const deadline = Date.now() + 20_000;
+      while (connections < connectionsBefore + 4 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(connections).toBeGreaterThanOrEqual(connectionsBefore + 4);
+      expect(failures).toContain("connection_lost");
+      // The reconnect delay grows with each attempt, so a refused restore counts
+      // toward the bounded budget instead of restarting it at the base delay.
+      const gapMs = (connectionTimes.at(-1) ?? 0) - (connectionTimes.at(-2) ?? 0);
+      expect(gapMs).toBeGreaterThan(700);
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
   it("reports a package mismatch without trying to replace the live workflow server", async () => {
     const databasePath = path.join(await makeTempDir("client-version"), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);

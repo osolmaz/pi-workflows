@@ -50,6 +50,12 @@ export class WorkflowMessageCoordinator {
   private view: WorkflowSessionView | null = null;
   private turn: OwnedTurn | null = null;
   private content: PreparedContent | null = null;
+  /**
+   * A lost subscription keeps the last snapshot for display, but it removes
+   * authority: no turn may start, answer, or claim an epoch from that snapshot
+   * until a fresh one arrives.
+   */
+  private fenced = false;
 
   /**
    * Read and verify the current message content. Large content arrives as a
@@ -101,6 +107,8 @@ export class WorkflowMessageCoordinator {
 
   updateView(view: WorkflowSessionView): void {
     this.view = view;
+    // A fresh snapshot proves the subscription and restores the coordinator epoch.
+    this.fenced = false;
     const message = view.workflowMessage;
     if (
       this.turn !== null &&
@@ -180,6 +188,10 @@ export class WorkflowMessageCoordinator {
     // Cancellation must not wait behind an in-flight transport acknowledgment.
     this.abortCancelledTurn(ctx);
     if (this.synchronizing || this.view === null) return;
+    // A subscription failure keeps its snapshot for display only. Starting a
+    // turn, answering a request, or reporting an epoch from it would act on
+    // authority the server no longer grants.
+    if (this.fenced) return;
     this.synchronizing = true;
     try {
       const view = this.view;
@@ -304,6 +316,15 @@ export class WorkflowMessageCoordinator {
     }
   }
 
+  /**
+   * Remove authority from the last view. The extension calls this when its
+   * subscription fails, so a snapshot the server no longer confirms cannot start
+   * a Pi turn or answer a request. A fresh snapshot clears the fence.
+   */
+  fence(): void {
+    this.fenced = true;
+  }
+
   clear(): void {
     this.queued.clear();
     this.closedTurnMessages.clear();
@@ -313,6 +334,7 @@ export class WorkflowMessageCoordinator {
     this.content = null;
     this.lastBranchEpoch = null;
     this.synchronizing = false;
+    this.fenced = false;
   }
 
   abortCancelledTurn(ctx: Pick<ExtensionContext, "isIdle" | "abort">): void {
