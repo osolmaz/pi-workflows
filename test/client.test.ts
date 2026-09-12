@@ -1156,6 +1156,112 @@ describe("WorkflowClient", () => {
     }
   }, 60_000);
 
+  it("keeps the reconnect budget after a view from a partly restored subscription", async () => {
+    const databasePath = path.join(await makeTempDir("client-partial-restore"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    let connections = 0;
+    let refuseSecond = false;
+    const connectionTimes: number[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      connections += 1;
+      connectionTimes.push(Date.now());
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `partial-${connections}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      let restored = 0;
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          const subscriptionId =
+            (message.payload as { subscriptionId?: string }).subscriptionId ?? "partial-unknown";
+          restored += 1;
+          if (restored === 1) {
+            // The first subscription restores and delivers a view, while a later
+            // subscription on the same connection is still refused. That view
+            // must not prove the connection healthy.
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "accepted",
+                receipt: { subscribed: true, coordinatorEpoch: "partial-epoch" },
+              }),
+            );
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "event",
+                subscriptionId,
+                event: "session_snapshot",
+                revision: 1,
+                payload: { sessionId: "session-partial" },
+              }),
+            );
+            continue;
+          }
+          if (!refuseSecond) {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "accepted",
+                receipt: { subscribed: true, coordinatorEpoch: "partial-epoch" },
+              }),
+            );
+            continue;
+          }
+          setTimeout(() => {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "notFound",
+                error: "Workflow run is not available",
+              }),
+            );
+          }, 60);
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    try {
+      await client.watchSession("session-partial", () => undefined);
+      await client.watchRuns(() => undefined);
+      refuseSecond = true;
+      const connectionsBefore = connections;
+      sockets.at(-1)?.destroy();
+      // Every later attempt restores one subscription and then fails the next
+      // one, so the budget must keep growing instead of restarting at the base
+      // delay. Six seconds admit about five bounded attempts.
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      expect(connections - connectionsBefore).toBeLessThanOrEqual(8);
+      const gapMs = (connectionTimes.at(-1) ?? 0) - (connectionTimes.at(-2) ?? 0);
+      expect(gapMs).toBeGreaterThan(700);
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
   it("reports a package mismatch without trying to replace the live workflow server", async () => {
     const databasePath = path.join(await makeTempDir("client-version"), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);

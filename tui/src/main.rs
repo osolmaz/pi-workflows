@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use piw::{server, ui};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
@@ -74,6 +74,35 @@ fn default_socket() -> PathBuf {
     state_directory.join("server").join("server.sock")
 }
 
+/// Operating systems limit one local socket path. Linux allows 107 bytes. macOS and the BSDs use a
+/// 104-byte `sun_path`, so 103 bytes are usable there. A longer path is a blocker, not a slow
+/// connection failure, so report the measured length instead of waiting for a server that can
+/// never listen there.
+fn check_socket_path(socket_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = socket_path;
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = socket_path.as_os_str().as_bytes().len();
+        let limit = if cfg!(target_os = "linux") { 107 } else { 103 };
+        anyhow::ensure!(
+            bytes <= limit,
+            "workflow server socket path is {bytes} bytes, above the {limit}-byte operating system limit: {}",
+            socket_path.display()
+        );
+        return Ok(());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = socket_path;
+        Ok(())
+    }
+}
+
 async fn server_available(socket_path: &PathBuf) -> bool {
     #[cfg(unix)]
     return tokio::net::UnixStream::connect(socket_path).await.is_ok();
@@ -124,6 +153,7 @@ fn main() -> Result<()> {
         }
     }
     let socket_path = default_socket();
+    check_socket_path(&socket_path)?;
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(ensure_server(&socket_path))?;
     match cli.command {
@@ -144,5 +174,20 @@ fn main() -> Result<()> {
                 None => ui::run_local(&socket_path, cli_theme.as_deref()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_a_socket_path_above_the_operating_system_limit() {
+        let limit = if cfg!(target_os = "linux") { 107 } else { 103 };
+        let long = PathBuf::from(format!("/tmp/{}", "a".repeat(limit)));
+        let error = check_socket_path(&long).expect_err("a path above the limit must fail");
+        assert!(error.to_string().contains("operating system limit"));
+        check_socket_path(&PathBuf::from("/tmp/piw.sock")).expect("a short path must pass");
     }
 }
