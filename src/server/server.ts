@@ -28,6 +28,7 @@ import {
   type ClientResponse,
 } from "../client/protocol.js";
 import {
+  BRANCH_REPORT_RECEIPT_SCHEMA,
   WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA,
   type WorkflowBranchReport,
   type WorkflowRunView,
@@ -974,6 +975,17 @@ export class WorkflowServer {
     );
     const messages = this.serverState.workflowMessages.listSession(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
+    // Pi reports one current message. Absent means Pi does not hold it on the
+    // active branch, so the message stays pending and is delivered again.
+    const piSessionEntryId =
+      report.piSessionEntryId !== null && allowed.has(report.workflowMessageId)
+        ? report.piSessionEntryId
+        : null;
+    const present = piSessionEntryId !== null;
+    const entries =
+      piSessionEntryId === null
+        ? []
+        : [{ workflowMessageId: report.workflowMessageId, piSessionEntryId }];
     const reconciledRunIds = new Set<string>();
     this.state.transaction(() => {
       if (coordinator.needsTimerResume) {
@@ -982,8 +994,8 @@ export class WorkflowServer {
       }
       this.serverState.workflowMessages.adoptBranch(
         report.targetSessionId,
-        report.entries,
-        allowed,
+        entries,
+        new Set(entries.map((entry) => entry.workflowMessageId)),
       );
       if (report.isIdle && !report.hasPendingMessages) {
         for (const turn of this.serverState.workflowMessages.openTurnsForSession(
@@ -1001,7 +1013,7 @@ export class WorkflowServer {
             responseSessionEntryId: null,
           });
         }
-        const branchIds = new Set(report.entries.map((entry) => entry.workflowMessageId));
+        const branchIds = new Set(entries.map((entry) => entry.workflowMessageId));
         const refreshed = this.serverState.workflowMessages.listSession(report.targetSessionId);
         for (const interaction of this.serverState.listPendingInteractions(
           report.targetSessionId,
@@ -1029,7 +1041,9 @@ export class WorkflowServer {
     this.views.noteWorkflowActivityChange();
     this.publishViews();
     return clientResponse(request.requestId, "accepted", {
-      recorded: true,
+      schema: BRANCH_REPORT_RECEIPT_SCHEMA,
+      outcome: present ? "present" : "absent",
+      workflowMessageId: report.workflowMessageId,
       coordinatorEpoch: coordinator.epoch,
     });
   }
@@ -1092,7 +1106,7 @@ export class WorkflowServer {
       });
       if (
         this.queue.isWorkflowRunPaused(report.runId) ||
-        session.openWorkflowMessageId !== report.workflowMessageId
+        session.workflowMessage?.workflowMessageId !== report.workflowMessageId
       ) {
         outcome = "adopted";
         return workflowTurnReceipt("absent", null);
@@ -5192,23 +5206,15 @@ function boundedClientError(error: string): string {
 
 function parseWorkflowBranchReport(payload: JsonValue): WorkflowBranchReport {
   const value = requireRecord(payload, "workflowMessage.reportBranch payload");
-  if (!Array.isArray(value.entries)) throw new Error("Workflow branch entries must be an array");
-  const seen = new Set<string>();
-  const entries = value.entries.map((item) => {
-    const entry = requireRecord(item as JsonValue, "workflow branch entry");
-    const workflowMessageId = requireString(entry.workflowMessageId, "workflowMessageId");
-    if (seen.has(workflowMessageId))
-      throw new Error("Workflow branch report has duplicate messages");
-    seen.add(workflowMessageId);
-    return {
-      workflowMessageId,
-      piSessionEntryId: requireString(entry.piSessionEntryId, "piSessionEntryId"),
-    };
-  });
+  const piSessionEntryId =
+    value.piSessionEntryId === null
+      ? null
+      : requireString(value.piSessionEntryId, "piSessionEntryId");
   return {
     targetSessionId: requireString(value.targetSessionId, "targetSessionId"),
     coordinatorEpoch: requireString(value.coordinatorEpoch, "coordinatorEpoch"),
-    entries,
+    workflowMessageId: requireString(value.workflowMessageId, "workflowMessageId"),
+    piSessionEntryId,
     isIdle: requireBoolean(value.isIdle, "isIdle"),
     hasPendingMessages: requireBoolean(value.hasPendingMessages, "hasPendingMessages"),
   };

@@ -1,13 +1,20 @@
 import { createHash } from "node:crypto";
 import {
   RUN_VIEW_SCHEMA,
+  SESSION_MESSAGE_SCHEMA,
+  SESSION_RUN_VIEW_SCHEMA,
   SESSION_VIEW_SCHEMA,
+  type ClientInteractiveRequest,
   type WorkflowDisplay,
   type WorkflowDisplayStatus,
   type WorkflowRunListPage,
   type WorkflowRunQueueView,
   type WorkflowRunSummary,
   type WorkflowRunView,
+  type WorkflowSessionMessage,
+  type WorkflowSessionNodeRow,
+  type WorkflowSessionProgressUpdate,
+  type WorkflowSessionRunView,
   type WorkflowSessionView,
 } from "../client/view.js";
 import type { StateDatabase } from "../state/database.js";
@@ -326,46 +333,273 @@ export class ServerViewStore {
       const retainedRunId =
         activeQueue === undefined ? this.retainedTerminalRunId(sessionId) : undefined;
       const runId = activeQueue?.runId ?? retainedRunId;
-      const pending = this.serverState.listPendingInteractions(sessionId);
-      const pendingInteractions = byteBoundedForwardPage(pending, (request) =>
-        this.projectRecordField(request.runId, request, "contract"),
-      );
-      const workflowMessages = this.workflowMessages.listSession(sessionId);
+      const version = [
+        runId ?? "-",
+        runId === undefined ? "-" : this.runVersion(runId),
+        this.pendingSessionRevision(sessionId),
+        this.sessionMessageRevision(sessionId),
+        this.openTurnRevision(sessionId),
+        coordinator?.epoch ?? "-",
+        coordinator?.active === true ? "active" : "idle",
+        coordinator?.branchReportRequired === true ? "report" : "reported",
+      ].join("|");
+      const cached = this.sessionCache.get(sessionId);
+      if (cached?.version === version) {
+        refreshCacheEntry(this.sessionCache, sessionId, cached);
+        return cached.view;
+      }
+      const message = this.currentWorkflowMessage(sessionId);
       const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
-      const eligible = workflowMessages.find((message) => this.isMessageEligible(message));
-      const next =
-        openTurn === undefined &&
-        (coordinator === null || (coordinator.active && !coordinator.branchReportRequired))
-          ? eligible
-          : undefined;
-      const open =
-        openTurn === undefined
-          ? this.openWorkflowMessage(workflowMessages)
-          : workflowMessages.find(
-              (message) => message.workflowMessageId === openTurn.workflowMessageId,
-            );
-      return {
+      const view: WorkflowSessionView = {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
-        run: runId === undefined ? null : this.run(runId),
-        pendingInteractions,
-        pendingInteractionStart: 0,
-        pendingInteractionTotal: pending.length,
-        workflowMessages,
-        workflowMessageStart: 0,
-        workflowMessageTotal: workflowMessages.length,
-        workflowMessageWindowComplete: true,
-        nextWorkflowMessageId: next?.workflowMessageId ?? null,
-        openWorkflowMessageId: open?.workflowMessageId ?? null,
-        openWorkflowTurn: openTurn ?? null,
-        cancelledWorkflowMessageIds: workflowMessages
-          .filter((message) => this.hasCancelledSource(message))
-          .map((message) => message.workflowMessageId),
+        run: runId === undefined ? null : this.sessionRun(runId),
+        interaction: this.currentInteraction(sessionId),
+        workflowMessage:
+          message === undefined
+            ? null
+            : this.sessionMessage(message, this.hasCancelledSource(message)),
+        openWorkflowTurn: openTurn === undefined ? null : openTurn,
         coordinatorEpoch: coordinator?.epoch ?? null,
         coordinatorActive: coordinator?.active ?? false,
         branchReportRequired: coordinator?.branchReportRequired ?? false,
       };
+      rememberCacheEntry(this.sessionCache, sessionId, { version, view });
+      return view;
     });
+  }
+
+  /** The one workflow message Pi must inspect, add, finish, or confirm next. */
+  currentWorkflowMessage(sessionId: string): WorkflowMessage | undefined {
+    const messages = this.workflowMessages.listSession(sessionId);
+    if (messages.length === 0) return undefined;
+    const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
+    if (openTurn !== undefined) {
+      const open = messages.find(
+        (message) => message.workflowMessageId === openTurn.workflowMessageId,
+      );
+      if (open !== undefined) return open;
+    }
+    // Oldest delivered message whose delivery or model turn Pi still owes.
+    for (const message of messages) {
+      if (message.status === "sent" && this.needsPiWork(message)) return message;
+    }
+    // Next pending message in durable order that may be delivered now.
+    for (const message of messages) {
+      if (message.status === "pending" && this.isMessageEligible(message)) return message;
+    }
+    // A retained terminal message stays current until its delivery or first turn finishes.
+    const retainedRunId = this.retainedTerminalRunId(sessionId);
+    if (retainedRunId !== undefined) {
+      for (const message of messages) {
+        if (message.runId === retainedRunId && message.kind === "terminal") return message;
+      }
+    }
+    return undefined;
+  }
+
+  /** Whether Pi still owes delivery confirmation or a model turn for this message. */
+  private needsPiWork(message: WorkflowMessage): boolean {
+    return this.openWorkflowMessage([message]) !== undefined;
+  }
+
+  private currentInteraction(sessionId: string): ClientInteractiveRequest | null {
+    const pending = this.serverState.listPendingInteractions(sessionId);
+    const first = pending[0];
+    if (first === undefined) return null;
+    return this.projectRecordField(
+      first.runId,
+      first,
+      "contract",
+    ) as unknown as ClientInteractiveRequest;
+  }
+
+  private sessionMessage(
+    message: WorkflowMessage,
+    deliveryCancelled: boolean,
+  ): WorkflowSessionMessage {
+    return {
+      schema: SESSION_MESSAGE_SCHEMA,
+      workflowMessageId: message.workflowMessageId,
+      runId: message.runId,
+      targetSessionId: message.targetSessionId,
+      kind: message.kind,
+      sourceId: message.sourceId,
+      order: message.order,
+      status: message.status,
+      piSessionEntryId: message.piSessionEntryId,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+      triggerTurn: message.content.triggerTurn,
+      customType: message.content.customType,
+      display: message.content.display,
+      content: this.projectValue(message.runId, toJson(message.content)),
+      contentDigest: message.contentDigest,
+      deliveryCancelled,
+    };
+  }
+
+  private sessionMessageRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(max(updated_at), 0) AS updatedAt,
+                COALESCE(sum(order_number), 0) AS orderSum
+         FROM workflow_messages WHERE target_session_id = ?`,
+      )
+      .get(sessionId);
+    if (!isObjectRecord(row)) throw new Error("Session message revision is invalid");
+    return `${row.count}:${row.updatedAt}:${row.orderSum}`;
+  }
+
+  private openTurnRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(max(updated_at), 0) AS updatedAt
+         FROM workflow_turns WHERE target_session_id = ? AND state = 'started'`,
+      )
+      .get(sessionId);
+    if (!isObjectRecord(row)) throw new Error("Session turn revision is invalid");
+    return `${row.count}:${row.updatedAt}`;
+  }
+
+  /**
+   * Bounded current run projection for Pi. It carries the semantic facts for the
+   * status line and widget and leaves complete history to the detailed view.
+   */
+  sessionRun(runId: string): WorkflowSessionRunView | null {
+    const queue = this.queue.getWorkflowRunView(runId);
+    const counts = this.runs.readRunViewCounts(runId);
+    if (queue === undefined || counts === null) return null;
+    const empty = { start: 0, limit: 0 };
+    const loaded = this.runs.readRunView(runId, {
+      steps: viewRange(counts.steps),
+      trace: empty,
+      sessionEntries: empty,
+      sessionEvents: empty,
+      settings: empty,
+      followUps: empty,
+      updates: viewRange(counts.updates),
+      graphCursor: 0,
+    });
+    if (loaded === null) return null;
+    const state = loaded.state;
+    const display = this.projectDisplay(runId, this.display(queue, state));
+    const nodeTotal = Object.keys(nodeRecords(loaded.snapshot)).length;
+    return {
+      schema: SESSION_RUN_VIEW_SCHEMA,
+      runId,
+      revision: this.presentationRevision(runId),
+      runRevision: this.runs.runRevision(runId),
+      queue: projectQueue(queue),
+      display,
+      workflowName: state.workflowName,
+      runTitle: state.runTitle ?? null,
+      paused: state.paused === true,
+      currentNode: state.currentNode ?? null,
+      waitingOn: state.waitingOn ?? null,
+      error: state.error ?? null,
+      nodes: this.sessionNodeRows(runId, loaded.snapshot, state),
+      nodeStart: 0,
+      nodeTotal,
+      progressUpdates: sessionProgressUpdates(state.updates ?? []),
+      monitorEstimate: toJson(state.outputs.estimate ?? null),
+      monitorSchedule: sessionMonitorSchedule(state.updates ?? []),
+      live: display.status === "running" || display.status === "waiting",
+      possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
+    };
+  }
+
+  /**
+   * One row per definition node, in definition order. Attempt facts come from
+   * durable attempts so the rows stay correct for long histories. Detailed text
+   * travels only for the current, waiting, and most recent failed node.
+   */
+  private sessionNodeRows(
+    runId: string,
+    snapshot: unknown,
+    state: WorkflowRunState,
+  ): WorkflowSessionNodeRow[] {
+    const attempts = this.state.connection
+      .prepare(
+        `SELECT node_id AS nodeId, status, attempt_number AS attemptNumber,
+                started_at AS startedAt, finished_at AS finishedAt,
+                settings_change_number AS settingsChangeNumber, error_hash AS errorHash
+         FROM node_attempts WHERE run_id = ? ORDER BY attempt_number`,
+      )
+      .all(runId)
+      .filter(isNodeAttemptRow);
+    const byNode = new Map<string, NodeAttemptFacts>();
+    for (const attempt of attempts) {
+      const facts = byNode.get(attempt.nodeId) ?? {
+        attempts: 0,
+        activeStatus: null,
+        lastStatus: null,
+        lastSettingsChangeNumber: null,
+        startedAt: null,
+        durationMs: null,
+        errorHash: null,
+      };
+      facts.attempts += 1;
+      if (attempt.startedAt !== null && attempt.finishedAt === null) {
+        facts.startedAt = new Date(attempt.startedAt).toISOString();
+      }
+      if (attempt.startedAt !== null && attempt.finishedAt !== null) {
+        facts.durationMs = Math.max(0, attempt.finishedAt - attempt.startedAt);
+      }
+      if (attempt.settingsChangeNumber !== null) {
+        facts.lastSettingsChangeNumber = attempt.settingsChangeNumber;
+      }
+      if (isActiveAttemptStatus(attempt.status)) facts.activeStatus = attempt.status;
+      else {
+        facts.lastStatus = attempt.status;
+        facts.errorHash = attempt.errorHash;
+      }
+      byNode.set(attempt.nodeId, facts);
+    }
+    const records = nodeRecords(snapshot);
+    const failure = this.sessionFailureNodeId(state);
+    const rows: WorkflowSessionNodeRow[] = [];
+    for (const [nodeId, node] of Object.entries(records)) {
+      const facts = byNode.get(nodeId);
+      const detail = nodeId === state.currentNode || nodeId === state.waitingOn || nodeId === failure;
+      rows.push({
+        nodeId,
+        nodeType: typeof node.nodeType === "string" ? node.nodeType : "unknown",
+        actionExecution: node.actionExecution !== undefined,
+        state: nodeRowState(state, nodeId, facts),
+        attempts: facts?.attempts ?? 0,
+        settingsChangeNumber:
+          nodeId === state.currentNode
+            ? (state.currentSettingsChangeNumber ?? facts?.lastSettingsChangeNumber ?? null)
+            : (facts?.lastSettingsChangeNumber ?? null),
+        statusDetail:
+          nodeId === state.currentNode && typeof state.statusDetail === "string"
+            ? state.statusDetail
+            : null,
+        startedAt: nodeId === state.currentNode ? (facts?.startedAt ?? null) : null,
+        durationMs: facts?.durationMs ?? null,
+        error: detail ? this.readAttemptError(facts?.errorHash ?? null) : null,
+        humanDecision: sessionHumanDecision(node, state, nodeId),
+        summary: nodeId === state.waitingOn && typeof node.summary === "string" ? node.summary : null,
+        assistantResponse: isAssistantResponseNode(node),
+        outcome: state.results[nodeId]?.outcome ?? null,
+      });
+    }
+    return rows;
+  }
+
+  private readAttemptError(hash: Buffer | null): string | null {
+    if (hash === null) return null;
+    const blob = this.state.readBlob(hash);
+    if (blob === undefined) return null;
+    return blob.content.toString("utf8").slice(0, 512);
+  }
+
+  private sessionFailureNodeId(state: WorkflowRunState): string | undefined {
+    for (const [nodeId, result] of Object.entries(state.results)) {
+      if (result.outcome !== "ok") return nodeId;
+    }
+    return undefined;
   }
 
   clearTerminal(sessionId: string, runId?: string, now: number = Date.now()): string | null {
@@ -664,7 +898,7 @@ export class ServerViewStore {
     return undefined;
   }
 
-  private hasCancelledSource(message: WorkflowMessage): boolean {
+  hasCancelledSource(message: WorkflowMessage): boolean {
     if (message.kind === "terminal")
       return message.content.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
     if (message.kind === "step") {
@@ -1047,6 +1281,156 @@ function manifest(
       trace: "host",
     },
   };
+}
+
+const MAX_SESSION_PROGRESS_UPDATES = 16;
+
+type NodeRecord = {
+  nodeType?: unknown;
+  actionExecution?: unknown;
+  summary?: unknown;
+  humanDecision?: unknown;
+  expectedOutput?: unknown;
+};
+
+type NodeAttemptFacts = {
+  attempts: number;
+  activeStatus: string | null;
+  lastStatus: string | null;
+  lastSettingsChangeNumber: number | null;
+  startedAt: string | null;
+  durationMs: number | null;
+  errorHash: Buffer | null;
+};
+
+type NodeAttemptRow = {
+  nodeId: string;
+  status: string;
+  attemptNumber: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  settingsChangeNumber: number | null;
+  errorHash: Buffer | null;
+};
+
+function isNodeAttemptRow(value: unknown): value is NodeAttemptRow {
+  if (!isJsonObject(value)) return false;
+  return (
+    typeof value.nodeId === "string" &&
+    typeof value.status === "string" &&
+    typeof value.attemptNumber === "number" &&
+    (value.startedAt === null || typeof value.startedAt === "number") &&
+    (value.finishedAt === null || typeof value.finishedAt === "number") &&
+    (value.settingsChangeNumber === null || typeof value.settingsChangeNumber === "number") &&
+    (value.errorHash === null || Buffer.isBuffer(value.errorHash))
+  );
+}
+
+function isActiveAttemptStatus(status: string): boolean {
+  return status === "pending" || status === "running" || status === "waiting";
+}
+
+function nodeRecords(snapshot: unknown): Record<string, NodeRecord> {
+  if (!isJsonObject(snapshot) || !isJsonObject(snapshot.nodes)) return {};
+  const records: Record<string, NodeRecord> = {};
+  for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
+    if (isJsonObject(node)) records[nodeId] = node as NodeRecord;
+  }
+  return records;
+}
+
+function nodeRowState(
+  state: WorkflowRunState,
+  nodeId: string,
+  facts: NodeAttemptFacts | undefined,
+): WorkflowSessionNodeRow["state"] {
+  if (facts?.activeStatus === "running") return "running";
+  if (facts?.activeStatus === "waiting") return "waiting";
+  if (facts?.activeStatus === "pending") return "pending";
+  const result = state.results[nodeId];
+  if (result !== undefined) return result.outcome === "ok" ? "ok" : "failed";
+  if (facts?.lastStatus === "completed") return "ok";
+  if (facts !== undefined && facts.lastStatus !== null) return "failed";
+  return "pending";
+}
+
+function isAssistantResponseNode(node: NodeRecord): boolean {
+  return (
+    node.nodeType === "agent" &&
+    isJsonObject(node.expectedOutput) &&
+    node.expectedOutput.kind === "assistant-message"
+  );
+}
+
+function sessionHumanDecision(
+  node: NodeRecord,
+  state: WorkflowRunState,
+  nodeId: string,
+): WorkflowSessionNodeRow["humanDecision"] {
+  const human = isJsonObject(node.humanDecision) ? node.humanDecision : undefined;
+  if (human === undefined) return null;
+  const request = humanDecisionRequest(state.finalOutput);
+  const current = request !== undefined && request.nodeId === nodeId ? request : undefined;
+  const audience = current?.audience ?? (typeof human.audience === "string" ? human.audience : "human");
+    const choices = isJsonObject(human.choices)
+      ? Object.entries(human.choices).flatMap(([value, choice]) =>
+          isJsonObject(choice) && typeof choice.label === "string"
+            ? [{ value, label: choice.label }]
+            : [],
+        )
+      : [];
+    const choiceValue =
+      state.humanDecision !== undefined && state.humanDecision.nodeId === nodeId
+        ? state.humanDecision.response.choice
+        : null;
+    return {
+      audience,
+      summary: current?.summary ?? null,
+      choices,
+      choiceValue,
+      presentationDigest: current?.presentationDigest ?? null,
+    };
+}
+
+function humanDecisionRequest(
+  value: unknown,
+):
+  | { nodeId: string; audience: string; summary: string | null; presentationDigest: string | null }
+  | undefined {
+  if (!isJsonObject(value)) return undefined;
+  if (value.schema !== "pi-workflows.human-decision-request.v1") return undefined;
+  if (typeof value.nodeId !== "string" || typeof value.audience !== "string") return undefined;
+  const presentation = isJsonObject(value.presentation) ? value.presentation : undefined;
+  return {
+    nodeId: value.nodeId,
+    audience: value.audience,
+    summary: typeof presentation?.summary === "string" ? presentation.summary : null,
+    presentationDigest:
+      typeof value.presentationDigest === "string" ? value.presentationDigest : null,
+  };
+}
+
+function sessionProgressUpdates(
+  updates: readonly WorkflowUpdateRecord[],
+): WorkflowSessionProgressUpdate[] {
+  const progress: WorkflowSessionProgressUpdate[] = [];
+  for (const update of updates) {
+    if (update.type !== "progress") continue;
+    progress.push({ key: update.key, at: update.at, data: toJson(update.data) });
+    if (progress.length >= MAX_SESSION_PROGRESS_UPDATES) break;
+  }
+  return progress;
+}
+
+function sessionMonitorSchedule(
+  updates: readonly WorkflowUpdateRecord[],
+): { nextCheckAt: string; recordedAt: string } | null {
+  for (const update of updates) {
+    if (update.type !== "monitor.schedule" || update.key !== "next-check") continue;
+    if (!isJsonObject(update.data) || typeof update.data.nextCheckAt !== "string") continue;
+    return { nextCheckAt: update.data.nextCheckAt, recordedAt: update.at };
+  }
+  return null;
 }
 
 function projectQueue(

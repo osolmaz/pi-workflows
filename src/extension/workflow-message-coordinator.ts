@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { WorkflowClient } from "../client/client.js";
 import {
   WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA,
+  type WorkflowSessionMessage,
   type WorkflowSessionView,
   type WorkflowTurnReport,
   type WorkflowTurnReportReceipt,
@@ -10,26 +11,34 @@ import {
 import type { JsonValue } from "../state/json.js";
 import {
   WORKFLOW_TURN_SCHEMA,
-  type WorkflowMessage,
+  verifyWorkflowMessageContent,
+  type WorkflowMessageContent,
   type WorkflowTurnStopReason,
 } from "../state/workflow-messages.js";
 
 const WORKFLOW_MESSAGE_ID_FIELD = "workflowMessageId";
 
 type SettledTurn = { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null };
-type BeforeTurnEnd = (message: WorkflowMessage, end: SettledTurn) => Promise<void>;
+type BeforeTurnEnd = (message: WorkflowSessionMessage, end: SettledTurn) => Promise<void>;
 type DeliveryCallbacks = {
   beforeTurnEnd?: BeforeTurnEnd;
-  terminalDelivered?: (message: WorkflowMessage) => Promise<void>;
+  terminalDelivered?: (message: WorkflowSessionMessage) => Promise<void>;
 };
 
 type OwnedTurn = {
   workflowTurnId: string;
-  message: WorkflowMessage;
+  message: WorkflowSessionMessage;
   startedReported: boolean;
   stopRequested: boolean;
   abortSent: boolean;
 } & ({ phase: "delivering" | "running" } | { phase: "settled"; end: SettledTurn });
+
+/** Server content that Pi verified against its declared digest. */
+type PreparedContent = {
+  workflowMessageId: string;
+  contentDigest: string;
+  content: WorkflowMessageContent;
+};
 
 /** Adds every server-owned workflow message to one Pi session through one public API path. */
 export class WorkflowMessageCoordinator {
@@ -40,26 +49,77 @@ export class WorkflowMessageCoordinator {
   private lastBranchEpoch: string | null = null;
   private view: WorkflowSessionView | null = null;
   private turn: OwnedTurn | null = null;
+  private content: PreparedContent | null = null;
+
+  /**
+   * Read and verify the current message content. Large content arrives as a
+   * bounded, digest-checked reference, so this must finish before delivery.
+   */
+  async prepareContent(client: WorkflowClient): Promise<void> {
+    const message = this.view?.workflowMessage ?? null;
+    if (message === null) {
+      this.content = null;
+      return;
+    }
+    if (
+      this.content?.workflowMessageId === message.workflowMessageId &&
+      this.content.contentDigest === message.contentDigest
+    ) {
+      return;
+    }
+    this.content = null;
+    const hydrated = await client.hydrateContent(message.runId, message.content);
+    const content = verifyWorkflowMessageContent(hydrated, message.contentDigest);
+    if (content === undefined) {
+      throw new Error(
+        `Workflow message ${message.workflowMessageId} content failed its digest check`,
+      );
+    }
+    this.content = {
+      workflowMessageId: message.workflowMessageId,
+      contentDigest: message.contentDigest,
+      content,
+    };
+  }
+
+  /** Verified content of the current message, when it is prepared and current. */
+  verifiedContent(message: WorkflowSessionMessage): WorkflowMessageContent | undefined {
+    return this.contentFor(message);
+  }
+
+  private contentFor(message: WorkflowSessionMessage): WorkflowMessageContent | undefined {
+    const prepared = this.content;
+    if (
+      prepared === null ||
+      prepared.workflowMessageId !== message.workflowMessageId ||
+      prepared.contentDigest !== message.contentDigest
+    ) {
+      return undefined;
+    }
+    return prepared.content;
+  }
 
   updateView(view: WorkflowSessionView): void {
     this.view = view;
+    const message = view.workflowMessage;
     if (
       this.turn !== null &&
-      view.cancelledWorkflowMessageIds.includes(this.turn.message.workflowMessageId)
+      message !== null &&
+      message.workflowMessageId === this.turn.message.workflowMessageId &&
+      message.deliveryCancelled
     ) {
       this.turn.stopRequested = true;
     }
-    const visibleIds = new Set(view.workflowMessages.map((message) => message.workflowMessageId));
-    for (const messageId of this.closedTurnMessages) {
-      if (!visibleIds.has(messageId)) this.closedTurnMessages.delete(messageId);
-    }
-    for (const messageId of this.finalizedTerminals) {
-      if (!visibleIds.has(messageId)) this.finalizedTerminals.delete(messageId);
-    }
-    for (const message of view.workflowMessages) {
-      if (message.status === "sent" || message.status === "cancelled") {
-        this.queued.delete(message.workflowMessageId);
+    // The server names one current message. Bookkeeping for any other message is
+    // stale, and the server sends the next message in a later snapshot.
+    const currentId = message?.workflowMessageId ?? null;
+    for (const messageIds of [this.queued, this.closedTurnMessages, this.finalizedTerminals]) {
+      for (const messageId of messageIds) {
+        if (messageId !== currentId) messageIds.delete(messageId);
       }
+    }
+    if (message !== null && (message.status === "sent" || message.status === "cancelled")) {
+      this.queued.delete(message.workflowMessageId);
     }
   }
 
@@ -79,7 +139,7 @@ export class WorkflowMessageCoordinator {
     }
   }
 
-  activeTurnMessage(): WorkflowMessage | undefined {
+  activeTurnMessage(): WorkflowSessionMessage | undefined {
     if (this.turn === null || !this.turn.startedReported) return undefined;
     return this.turn.message ?? undefined;
   }
@@ -88,7 +148,7 @@ export class WorkflowMessageCoordinator {
     const turn = this.turn;
     if (turn === null || turn.phase !== "running") return undefined;
     if (turn.stopRequested) return "The workflow-owned turn was cancelled; no more tools may run.";
-    const details = turn.message.content.details;
+    const details = this.contentFor(turn.message)?.details;
     const contract = isRecord(details) && isRecord(details.contract) ? details.contract : undefined;
     if (contract?.allowedTools === undefined) return undefined;
     if (
@@ -124,6 +184,7 @@ export class WorkflowMessageCoordinator {
     try {
       const view = this.view;
       if (!view.coordinatorActive || view.coordinatorEpoch === null) return;
+      await this.prepareContent(client);
       const branchEntries = branchWorkflowEntries(ctx.sessionManager.getBranch());
       if (this.turn === null && !ctx.isIdle()) {
         const candidate = this.turnCandidate();
@@ -140,7 +201,9 @@ export class WorkflowMessageCoordinator {
             workflowTurnId: open.workflowTurnId,
             message: candidate,
             startedReported: true,
-            stopRequested: view.cancelledWorkflowMessageIds.includes(candidate.workflowMessageId),
+            stopRequested:
+              view.workflowMessage?.workflowMessageId === candidate.workflowMessageId &&
+              view.workflowMessage.deliveryCancelled,
             abortSent: false,
             phase: "running",
           };
@@ -162,23 +225,25 @@ export class WorkflowMessageCoordinator {
       await this.flushTurn(client, view, callbacks.beforeTurnEnd);
       this.abortCancelledTurn(ctx);
       if (this.turn !== null || !ctx.isIdle() || ctx.hasPendingMessages()) return;
-      for (const message of view.workflowMessages) {
-        if (
-          message.kind === "terminal" &&
-          !message.content.triggerTurn &&
-          message.status === "sent" &&
-          branchEntries.has(message.workflowMessageId) &&
-          !this.finalizedTerminals.has(message.workflowMessageId)
-        ) {
-          await callbacks.terminalDelivered?.(message);
-          this.finalizedTerminals.add(message.workflowMessageId);
-        }
+      const current = view.workflowMessage;
+      if (
+        current !== null &&
+        current.kind === "terminal" &&
+        !current.triggerTurn &&
+        current.status === "sent" &&
+        branchEntries.has(current.workflowMessageId) &&
+        !this.finalizedTerminals.has(current.workflowMessageId)
+      ) {
+        await callbacks.terminalDelivered?.(current);
+        this.finalizedTerminals.add(current.workflowMessageId);
       }
-      const messageId = view.nextWorkflowMessageId;
+      const messageId = current?.workflowMessageId ?? null;
       if (messageId === null || this.queued.has(messageId)) return;
       const message = messageById(view, messageId);
       if (message === undefined || message.status !== "pending") return;
       if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+      const content = this.contentFor(message);
+      if (content === undefined) return;
 
       this.queued.add(messageId);
       const existingEntry = branchWorkflowEntries(ctx.sessionManager.getBranch()).get(messageId);
@@ -193,7 +258,7 @@ export class WorkflowMessageCoordinator {
         this.view !== view ||
         !view.coordinatorActive ||
         view.coordinatorEpoch === null ||
-        view.nextWorkflowMessageId !== messageId ||
+        view.workflowMessage?.workflowMessageId !== messageId ||
         !ctx.isIdle() ||
         ctx.hasPendingMessages() ||
         branchWorkflowEntries(ctx.sessionManager.getBranch()).has(messageId)
@@ -214,12 +279,12 @@ export class WorkflowMessageCoordinator {
       try {
         pi.sendMessage(
           {
-            customType: message.content.customType,
-            content: message.content.content,
-            display: message.content.display,
-            details: message.content.details,
+            customType: content.customType,
+            content: content.content,
+            display: content.display,
+            details: content.details,
           },
-          { triggerTurn: message.content.triggerTurn },
+          { triggerTurn: content.triggerTurn },
         );
       } catch (error) {
         this.queued.delete(messageId);
@@ -245,6 +310,7 @@ export class WorkflowMessageCoordinator {
     this.finalizedTerminals.clear();
     this.view = null;
     this.turn = null;
+    this.content = null;
     this.lastBranchEpoch = null;
     this.synchronizing = false;
   }
@@ -265,23 +331,20 @@ export class WorkflowMessageCoordinator {
     ctx.abort();
   }
 
-  private turnCandidate(): WorkflowMessage | undefined {
+  private turnCandidate(): WorkflowSessionMessage | undefined {
     const view = this.view;
-    if (view === null) return undefined;
-    if (view.openWorkflowMessageId !== null) {
-      const open = messageById(view, view.openWorkflowMessageId);
-      if (
-        open !== undefined &&
-        !this.closedTurnMessages.has(open.workflowMessageId) &&
-        messageStartsTurn(open)
-      ) {
-        return open;
-      }
+    const current = view?.workflowMessage ?? null;
+    if (view === null || current === null) return undefined;
+    const open = view.openWorkflowTurn;
+    if (
+      open !== null &&
+      open.workflowMessageId === current.workflowMessageId &&
+      !this.closedTurnMessages.has(current.workflowMessageId) &&
+      messageStartsTurn(current)
+    ) {
+      return current;
     }
-    for (const messageId of this.queued) {
-      const queued = messageById(view, messageId);
-      if (queued?.status === "pending" && messageStartsTurn(queued)) return queued;
-    }
+    if (this.queued.has(current.workflowMessageId) && messageStartsTurn(current)) return current;
     return undefined;
   }
 
@@ -346,12 +409,6 @@ export class WorkflowMessageCoordinator {
       if (current?.openWorkflowTurn?.workflowTurnId === pending.workflowTurnId) {
         current.openWorkflowTurn = null;
       }
-      if (
-        current?.openWorkflowMessageId === message.workflowMessageId &&
-        (message.kind === "followUp" || message.kind === "terminal")
-      ) {
-        current.openWorkflowMessageId = null;
-      }
     }
     this.turn = null;
   }
@@ -362,11 +419,10 @@ export class WorkflowMessageCoordinator {
     view: WorkflowSessionView,
   ): Promise<void> {
     if (view.coordinatorEpoch === null) return;
-    const allowed = new Set(view.workflowMessages.map((message) => message.workflowMessageId));
+    const current = view.workflowMessage;
+    if (current === null) return;
     const branch = branchWorkflowEntries(ctx.sessionManager.getBranch());
-    const entries = [...branch]
-      .filter(([workflowMessageId]) => allowed.has(workflowMessageId))
-      .map(([workflowMessageId, piSessionEntryId]) => ({ workflowMessageId, piSessionEntryId }));
+    const piSessionEntryId = branch.get(current.workflowMessageId) ?? null;
     const isIdle = ctx.isIdle();
     const hasPendingMessages = ctx.hasPendingMessages();
     const response = await client.request({
@@ -374,7 +430,8 @@ export class WorkflowMessageCoordinator {
       payload: {
         targetSessionId: view.sessionId,
         coordinatorEpoch: view.coordinatorEpoch,
-        entries,
+        workflowMessageId: current.workflowMessageId,
+        piSessionEntryId,
         isIdle,
         hasPendingMessages,
       },
@@ -382,13 +439,13 @@ export class WorkflowMessageCoordinator {
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
       throw new Error(response.error ?? "Workflow server rejected the Pi branch report");
     }
-    for (const entry of entries) {
-      const message = messageById(view, entry.workflowMessageId);
+    if (piSessionEntryId !== null) {
+      const message = messageById(view, current.workflowMessageId);
       if (message !== undefined) {
         message.status = "sent";
-        message.piSessionEntryId = entry.piSessionEntryId;
+        message.piSessionEntryId = piSessionEntryId;
       }
-      this.queued.delete(entry.workflowMessageId);
+      this.queued.delete(current.workflowMessageId);
     }
     this.lastBranchEpoch = view.coordinatorEpoch;
   }
@@ -397,10 +454,10 @@ export class WorkflowMessageCoordinator {
     ctx: Pick<ExtensionContext, "sessionManager">,
     view: WorkflowSessionView,
   ): boolean {
+    const current = view.workflowMessage;
+    if (current === null) return false;
     const branch = branchWorkflowEntries(ctx.sessionManager.getBranch());
-    return view.workflowMessages.some(
-      (message) => message.status !== "sent" && branch.has(message.workflowMessageId),
-    );
+    return current.status !== "sent" && branch.has(current.workflowMessageId);
   }
 }
 
@@ -451,12 +508,14 @@ export function responseEntryId(entries: readonly unknown[]): string | null {
 function messageById(
   view: WorkflowSessionView,
   workflowMessageId: string,
-): WorkflowMessage | undefined {
-  return view.workflowMessages.find((message) => message.workflowMessageId === workflowMessageId);
+): WorkflowSessionMessage | undefined {
+  const message = view.workflowMessage;
+  if (message === null || message.workflowMessageId !== workflowMessageId) return undefined;
+  return message;
 }
 
-function messageStartsTurn(message: WorkflowMessage): boolean {
-  return message.content.triggerTurn;
+function messageStartsTurn(message: WorkflowSessionMessage): boolean {
+  return message.triggerTurn;
 }
 
 async function reportTurn(
