@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import { WorkflowClient } from "../src/client/client.js";
 import {
+  MAX_SOCKET_PATH_BYTES,
   encodeProtocolLine,
   parseClientMessage,
   type ClientRequest,
@@ -636,6 +637,12 @@ describe("global workflow server", () => {
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await server.start();
     await server.stop();
+  });
+
+  it("reports a socket path above the operating system limit before it listens", async () => {
+    const databasePath = path.join("/tmp", "p".repeat(MAX_SOCKET_PATH_BYTES), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await expect(server.start()).rejects.toThrow(/operating system limit/);
   });
 
   it("rejects a watch for a missing run", async () => {
@@ -1372,7 +1379,10 @@ setInterval(() => {}, 1000);
 
   it("prunes expired state after recovery and after a later runner exit", async () => {
     const cwd = await makeTempDir("server-automatic-prune-project");
-    const databasePath = path.join(await makeTempDir("server-automatic-prune-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-automatic-prune-state"),
+      "state.sqlite",
+    );
     const workflowPath = await writeComputeWorkflow(cwd);
     const seedStore = new WorkflowRunStore(databasePath);
     try {
@@ -1563,7 +1573,10 @@ setInterval(() => {}, 1000);
   }, 45_000);
 
   it("keeps the workflow server available and reports an invalid channel configuration", async () => {
-    const databasePath = path.join(await makeTempDir("server-channel-invalid-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-channel-invalid-state"),
+      "state.sqlite",
+    );
     const configDir = await makeTempDir("server-channel-invalid-config");
     await fs.writeFile(
       path.join(configDir, "channels.json"),
@@ -2143,7 +2156,10 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
 
   it("rejects changed mounted source before the resumed child executes it", async () => {
     const cwd = await makeTempDir("server-mounted-source-project");
-    const databasePath = path.join(await makeTempDir("server-mounted-source-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-mounted-source-state"),
+      "state.sqlite",
+    );
     const markerPath = path.join(cwd, "changed-source-executed");
     const { workflowPath, childPath } = await writeIncludedInteractiveWorkflow(cwd);
     const first = new WorkflowServer({
@@ -2291,7 +2307,11 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const workflowPath = await writeComputeWorkflow(cwd);
     const runnerPath = path.join(cwd, "worker-no-progress.mjs");
     await fs.writeFile(runnerPath, "process.exit(1);\n", "utf8");
-    const server = new WorkflowServer({ databasePath, claimPollMs: 10, runnerEntryPath: runnerPath });
+    const server = new WorkflowServer({
+      databasePath,
+      claimPollMs: 10,
+      runnerEntryPath: runnerPath,
+    });
     const client = new WorkflowClient({ databasePath, clientId: "worker-no-progress-client" });
     await server.start();
     try {
@@ -2576,7 +2596,10 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
 
   it("cancels a committed run before its scheduled activation starts", async () => {
     const cwd = await makeTempDir("server-cancel-pending-project");
-    const databasePath = path.join(await makeTempDir("server-cancel-pending-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-cancel-pending-state"),
+      "state.sqlite",
+    );
     const workflowPath = await writeComputeWorkflow(cwd);
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
@@ -2943,7 +2966,10 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
 
   it("cancels a parked run while its released handoff worker is still cached", async () => {
     const cwd = await makeTempDir("server-cancel-handoff-project");
-    const databasePath = path.join(await makeTempDir("server-cancel-handoff-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-cancel-handoff-state"),
+      "state.sqlite",
+    );
     const workflowPath = await writeInteractiveWorkflow(cwd);
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
@@ -2988,7 +3014,10 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
 
   it("renews a live claim while workflow code blocks longer than its lease", async () => {
     const cwd = await makeTempDir("server-blocked-worker-project");
-    const databasePath = path.join(await makeTempDir("server-blocked-worker-state"), "state.sqlite");
+    const databasePath = path.join(
+      await makeTempDir("server-blocked-worker-state"),
+      "state.sqlite",
+    );
     const gate = await makeTempDir("server-blocked-worker-gate");
     const workflowPath = await writeBlockingWorkflow(cwd, 0, gate);
     const server = new WorkflowServer({

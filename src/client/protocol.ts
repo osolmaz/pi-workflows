@@ -198,7 +198,24 @@ export function clientSocketPath(databasePath: string): string {
     const suffix = createHash("sha256").update(stateDirectory).digest("hex").slice(0, 24);
     return `\\\\.\\pipe\\pi-workflows-${suffix}`;
   }
-  return path.join(stateDirectory, "server", "server.sock");
+  const socketPath = path.join(stateDirectory, "server", "server.sock");
+  return socketPath;
+}
+
+/**
+ * Operating systems limit one local socket path to 107 bytes on Linux, macOS,
+ * and the BSDs. Linux binds a longer path in the abstract namespace, where no
+ * path-based client can reach it, so a long path is a blocker rather than a
+ * slow connection failure.
+ */
+export const MAX_SOCKET_PATH_BYTES = 107;
+
+export function assertSocketPathSupported(socketPath: string): void {
+  const bytes = Buffer.byteLength(socketPath, "utf8");
+  if (bytes <= MAX_SOCKET_PATH_BYTES) return;
+  throw new Error(
+    `Workflow server socket path is ${bytes} bytes, above the ${MAX_SOCKET_PATH_BYTES}-byte operating system limit: ${socketPath}`,
+  );
 }
 
 export class NdjsonFrameDecoder {

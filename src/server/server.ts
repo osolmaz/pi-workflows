@@ -19,6 +19,7 @@ import { WorkflowClient } from "../client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
   encodeProtocolLine,
+  assertSocketPathSupported,
   clientSocketPath,
   NdjsonFrameDecoder,
   parseClientRequest,
@@ -560,6 +561,7 @@ export class WorkflowServer {
       server.once("listening", onListening);
       server.once("error", onError);
       try {
+        assertSocketPathSupported(this.socketPath);
         server.listen(this.socketPath);
       } catch (error) {
         cleanup();
@@ -1241,9 +1243,7 @@ export class WorkflowServer {
           await this.publishSubscription(connection, subscription);
         } catch (error) {
           connection.subscriptions.delete(subscription.id);
-          this.log(
-            `client view error for subscription ${subscription.id}: ${errorMessage(error)}`,
-          );
+          this.log(`client view error for subscription ${subscription.id}: ${errorMessage(error)}`);
           this.failSubscription(connection, subscription.id, errorMessage(error));
         }
       }

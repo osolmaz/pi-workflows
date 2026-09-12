@@ -12,7 +12,7 @@ export function setup(): void {
   previousRoot = process.env[TEST_TEMP_ROOT_ENV];
   if (previousRoot !== undefined) return;
 
-  ownedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflows-tests-"));
+  ownedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pw-tests-"));
   process.env[TEST_TEMP_ROOT_ENV] = ownedRoot;
   previousConfigDir = process.env.PI_WORKFLOWS_CONFIG_DIR;
   process.env.PI_WORKFLOWS_CONFIG_DIR = path.join(ownedRoot, "config");

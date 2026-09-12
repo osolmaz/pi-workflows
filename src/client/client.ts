@@ -10,6 +10,7 @@ import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
   NdjsonFrameDecoder,
+  assertSocketPathSupported,
   clientSocketPath,
   encodeProtocolLine,
   parseClientMessage,
@@ -212,6 +213,9 @@ export class WorkflowClient {
       return await this.connect();
     } catch (error) {
       if (error instanceof WorkflowClientVersionError) throw error;
+      // A path the operating system cannot bind is a blocker. Do not spawn a
+      // child that can never serve it.
+      assertSocketPathSupported(this.endpoint);
       this.resetConnection();
       this.startDetached();
     }
@@ -544,6 +548,7 @@ export class WorkflowClient {
   }
 
   private async openConnection(): Promise<ClientHello> {
+    assertSocketPathSupported(this.endpoint);
     const socket = net.createConnection(this.endpoint);
     const decoder = new NdjsonFrameDecoder();
     this.socket = socket;
@@ -760,10 +765,13 @@ export class WorkflowClient {
     if (this.closed || this.subscriptions.size === 0 || this.reconnectTimer !== null) return;
     if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
       // A fast loop would hide the blocker. Report it once and wait for new work.
-      this.reportSubscriptionFailure({
-        reasonCode: "reconnect_exhausted",
-        message: `Workflow server did not answer after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start the workflow server, then open or resume a session.`,
-      }, false);
+      this.reportSubscriptionFailure(
+        {
+          reasonCode: "reconnect_exhausted",
+          message: `Workflow server did not answer after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start the workflow server, then open or resume a session.`,
+        },
+        false,
+      );
       return;
     }
     const capped = Math.min(
