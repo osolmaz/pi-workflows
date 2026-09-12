@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkflowClient, WorkflowClientVersionError } from "../src/client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
+  MAX_SOCKET_PATH_BYTES,
   NdjsonFrameDecoder,
+  assertSocketPathSupported,
   clientSocketPath,
   encodeProtocolLine,
   parseClientMessage,
@@ -18,6 +20,23 @@ import type { JsonValue } from "../src/state/json.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("WorkflowClient", () => {
+  it("reports a socket path above the operating system limit as a blocker", async () => {
+    const longSegment = "p".repeat(MAX_SOCKET_PATH_BYTES);
+    const databasePath = path.join("/tmp", longSegment, "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    expect(Buffer.byteLength(socketPath, "utf8")).toBeGreaterThan(MAX_SOCKET_PATH_BYTES);
+    expect(() => assertSocketPathSupported(socketPath)).toThrow(/operating system limit/);
+    // The client refuses to spawn or connect instead of waiting for a socket
+    // the operating system cannot bind.
+    const client = new WorkflowClient({ databasePath });
+    const start = vi.spyOn(client as unknown as { startDetached: () => void }, "startDetached");
+    await expect(client.ensureAvailable()).rejects.toThrow(/operating system limit/);
+    expect(start).not.toHaveBeenCalled();
+    expect(() =>
+      assertSocketPathSupported(clientSocketPath(databasePath.slice(0, 10))),
+    ).not.toThrow();
+  });
+
   it("keeps the cold-start retry wait referenced", async () => {
     const databasePath = path.join(await makeTempDir("client-cold-start"), "state.sqlite");
     const client = new WorkflowClient({ databasePath });

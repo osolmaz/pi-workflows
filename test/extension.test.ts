@@ -161,10 +161,10 @@ function makePi(options: {
 }
 
 async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
-  testHome = await makeTempDir("pi-workflows-server-extension-home");
+  testHome = await makeTempDir("pw-ext-home");
   vi.stubEnv("HOME", testHome);
   vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", shortcutsConfigDir());
-  const cwd = await makeTempDir("pi-workflows-server-extension-project");
+  const cwd = await makeTempDir("pw-ext-project");
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
     workflowPath,
@@ -527,9 +527,9 @@ describe("pi-workflows workflow server extension", () => {
 
     const state = new StateDatabase({ filePath: workflowStatePath(), mode: "read-only" });
     try {
-      expect(state.connection.prepare("SELECT count(*) AS count FROM server_commands").get()).toEqual(
-        { count: 0 },
-      );
+      expect(
+        state.connection.prepare("SELECT count(*) AS count FROM server_commands").get(),
+      ).toEqual({ count: 0 });
     } finally {
       state.close();
     }
@@ -578,10 +578,10 @@ describe("pi-workflows workflow server extension", () => {
     const { cwd } = await setupProject();
     let listener: ((event: ClientEvent) => void) | undefined;
     vi.spyOn(WorkflowClient.prototype, "ensureAvailable").mockResolvedValue({
-        schema: "pi-workflows.client.v1",
-        type: "hello",
-        connectionId: "widget-refresh-connection",
-        packageVersion: "test",
+      schema: "pi-workflows.client.v1",
+      type: "hello",
+      connectionId: "widget-refresh-connection",
+      packageVersion: "test",
     });
     vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(
       async (_sessionId, next) => {
