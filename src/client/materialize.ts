@@ -8,7 +8,8 @@ type ViewerPageKind =
   | "session_events"
   | "settings"
   | "follow_ups"
-  | "updates";
+  | "updates"
+  | "workflow_messages";
 
 type ViewerPage = {
   start: number;
@@ -97,6 +98,16 @@ export async function materializeRunView(
   state.updates = updates;
   view.updateStart = 0;
   view.updateTotal = updates.length;
+
+  const initialMessages = Array.isArray(view.workflowMessages) ? view.workflowMessages : [];
+  const workflowMessages = await completePage(client, runId, revision, "workflow_messages", {
+    start: safeInteger(view.workflowMessageStart, 0),
+    total: safeInteger(view.workflowMessageTotal, initialMessages.length),
+    items: initialMessages,
+  });
+  view.workflowMessages = workflowMessages;
+  view.workflowMessageStart = 0;
+  view.workflowMessageTotal = workflowMessages.length;
 
   const hydrated = await client.hydrateContent(runId, view);
   if (!isRecord(hydrated)) return hydrated;

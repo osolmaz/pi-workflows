@@ -894,7 +894,18 @@ describe("current session state", () => {
       () => false,
       () => false,
     );
-    const session = views.session("session-current-state", null);
+    const session = (() => {
+      const reads = vi.spyOn(state, "readJson");
+      const selected = views.currentWorkflowMessage("session-current-state");
+      // Selection reads message metadata only, so a 25-message history costs one
+      // content read for the one message Pi must act on.
+      expect(reads.mock.calls.length).toBe(1);
+      expect(selected?.workflowMessageId).toBe(pending.workflowMessageId);
+      const view = views.session("session-current-state", null);
+      expect(view.workflowMessage).not.toBeNull();
+      reads.mockRestore();
+      return view;
+    })();
     expect(session.workflowMessage?.workflowMessageId).toBe(pending.workflowMessageId);
     expect(session.workflowMessage?.kind).toBe("step");
     expect(session.openWorkflowTurn).toBeNull();
@@ -929,6 +940,42 @@ describe("current session state", () => {
     expect(detail?.graphSteps.length).toBeGreaterThan(0);
     // Every stored message keeps its complete content outside the snapshot.
     expect(stored2.filter((message) => message.content.content === largeText)).toHaveLength(24);
+    // The message history stays reachable as a bounded run page whose content is
+    // served by the content operation, not by one oversized frame.
+    const messagePages: Array<{ workflowMessageId?: string }> = [];
+    let cursor = 0;
+    for (;;) {
+      const page = views.page("current-state-run", { kind: "workflow_messages", cursor });
+      if (page === null) throw new Error("run page missing");
+      expect(page.workflowMessageTotal).toBe(25);
+      const items = page.workflowMessages as Array<{
+        workflowMessageId?: string;
+        content?: unknown;
+      }>;
+      expect(items.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(canonicalJson(page.workflowMessages), "utf8")).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      messagePages.push(...items);
+      const next = page.workflowMessageStart + items.length;
+      if (next >= page.workflowMessageTotal || items.length === 0) break;
+      cursor = next;
+    }
+    expect(messagePages.map((item) => item.workflowMessageId)).toEqual(
+      stored2.map((message) => message.workflowMessageId),
+    );
+    // Large message content stays outside the page and arrives through the
+    // content operation.
+    const externalized = messagePages.find(
+      (item) =>
+        (item as { content?: { $artifact?: { path?: string } } }).content?.$artifact?.path !==
+        undefined,
+    ) as { content?: { $artifact?: { path?: string } } } | undefined;
+    const pagedPath = externalized?.content?.$artifact?.path;
+    if (pagedPath === undefined) throw new Error("stored message content was not externalized");
+    expect(views.content("current-state-run", pagedPath, 0)).toMatchObject({
+      mediaType: "application/json",
+    });
     state.close();
   }, 60_000);
 

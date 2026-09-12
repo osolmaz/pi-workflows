@@ -383,16 +383,16 @@ describe("state prune", () => {
         .prepare(
           `INSERT INTO workflow_messages(
              workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
-             order_number, status, created_at, updated_at
-           ) VALUES ('pending-message', ?, 'protected-session', 'step', 'pending-source', ?, 1, 'pending', ?, ?)`,
+             trigger_turn, order_number, status, created_at, updated_at
+           ) VALUES ('pending-message', ?, 'protected-session', 'step', 'pending-source', ?, 1, 1, 'pending', ?, ?)`,
         )
         .run(results[0]?.runId, contentHash, now, now);
       state.connection
         .prepare(
           `INSERT INTO workflow_messages(
              workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
-             order_number, status, pi_session_entry_id, created_at, updated_at
-           ) VALUES ('open-turn-message', ?, 'protected-session', 'step', 'turn-source', ?, 2, 'sent', 'pi-entry', ?, ?)`,
+             trigger_turn, order_number, status, pi_session_entry_id, created_at, updated_at
+           ) VALUES ('open-turn-message', ?, 'protected-session', 'step', 'turn-source', ?, 1, 2, 'sent', 'pi-entry', ?, ?)`,
         )
         .run(results[1]?.runId, contentHash, now, now);
       state.connection

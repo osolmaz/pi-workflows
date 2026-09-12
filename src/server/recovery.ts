@@ -172,7 +172,9 @@ export class WorkflowRecovery {
   }
 
   private notice(runId: string, reason: string, content: string): void {
-    const terminal = this.messages.listRun(runId).find((message) => message.kind === "terminal");
+    const terminal = this.messages
+      .listRunSummaries(runId)
+      .find((message) => message.kind === "terminal");
     if (terminal === undefined) return;
     const id = `recovery-${reason}-${runId}`;
     this.messages.create({

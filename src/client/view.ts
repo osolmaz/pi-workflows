@@ -99,6 +99,9 @@ export type WorkflowRunView = {
   followUpTotal: number;
   updateStart: number;
   updateTotal: number;
+  workflowMessages: JsonValue[];
+  workflowMessageStart: number;
+  workflowMessageTotal: number;
   live: boolean;
   possiblyInterrupted: boolean;
 };

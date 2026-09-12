@@ -19,7 +19,11 @@ import {
 } from "../client/view.js";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import { WorkflowMessageStore, type WorkflowMessage } from "../state/workflow-messages.js";
+import {
+  WorkflowMessageStore,
+  type WorkflowMessage,
+  type WorkflowMessageSummary,
+} from "../state/workflow-messages.js";
 import type {
   WorkflowRunQueueStore,
   WorkflowRunQueueRecord,
@@ -46,6 +50,7 @@ export const WORKFLOW_PAGE_KINDS = [
   "settings",
   "follow_ups",
   "updates",
+  "workflow_messages",
 ] as const;
 
 export type WorkflowPageKind = (typeof WORKFLOW_PAGE_KINDS)[number];
@@ -197,6 +202,10 @@ export class ServerViewStore {
       counts.updates,
       page?.kind === "updates" ? page.cursor : undefined,
     );
+    const messageRange = viewRange(
+      counts.workflowMessages,
+      page?.kind === "workflow_messages" ? page.cursor : undefined,
+    );
     const loaded = this.runs.readRunView(runId, {
       steps: stepRange,
       trace: traceRange,
@@ -259,6 +268,16 @@ export class ServerViewStore {
       page?.kind === "updates" ? page.cursor : undefined,
       (update) => this.projectUpdate(runId, update),
     );
+    // Message content loads only for the rows the byte-bounded page shows.
+    const messageSummaries = this.workflowMessages.listRunSummaryPage(runId, messageRange);
+    const messagePage = byteBoundedCandidatePage(
+      messageSummaries,
+      messageRange.start,
+      counts.workflowMessages,
+      page?.kind === "workflow_messages" ? page.cursor : undefined,
+      (summary) =>
+        this.projectRecordField(runId, this.workflowMessages.materialize(summary), "content"),
+    );
     const followUpQueue =
       loaded.followUpQueue === null
         ? null
@@ -319,6 +338,9 @@ export class ServerViewStore {
       followUpTotal: followUpPage.total,
       updateStart: updatePage.start,
       updateTotal: updatePage.total,
+      workflowMessages: messagePage.items,
+      workflowMessageStart: messagePage.start,
+      workflowMessageTotal: messagePage.total,
       live: display.status === "running" || display.status === "waiting",
       possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
     };
@@ -371,7 +393,16 @@ export class ServerViewStore {
 
   /** The one workflow message Pi must inspect, add, finish, or confirm next. */
   currentWorkflowMessage(sessionId: string): WorkflowMessage | undefined {
-    const messages = this.workflowMessages.listSession(sessionId);
+    const selected = this.currentWorkflowMessageSummary(sessionId);
+    return selected === undefined ? undefined : this.workflowMessages.materialize(selected);
+  }
+
+  /**
+   * Selection reads message metadata only. Content loads once, for the message
+   * the session must act on.
+   */
+  private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
+    const messages = this.workflowMessages.listSessionSummaries(sessionId);
     if (messages.length === 0) return undefined;
     const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
     if (openTurn !== undefined) {
@@ -401,7 +432,7 @@ export class ServerViewStore {
   }
 
   /** Whether Pi still owes delivery confirmation or a model turn for this message. */
-  private needsPiWork(message: WorkflowMessage): boolean {
+  private needsPiWork(message: WorkflowMessageSummary): boolean {
     return this.openWorkflowMessage([message]) !== undefined;
   }
 
@@ -871,7 +902,7 @@ export class ServerViewStore {
 
   private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
     const messages = this.workflowMessages
-      .listSession(sessionId)
+      .listSessionSummaries(sessionId)
       .filter((message) => message.kind === "terminal")
       .reverse();
     for (const message of messages) {
@@ -897,7 +928,7 @@ export class ServerViewStore {
       if (message.status !== "sent") continue;
       const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
       if (
-        message.content.triggerTurn &&
+        message.triggerTurn &&
         !recoveryStopped(this.state, message.workflowMessageId) &&
         (turn === undefined || turn.state === "started")
       )
@@ -908,9 +939,9 @@ export class ServerViewStore {
     return undefined;
   }
 
-  hasCancelledSource(message: WorkflowMessage): boolean {
+  hasCancelledSource(message: WorkflowMessageSummary): boolean {
     if (message.kind === "terminal")
-      return message.content.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
+      return message.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
     if (message.kind === "step") {
       const request = this.state.connection
         .prepare("SELECT status FROM interactive_requests WHERE request_id = ? AND run_id = ?")
@@ -928,7 +959,7 @@ export class ServerViewStore {
     return false;
   }
 
-  private isMessageEligible(message: WorkflowMessage): boolean {
+  private isMessageEligible(message: WorkflowMessageSummary): boolean {
     if (message.status !== "pending") return false;
     if (message.kind === "step" || message.kind === "decision") {
       const request = this.state.connection
@@ -956,7 +987,7 @@ export class ServerViewStore {
       return (
         isObjectRecord(run) &&
         isTerminalStatus(run.status) &&
-        (!message.content.triggerTurn || !recoveryStopped(this.state, message.workflowMessageId))
+        (!message.triggerTurn || !recoveryStopped(this.state, message.workflowMessageId))
       );
     }
     const source = this.state.connection
@@ -978,11 +1009,11 @@ export class ServerViewStore {
       .get(source.runId);
     if (!isObjectRecord(run) || run.status !== "completed") return false;
     const terminal = this.workflowMessages
-      .listRun(source.runId)
+      .listRunSummaries(source.runId)
       .filter((candidate) => candidate.kind === "terminal" && candidate.status === "sent")
       .at(-1);
     if (terminal === undefined) return false;
-    if (terminal.content.triggerTurn) {
+    if (terminal.triggerTurn) {
       const turn = this.workflowMessages.latestTurnForMessage(terminal.workflowMessageId);
       if (
         turn?.state !== "ended" ||
@@ -1025,7 +1056,9 @@ export class ServerViewStore {
     return reservation === undefined;
   }
 
-  private openWorkflowMessage(messages: readonly WorkflowMessage[]): WorkflowMessage | undefined {
+  private openWorkflowMessage(
+    messages: readonly WorkflowMessageSummary[],
+  ): WorkflowMessageSummary | undefined {
     for (const message of [...messages].reverse()) {
       if (message.status !== "sent") continue;
       if (message.kind === "step") {
@@ -1041,7 +1074,7 @@ export class ServerViewStore {
       } else if (
         message.kind === "followUp" ||
         (message.kind === "terminal" &&
-          message.content.triggerTurn &&
+          message.triggerTurn &&
           !recoveryStopped(this.state, message.workflowMessageId))
       ) {
         const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);

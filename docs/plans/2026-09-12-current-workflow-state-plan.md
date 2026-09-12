@@ -517,6 +517,20 @@ are historical records of the state at their date.
 The stored database changes shape. This repository is in alpha, so the server reports the existing
 reset instruction when it opens an older database. No migration is added.
 
+### Message selection and message history
+
+Selection reads stored message metadata only. `WorkflowMessageStore` gained `listSessionSummaries`,
+`listRunSummaries`, `listRunSummaryPage`, `countForRun`, and `materialize`. The view materializes
+content for the one message the session must act on. `listSession` and `listRun` now build from the
+same summary rows, so no caller loads a content blob per stored row.
+
+`workflow_messages` gained a `trigger_turn` column. It mirrors `content.triggerTurn`, so eligibility,
+retention, recovery stopping, and follow-up checks never read the content blob. The alpha cutover
+changes the DDL in place, as allowed above.
+
+Complete message history is reachable through the `workflow_messages` run page. It obeys the same
+item limit, byte budget, and digest-bound content reference rule as every other history page.
+
 ### Acceptance evidence
 
 | Criterion                                                | Evidence                                                                                                                                                                                                                                      |
@@ -526,7 +540,7 @@ reset instruction when it opens an older database. No migration is added.
 | No complete run view or message history                  | `ServerViewStore.session()` reads `currentWorkflowMessage`, `currentInteraction`, and `sessionRun` with `graphCursor: 0`.                                                                                                                     |
 | Snapshot stays bounded as history grows                  | The new test stores 25 messages of about 300 KiB each (more than 4 MiB) and asserts the encoded `session_snapshot` frame stays below 256 KiB.                                                                                                 |
 | Large current message through verified bounded chunks    | `WorkflowMessageCoordinator.prepareContent` hydrates content by reference and verifies `contentDigest` before delivery; a mismatch throws `Workflow message <id> content failed its digest check`.                                            |
-| Old messages and complete run details remain available   | The new test reads bounded `readRunView` pages for the same run. `piw` history and message pages are unchanged.                                                                                                                               |
+| Old messages and complete run details remain available   | The bounded snapshot test pages the `workflow_messages` run page to all 25 stored messages and reads one externalized message through `view.content`.                                                                                         |
 | Reconnect and branch recovery inspect one message        | `reportBranch` carries one nullable message id; `hasUnconfirmedBranchEntry` tracks one message.                                                                                                                                               |
 | A sent message is adopted, not sent twice                | `test/extension.test.ts` delivery, reminder, and recovery cases; `test/workflow-message-coordinator.test.ts` 21 cases.                                                                                                                        |
 | Delivery, reminder, terminal, and follow-up behavior     | The same extension and coordinator tests, with `deliveryCancelled` on the one current message.                                                                                                                                                |

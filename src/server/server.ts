@@ -975,7 +975,7 @@ export class WorkflowServer {
       report.targetSessionId,
       report.coordinatorEpoch,
     );
-    const messages = this.serverState.workflowMessages.listSession(report.targetSessionId);
+    const messages = this.serverState.workflowMessages.listSessionSummaries(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
     // Pi reports its one current message, or null when it holds none yet. A
     // present report without an entry means the message stays pending.
@@ -1018,7 +1018,9 @@ export class WorkflowServer {
           });
         }
         const branchIds = new Set(entries.map((entry) => entry.workflowMessageId));
-        const refreshed = this.serverState.workflowMessages.listSession(report.targetSessionId);
+        const refreshed = this.serverState.workflowMessages.listSessionSummaries(
+          report.targetSessionId,
+        );
         for (const interaction of this.serverState.listPendingInteractions(
           report.targetSessionId,
         )) {
