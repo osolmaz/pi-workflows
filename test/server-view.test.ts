@@ -1379,6 +1379,110 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("keeps one progress record per key however often one key publishes", async () => {
+    const projectPath = await makeTempDir("progress-keys-project");
+    const databasePath = path.join(await makeTempDir("progress-keys-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const hotCount = 20;
+    const otherKeys = ["a", "b", "c", "d", "e"];
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "progress-keys",
+        startAt: "work",
+        nodes: {
+          work: action({
+            effect: idempotentEffect("test.progress-keys"),
+            run: async ({ publishUpdate }) => {
+              for (const key of otherKeys) {
+                await publishUpdate({
+                  type: "progress",
+                  key,
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: 1,
+                    total: 2,
+                    unit: "items",
+                  },
+                });
+              }
+              for (let index = 0; index < hotCount; index += 1) {
+                await publishUpdate({
+                  type: "progress",
+                  key: "hot",
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: index,
+                    total: hotCount,
+                    unit: "items",
+                  },
+                });
+              }
+              return "done";
+            },
+          }),
+        },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-progress-keys";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:progress-keys",
+      workflowSource: {
+        root: { kind: "builtin", id: "progress-keys", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "progress-keys",
+      claimToken: "claim-progress-keys",
+      leaseMs: 60_000,
+      originSessionId: "session-progress-keys",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-progress-keys"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session("session-progress-keys", null).run;
+    if (run === null) throw new Error("session run missing");
+    // A hot key cannot hide the other tracks: the projection carries the latest
+    // record of every key, so one key's many updates replace only its own.
+    expect(run.progressUpdates.map((update) => update.key)).toEqual([...otherKeys, "hot"]);
+    expect(run.progressUpdates.at(-1)?.data).toMatchObject({
+      completed: hotCount - 1,
+      total: hotCount,
+    });
+    state.close();
+  }, 60_000);
+
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
     const projectPath = await makeTempDir("server-view-project");
     const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");
