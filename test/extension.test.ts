@@ -1601,7 +1601,7 @@ export default defineResourceManager({
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("asks for the next node window when the widget scrolls past its edge", async () => {
+  it("pages the widget window at its edge and keeps a failed request loaded", async () => {
     const { cwd } = await setupProject();
     await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
     const workflowPath = await writeWideWorkflow(cwd, 300);
@@ -1629,8 +1629,12 @@ export default defineResourceManager({
       () => requested.mock.calls.length >= 1,
       "the widget never asked for the next window",
     );
+    // The press sequence reached the end of the loaded window, so it shows the
+    // last rows of that window, not the next one.
+    expect(rendered()).toContain("↑ ");
     // A failed request keeps the loaded window and stays retryable.
-    expect(rendered()).toContain("ƒ n000");
+    expect(rendered()).not.toContain("ƒ n000");
+    expect(rendered()).not.toContain("ƒ n299");
     await scrollDownUntil(
       () => requested.mock.calls.length >= 2,
       "the widget never retried its window request",
@@ -1639,8 +1643,26 @@ export default defineResourceManager({
       () => /ƒ n2\d\d/.test(rendered()),
       "the widget never reached the next window",
     );
-    // The paged window replaced the first one instead of appending to it.
+    // The paged window replaced the first one instead of appending to it, and it
+    // opens at its top so the rows continue where the failed window ended.
     expect(rendered()).not.toContain("ƒ n000");
+    expect(rendered()).toContain("↓ ");
+    const pagesBeforeUp = requested.mock.calls.length;
+    const scrollUpUntil = async (predicate: () => boolean, message: string): Promise<void> => {
+      const deadline = Date.now() + 30_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(message);
+        fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    await scrollUpUntil(
+      () => requested.mock.calls.length > pagesBeforeUp,
+      "the widget never asked for the previous window",
+    );
+    // Scrolling up opens the previous window at its bottom, where the user was.
+    await waitUntil(() => rendered().includes("↑ "), 30_000);
+    expect(rendered()).toMatch(/ƒ n2\d\d/);
     await fake.emit("session_shutdown");
   }, 120_000);
 

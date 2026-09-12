@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { WorkflowSessionView } from "../client/view.js";
+import type { WorkflowSessionRunView, WorkflowSessionView } from "../client/view.js";
 import { widgetRunInput } from "./session-run-adapter.js";
 import { buildWidgetView } from "./widget.js";
 
@@ -20,6 +20,8 @@ export class SessionWorkflowView {
   private pageNodes: ((cursor: number | null) => Promise<void> | void) | undefined;
   /** Window the widget already asked for, so repeated key presses ask once. */
   private requestedNodeCursor: number | null = null;
+  /** Position to show when the asked window arrives, applied only on success. */
+  private pendingScroll: number | null = null;
 
   /** `scrollHint` is the effective scroll key label resolved from the configuration file. */
   constructor(private readonly scrollHint?: string) {}
@@ -46,7 +48,19 @@ export class SessionWorkflowView {
       this.scroll = null;
       this.focus = focus;
       // A new run follows its own focus again, so the next request is new too.
-      if (previousRun?.runId !== run.runId) this.requestedNodeCursor = null;
+      if (previousRun?.runId !== run.runId) {
+        this.requestedNodeCursor = null;
+        this.pendingScroll = null;
+      }
+    } else if (previousRun !== undefined && nodeWindowChanged(previousRun, run)) {
+      // An asked-for window arrived: show its top after scrolling down or its
+      // bottom after scrolling up, so the view continues where the user was.
+      if (this.pendingScroll !== null) {
+        // The widget clamps this to the new window, so an up page lands on the
+        // bottom of the previous window even when the old window was shorter.
+        this.scroll = Math.max(0, this.pendingScroll);
+        this.pendingScroll = null;
+      }
     }
     this.session = session;
     this.staleReason = null;
@@ -94,19 +108,25 @@ export class SessionWorkflowView {
     this.staleReason = null;
     this.lastNoticeKey = null;
     this.requestedNodeCursor = null;
+    this.pendingScroll = null;
     this.clearWidget(ctx);
   }
 
   /**
    * Ask for one node window. A failed request stays retryable, so the same edge
-   * can ask again instead of leaving the loaded window stuck.
+   * can ask again instead of leaving the loaded window stuck, and the view keeps
+   * its position until the asked window arrives.
    */
-  private requestWindow(cursor: number): void {
+  private requestWindow(cursor: number, position: number): void {
     this.requestedNodeCursor = cursor;
+    this.pendingScroll = position;
     const asked = this.pageNodes?.(cursor) as Promise<void> | void;
     if (asked === undefined || typeof asked.then !== "function") return;
     void asked.catch(() => {
-      if (this.requestedNodeCursor === cursor) this.requestedNodeCursor = null;
+      if (this.requestedNodeCursor === cursor) {
+        this.requestedNodeCursor = null;
+        this.pendingScroll = null;
+      }
     });
   }
 
@@ -115,22 +135,18 @@ export class SessionWorkflowView {
     if (this.session === null || run === null || run === undefined) return;
     const current = this.scroll ?? this.shownScroll;
     const next = Math.max(0, Math.min(this.maxScroll, current + delta));
-    // Scrolling past an edge of the loaded window asks for the adjacent window.
-    // Down shows the top of the next window, which continues where the last one
-    // ended. Up shows the bottom of the previous window, where the user was.
+    // Only a key press at an edge of the loaded window asks for the adjacent
+    // window, so the rows between the current position and the edge stay
+    // visible before the window moves on.
     const end = run.nodeStart + run.nodes.length;
-    if (delta > 0 && next >= this.maxScroll && end < run.nodeTotal) {
-      if (this.requestedNodeCursor !== end) {
-        this.scroll = 0;
-        this.requestWindow(end);
-      }
+    if (delta > 0 && current >= this.maxScroll && end < run.nodeTotal) {
+      if (this.requestedNodeCursor !== end) this.requestWindow(end, 0);
       return;
     }
-    if (delta < 0 && next <= 0 && run.nodeStart > 0) {
+    if (delta < 0 && current <= 0 && run.nodeStart > 0) {
       const start = Math.max(0, run.nodeStart - run.nodes.length);
       if (this.requestedNodeCursor !== start) {
-        this.scroll = Number.MAX_SAFE_INTEGER;
-        this.requestWindow(start);
+        this.requestWindow(start, Number.MAX_SAFE_INTEGER);
       }
       return;
     }
@@ -227,6 +243,17 @@ export class SessionWorkflowView {
       );
     });
   }
+}
+
+/** True when the run now holds a different node window than before. */
+function nodeWindowChanged(previous: WorkflowSessionRunView, run: WorkflowSessionRunView): boolean {
+  return (
+    previous.nodeStart !== run.nodeStart ||
+    previous.nodeTotal !== run.nodeTotal ||
+    previous.nodes.length !== run.nodes.length ||
+    previous.nodes[0]?.nodeId !== run.nodes[0]?.nodeId ||
+    previous.nodes.at(-1)?.nodeId !== run.nodes.at(-1)?.nodeId
+  );
 }
 
 function isTerminalStatus(status: string): boolean {

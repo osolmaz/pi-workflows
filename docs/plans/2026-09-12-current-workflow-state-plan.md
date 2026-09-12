@@ -548,9 +548,13 @@ row's `statusDetail`, `error`, `summary`, and human-decision summary are bounded
 
 The widget asks for the adjacent window with `view.session.window`, which moves the node cursor of
 the live session subscription. `null` returns the window to the one that follows the working node.
-The extension resets the cursor when the run changes, so a window never outlives its run. A paged
-window therefore replaces the loaded rows instead of growing them, and no client holds the complete
-topology. A failed window request clears its cursor again, so the same edge stays retryable.
+Only a key press at an edge of the loaded window asks for the adjacent window, so the rows between
+the current position and that edge stay visible first. A down page opens the next window at its
+first row, which continues where the loaded one ended, and an up page opens the previous window at
+its last row, where the user was. The view keeps the loaded window and its position until the asked
+window arrives, so a failed request stays retryable without losing the position. The extension
+resets the cursor when the run changes, so a window never outlives its run. A paged window therefore
+replaces the loaded rows instead of growing them, and no client holds the complete topology.
 
 When the run has no working node, the default window follows the row the widget highlights: the most
 recent failed node when there is one, otherwise the last row. Detail text belongs to the same node,

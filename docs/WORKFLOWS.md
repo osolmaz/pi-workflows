@@ -655,9 +655,11 @@ modifiers and uses `up` and `down` renders as one label, which for the keys abov
 is `ctrl+alt+↑/↓ scroll`, and the default pair renders as `shift+↑/↓ scroll`.
 Other pairs are listed in full, for example `ctrl+up · alt+down`. The segment is
 omitted when both directions are off. The extension reads the file when it
-loads, so run `/reload` after a change. Scrolling down at the last loaded node
-asks the server for the next node window, and scrolling up at the first loaded
-node asks for the previous one.
+loads, so run `/reload` after a change. A key press that reaches the last loaded
+node asks the server for the next node window, which opens at its first row. A
+key press that reaches the first loaded node asks for the previous window, which
+opens at its last row. The view keeps the loaded window and its position until
+the asked window arrives, so a failed request stays retryable.
 
 The reason this file exists is another package that also uses `shift+up` or
 `shift+down`, such as `pi-background-tasks`. Remap or remove those two keys here
