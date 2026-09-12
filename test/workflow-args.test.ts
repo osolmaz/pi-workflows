@@ -36,7 +36,7 @@ describe("parseWorkflowArgs answer", () => {
     expect(() => parseWorkflowArgs("status bad id")).toThrow(/valid run id/);
   });
 
-  it("parses restored hosted commands", () => {
+  it("parses restored server commands", () => {
     expect(parseWorkflowArgs("restart run-1")).toEqual({ kind: "restart", runId: "run-1" });
     expect(
       parseWorkflowArgs('change-settings [{"op":"replace","path":"/mode","value":"safe"}]'),

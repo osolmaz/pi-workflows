@@ -48,7 +48,7 @@ describe("SQLite multi-process ownership", () => {
       const state = new StateDatabase({ filePath: process.argv[1] });
       try {
         const claim = new StateMutationStore(state).claim({
-          resourceId: process.argv[2], ownerType: "host", ownerId: process.argv[3],
+          resourceId: process.argv[2], ownerType: "server", ownerId: process.argv[3],
           expectedRevision: 0, leaseMs: 60000,
         });
         process.stdout.write(claim === undefined ? "busy" : "won");
@@ -59,7 +59,7 @@ describe("SQLite multi-process ownership", () => {
       }
     `;
     const results = await Promise.all(
-      ["host-a", "host-b"].map(
+      ["server-a", "server-b"].map(
         async (owner) =>
           await execFileAsync(
             process.execPath,
@@ -83,7 +83,7 @@ describe("SQLite multi-process ownership", () => {
       verified.connection
         .prepare("SELECT generation, owner_id AS ownerId FROM leases WHERE resource_id = ?")
         .get(resourceId),
-    ).toMatchObject({ generation: 1, ownerId: expect.stringMatching(/^host-/) });
+    ).toMatchObject({ generation: 1, ownerId: expect.stringMatching(/^server-/) });
     verified.close();
   });
 });

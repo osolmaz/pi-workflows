@@ -7,7 +7,7 @@ import { WorkflowServer } from "../src/server/server.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function setup(body: string, extra = "") {
-  const cwd = await makeTempDir("hosted-resource-lifecycle");
+  const cwd = await makeTempDir("server-resource-lifecycle");
   const directory = path.join(cwd, ".pi", "resource-managers");
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(
@@ -22,11 +22,11 @@ async reconcile(ctx, resource) { ${body} } });`,
   );
   const databasePath = path.join(cwd, "state.sqlite");
   const store = new SqliteResourceManagerStore(databasePath, { projectPath: cwd });
-  const host = new WorkflowServer({ databasePath, claimPollMs: 10, maxWorkers: 2 });
+  const server = new WorkflowServer({ databasePath, claimPollMs: 10, maxRunners: 2 });
   return {
     cwd,
     store,
-    host,
+    server,
     put(key: string, spec: unknown = {}) {
       const resource = store.putResource({ resourceManager: "test", key, spec, initialStatus: {} });
       store.enqueue({ resourceManager: "test", key });
@@ -39,13 +39,13 @@ async reconcile(ctx, resource) { ${body} } });`,
       await fs.writeFile(path.join(cwd, name), "ready");
     },
     async close() {
-      await host.stop();
+      await server.stop();
       store.close();
     },
   };
 }
 
-describe("hosted resource lifecycle", () => {
+describe("workflow server resource lifecycle", () => {
   it("discards an old generation's result and runs the updated spec", async () => {
     const test =
       await setup(`await fs.writeFile(path.join(directory, 'started-' + resource.spec.value), 'started');
@@ -53,7 +53,7 @@ if (resource.spec.value === 1) await waitFor('release');
 return ctx.settled({ resourceManagerStatus: { value: resource.spec.value } });`);
     try {
       test.put("one", { value: 1 });
-      await test.host.start();
+      await test.server.start();
       await waitUntil(() => existsSync(path.join(test.cwd, "started-1")), 30_000);
       test.put("one", { value: 2 });
       await test.release("release");
@@ -74,7 +74,7 @@ await waitFor('release'); return ctx.settled();`);
     try {
       test.put("one");
       test.put("two");
-      await test.host.start();
+      await test.server.start();
       await waitUntil(
         () =>
           existsSync(path.join(test.cwd, "one.calls")) &&
@@ -97,25 +97,25 @@ await waitFor('release'); return ctx.settled();`);
     }
   }, 45_000);
 
-  it("rejects a stale worker and continues independent resource work", async () => {
+  it("rejects a stale runner and continues independent resource work", async () => {
     const test = await setup(`if (resource.metadata.key === 'stale') {
 await fs.writeFile(path.join(directory, 'started'), 'started'); await waitFor('release');
 } return ctx.settled({ resourceManagerStatus: { completed: true } });`);
     try {
       test.put("stale");
-      await test.host.start();
+      await test.server.start();
       await waitUntil(() => existsSync(path.join(test.cwd, "started")), 30_000);
       const now = Date.now();
       test.store.state.connection
         .prepare(`UPDATE leases SET generation = generation + 1,
-        owner_type = 'controller', owner_id = 'replacement', token_hash = zeroblob(32),
+        owner_type = 'resource_manager', owner_id = 'replacement', token_hash = zeroblob(32),
         acquired_at = ?, heartbeat_at = ?, expires_at = ?
-        WHERE resource_id = (SELECT resource_id FROM controller_resources WHERE resource_key = 'stale')`)
+        WHERE resource_id = (SELECT resource_id FROM managed_resources WHERE resource_key = 'stale')`)
         .run(now, now, now + 60_000);
       test.put("other");
       await test.release("release");
       await waitUntil(() => test.current("other")?.status.observedGeneration === 1, 30_000);
-      await test.host.stop();
+      await test.server.stop();
       expect(test.current("stale")?.status.observedGeneration).not.toBe(1);
       expect(
         test.store
@@ -135,14 +135,14 @@ await fs.writeFile(path.join(directory, 'started'), 'started'); await waitFor('r
       const test = await setup(body, "timeoutMs: 20,");
       try {
         test.put("one");
-        await test.host.start();
+        await test.server.start();
         await waitUntil(() => test.store.listQueue()[0]?.consecutiveErrors === 1, 30_000);
         const failure = test.store
           .listEvents({ key: "one" })
           .find((event) => event.type === "reconcile_failed");
         expect(failure?.payload.requeueAfterMs).toBe(1_000);
         expect(failure?.payload.error).toMatch(/result must be an object|timed out/);
-        await test.host.stop();
+        await test.server.stop();
         expect(test.store.listQueue()[0]?.consecutiveErrors).toBe(1);
         expect(test.current("one")?.status.observedGeneration).not.toBe(1);
       } finally {
@@ -158,7 +158,7 @@ await fs.writeFile(path.join(directory, 'started'), 'started'); await waitFor('r
 return ctx.requeueAfter(60000, { finalizers: ['test.cleanup'], resourceManagerStatus: { observed: true } });`);
     try {
       test.put("one");
-      await test.host.start();
+      await test.server.start();
       await waitUntil(() => test.current("one")?.status.observedGeneration === 1, 30_000);
       expect(test.current("one")?.metadata.finalizers).toEqual(["test.cleanup"]);
       const finished = test.store

@@ -975,8 +975,8 @@ export class WorkflowRunQueueStore extends ProjectStore {
     claimToken: string,
   ):
     | {
-        actor: { type: "session" | "host"; id: string };
-        ownerType: "session" | "host";
+        actor: { type: "session" | "server"; id: string };
+        ownerType: "session" | "server";
         ownerId: string;
         token: string;
         generation: number;
@@ -988,7 +988,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
     const lease = this.requireLease(row.resourceId);
     if (lease.tokenHash === null || !lease.tokenHash.equals(tokenHash(claimToken)))
       return undefined;
-    const ownerType = row.ownerId.startsWith("host-") ? "host" : "session";
+    const ownerType = row.ownerId.startsWith("server-") ? "server" : "session";
     return {
       actor: { type: ownerType, id: row.ownerId },
       ownerType,
@@ -1546,7 +1546,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
         row.resourceId,
         revision,
         options.type,
-        options.runnerId?.startsWith("host-") ? "host" : "session",
+        options.runnerId?.startsWith("server-") ? "server" : "session",
         options.runnerId ?? null,
         options.payload ?? {},
         now,
@@ -1772,7 +1772,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       )
       .run(
         generation,
-        runnerId.startsWith("host-") ? "host" : "session",
+        runnerId.startsWith("server-") ? "server" : "session",
         runnerId,
         tokenHash(claimToken),
         now,
@@ -1798,7 +1798,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       row.resourceId,
       revision + 1,
       "lease.claimed",
-      runnerId.startsWith("host-") ? "host" : "session",
+      runnerId.startsWith("server-") ? "server" : "session",
       runnerId,
       { expiresAt },
       now,

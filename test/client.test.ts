@@ -93,8 +93,8 @@ describe("WorkflowClient", () => {
 
   it("rejects a backpressured request when its connection closes", async () => {
     const databasePath = path.join(await makeTempDir("client-drain-close"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-drain-close" });
     await client.connect();
     const socket = (client as unknown as { socket: net.Socket | null }).socket;
@@ -108,14 +108,14 @@ describe("WorkflowClient", () => {
     } finally {
       socket.destroy();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("uses one connection and rejects watches for missing runs", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-live" });
     const events: string[] = [];
     let unwatchRuns: (() => Promise<void>) | undefined;
@@ -206,7 +206,7 @@ describe("WorkflowClient", () => {
         () =>
           [
             ...(
-              host as unknown as {
+              server as unknown as {
                 connections: Map<string, { subscriptions: Map<string, unknown> }>;
               }
             ).connections.values(),
@@ -216,7 +216,7 @@ describe("WorkflowClient", () => {
     } finally {
       await client.close();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
     await expect(client.request({ operation: "server.status" })).rejects.toThrow(
       "Workflow client is closed",
@@ -962,7 +962,7 @@ describe("WorkflowClient", () => {
     }
   });
 
-  it("reports a package mismatch without trying to replace the live host", async () => {
+  it("reports a package mismatch without trying to replace the live workflow server", async () => {
     const databasePath = path.join(await makeTempDir("client-version"), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);
     await fs.mkdir(path.dirname(socketPath), { recursive: true });

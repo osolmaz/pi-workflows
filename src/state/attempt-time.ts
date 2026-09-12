@@ -21,7 +21,7 @@ export class AttemptTime {
       if (open !== undefined) {
         if (!this.anchors.has(intervalKey(open))) {
           throw new Error(
-            "Recover the previous host's active intervals before starting model work",
+            "Recover the previous workflow server's active intervals before starting model work",
           );
         }
         return;
@@ -68,7 +68,7 @@ export class AttemptTime {
   }
 
   recover(): void {
-    // A crashed host can prove only the last saved sample, not time spent while offline.
+    // A crashed workflow server can prove only the last saved sample, not time spent while offline.
     this.state.connection
       .prepare("UPDATE attempt_active_intervals SET ended_at = observed_at WHERE ended_at IS NULL")
       .run();
@@ -78,7 +78,7 @@ export class AttemptTime {
   private sampleInterval(interval: Interval): void {
     const anchor = this.anchors.get(intervalKey(interval));
     if (anchor === undefined) {
-      throw new Error("Active interval belongs to a previous host; recover it before sampling");
+      throw new Error("Active interval belongs to a previous workflow server; recover it before sampling");
     }
     const elapsedMs = Math.max(interval.elapsedMs, this.clock.monotonic() - anchor, 0);
     this.state.connection
@@ -112,7 +112,7 @@ export function closeRunTime(state: StateDatabase, runId: string): void {
     .run(runId);
 }
 
-/** Freeze the last host sample when an attempt settles outside its model turn. */
+/** Freeze the last workflow server sample when an attempt settles outside its model turn. */
 export function closeAttemptTime(state: StateDatabase, attemptId: string): void {
   state.connection
     .prepare(

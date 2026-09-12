@@ -108,7 +108,7 @@ function command(commands: CommandInfo[], name: string): CommandInfo | undefined
 async function stopPackageServer(directory: string): Promise<void> {
   const databasePath = path.join(directory, ".pi", "agent", "workflows", "state.sqlite");
   const endpoint = clientSocketPath(databasePath);
-  const lockPath = path.join(path.dirname(endpoint), "host.lock.json");
+  const lockPath = path.join(path.dirname(endpoint), "server.lock.json");
   const deadline = Date.now() + SERVER_STOP_TIMEOUT_MS;
   const client = new WorkflowClient({ databasePath });
   try {

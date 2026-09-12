@@ -9,11 +9,11 @@ import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 const stores: ResourceManagerStore[] = [];
+const workflowServers: WorkflowServer[] = [];
 const servers: http.Server[] = [];
-const hosts: WorkflowServer[] = [];
 
 afterEach(async () => {
-  await Promise.all(hosts.splice(0).map((host) => host.stop()));
+  await Promise.all(workflowServers.splice(0).map((server) => server.stop()));
   for (const store of stores.splice(0)) {
     store.close();
   }
@@ -32,7 +32,7 @@ afterEach(async () => {
 describe("pull request resource manager example", () => {
   it("runs child work and performs one exact-head merge", async () => {
     const github = await fakeGitHub({ head: "abc", checks: "success" });
-    const { store, queue, host } = await makeStore();
+    const { store, queue, server } = await makeStore();
     const spec = {
       apiBaseUrl: github.url,
       repository: "owner/repo",
@@ -50,7 +50,7 @@ describe("pull request resource manager example", () => {
     for (let index = 0; index < 9; index += 1) {
       store.enqueue({ resourceManager: "pull-request", key: "owner/repo#1" });
     }
-    await host.start();
+    await server.start();
     await waitUntil(
       () =>
         store.getResource<unknown, { phase: string }>({
@@ -78,7 +78,7 @@ describe("pull request resource manager example", () => {
 
   it("blocks a changed head before scheduling or mutation", async () => {
     const github = await fakeGitHub({ head: "new-head", checks: "success" });
-    const { store, queue, host } = await makeStore();
+    const { store, queue, server } = await makeStore();
     const spec = {
       apiBaseUrl: github.url,
       repository: "owner/repo",
@@ -94,7 +94,7 @@ describe("pull request resource manager example", () => {
       initialStatus: { phase: "observing" },
     });
     store.enqueue({ resourceManager: "pull-request", key: "owner/repo#1" });
-    await host.start();
+    await server.start();
     await waitUntil(
       () =>
         store.getResource({ resourceManager: "pull-request", key: "owner/repo#1" })?.status
@@ -128,15 +128,15 @@ export default defineWorkflow({ name: "repair", startAt: "work", nodes: { work: 
   const databasePath = path.join(dir, "state.sqlite");
   const store = new SqliteResourceManagerStore(databasePath, { projectPath: dir });
   const queue = new WorkflowRunQueueStore(databasePath, { state: store.state, projectPath: dir });
-  const host = new WorkflowServer({
+  const server = new WorkflowServer({
     databasePath,
     claimPollMs: 10,
-    maxWorkers: 1,
+    maxRunners: 1,
     env: { GITHUB_TOKEN: "test-token" },
   });
   stores.push(store);
-  hosts.push(host);
-  return { store, queue, host };
+  workflowServers.push(server);
+  return { store, queue, server };
 }
 
 async function fakeGitHub(options: { head: string; checks: "pending" | "success" }) {

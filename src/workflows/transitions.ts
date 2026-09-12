@@ -8,7 +8,7 @@ import type {
   WorkflowTraceEventDraft,
 } from "./types.js";
 
-/** Worker proposals carry one change, never a replacement run projection. */
+/** Runner proposals carry one change, never a replacement run projection. */
 export type WorkflowTransition = {
   event: WorkflowTraceEventDraft;
 } & (

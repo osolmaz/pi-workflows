@@ -37,8 +37,8 @@ function request(overrides: Partial<ClientRequest> = {}): ClientRequest {
 }
 
 async function fixture() {
-  const projectPath = await makeTempDir("host-state-project");
-  const databasePath = path.join(await makeTempDir("host-state-db"), "state.sqlite");
+  const projectPath = await makeTempDir("server-state-project");
+  const databasePath = path.join(await makeTempDir("server-state-db"), "state.sqlite");
   const queue = new WorkflowRunQueueStore(databasePath, { projectPath });
   return { projectPath, databasePath, queue, server: new ServerStateStore(databasePath) };
 }
@@ -52,7 +52,7 @@ function reserve(queue: WorkflowRunQueueStore, runId = "run-1") {
     definitionDigest,
     definitionSnapshot: snapshot,
     input: {},
-    runnerId: "host-test",
+    runnerId: "server-test",
     claimToken: "claim-token",
     leaseMs: 60_000,
     originSessionId: "session-1",
@@ -85,7 +85,7 @@ describe("server durable state", () => {
   it("fences server epochs and never revives an expired server", async () => {
     const { server, queue } = await fixture();
     const first = server.acquireServer({
-      serverId: "host-1",
+      serverId: "server-1",
       pid: 100,
       processStartIdentity: "start-1",
       leaseMs: 1_000,
@@ -94,7 +94,7 @@ describe("server durable state", () => {
     expect(first.epoch).toBe(1);
     expect(() =>
       server.acquireServer({
-        serverId: "host-2",
+        serverId: "server-2",
         pid: 200,
         processStartIdentity: "start-2",
         leaseMs: 1_000,
@@ -102,7 +102,7 @@ describe("server durable state", () => {
       }),
     ).toThrow(/live Pi Workflows server/);
     const second = server.acquireServer({
-      serverId: "host-2",
+      serverId: "server-2",
       pid: 200,
       processStartIdentity: "start-2",
       leaseMs: 1_000,
@@ -183,10 +183,10 @@ describe("server durable state", () => {
     if (attemptId === undefined) throw new Error("attempt missing");
 
     const envelope: WorkflowRunnerLaunchEnvelope = {
-      schema: "pi-workflows.worker-launch.v1",
+      schema: "pi-workflows.runner-launch.v1",
       runId: "run-1",
       generation: 1,
-      runnerEpoch: "worker-1",
+      runnerEpoch: "runner-1",
       projectPath,
       workflowSource: { kind: "builtin", id: "echo", revision: "test" },
       definitionDigest: `sha256:${definitionDigest}`,
@@ -195,11 +195,11 @@ describe("server durable state", () => {
     };
     server.recordRunnerStart(envelope, 1);
     expect(() =>
-      server.recordRunnerStart({ ...envelope, runnerEpoch: "worker-duplicate" }, 1),
+      server.recordRunnerStart({ ...envelope, runnerEpoch: "runner-duplicate" }, 1),
     ).toThrow(/UNIQUE constraint/);
-    server.attachRunnerProcess("worker-1", 123, "start-123");
-    server.markRunnerReady("worker-1");
-    server.finishRunner({ runnerEpoch: "worker-1", outcome: "exited", exitCode: 0 });
+    server.attachRunnerProcess("runner-1", 123, "start-123");
+    server.markRunnerReady("runner-1");
+    server.finishRunner({ runnerEpoch: "runner-1", outcome: "exited", exitCode: 0 });
 
     const interaction = server.createInteractiveRequest({
       requestId: "interaction-1",

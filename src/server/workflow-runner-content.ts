@@ -111,7 +111,7 @@ export async function materializeRunnerContent(
 
 function responseTooLarge(messageId: string): WorkflowRunnerResponse {
   return {
-    schema: "pi-workflows.worker-response.v1",
+    schema: "pi-workflows.runner-response.v1",
     messageId,
     outcome: "rejected",
     error: "Workflow runner response could not be transferred within the protocol limit",

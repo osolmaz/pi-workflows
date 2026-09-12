@@ -1278,9 +1278,9 @@ function manifest(
     status,
     traceSchema: "pi-workflows.trace-event.v1",
     paths: {
-      workflow: "host",
-      state: "host",
-      trace: "host",
+      workflow: "server",
+      state: "server",
+      trace: "server",
     },
   };
 }

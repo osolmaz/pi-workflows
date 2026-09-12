@@ -48,7 +48,7 @@ export type WorkflowServerStatusRecord = {
 };
 
 export type WorkflowRunnerLaunchEnvelope = {
-  schema: "pi-workflows.worker-launch.v1";
+  schema: "pi-workflows.runner-launch.v1";
   runId: string;
   generation: number;
   runnerEpoch: string;
@@ -121,10 +121,10 @@ export class ServerStateStore {
       const expiresAt = now + options.leaseMs;
       const changed = this.state.connection
         .prepare(
-          `UPDATE workflow_host_state
-           SET epoch = ?, host_id = ?, token_hash = ?, pid = ?, process_start_identity = ?,
+          `UPDATE workflow_server_state
+           SET epoch = ?, server_id = ?, token_hash = ?, pid = ?, process_start_identity = ?,
                started_at = ?, heartbeat_at = ?, expires_at = ?
-           WHERE id = 1 AND epoch = ? AND (host_id IS NULL OR expires_at IS NULL OR expires_at <= ?)`,
+           WHERE id = 1 AND epoch = ? AND (server_id IS NULL OR expires_at IS NULL OR expires_at <= ?)`,
         )
         .run(
           epoch,
@@ -157,8 +157,8 @@ export class ServerStateStore {
       const expiresAt = now + leaseMs;
       const changed = this.state.connection
         .prepare(
-          `UPDATE workflow_host_state SET heartbeat_at = ?, expires_at = ?
-           WHERE id = 1 AND epoch = ? AND host_id = ? AND token_hash = ?
+          `UPDATE workflow_server_state SET heartbeat_at = ?, expires_at = ?
+           WHERE id = 1 AND epoch = ? AND server_id = ? AND token_hash = ?
              AND pid = ? AND process_start_identity = ? AND expires_at > ?`,
         )
         .run(
@@ -181,10 +181,10 @@ export class ServerStateStore {
       () =>
         this.state.connection
           .prepare(
-            `UPDATE workflow_host_state
-             SET host_id = NULL, token_hash = NULL, pid = NULL, process_start_identity = NULL,
+            `UPDATE workflow_server_state
+             SET server_id = NULL, token_hash = NULL, pid = NULL, process_start_identity = NULL,
                  started_at = NULL, heartbeat_at = NULL, expires_at = NULL
-             WHERE id = 1 AND epoch = ? AND host_id = ? AND token_hash = ?
+             WHERE id = 1 AND epoch = ? AND server_id = ? AND token_hash = ?
                AND pid = ? AND process_start_identity = ?`,
           )
           .run(
@@ -216,7 +216,7 @@ export class ServerStateStore {
       .prepare(
         `SELECT request_fingerprint AS clientRequestFingerprint, outcome, accepted_revision AS revision,
                 receipt_hash AS receiptHash, error_hash AS errorHash
-         FROM host_commands WHERE request_id = ?`,
+         FROM server_commands WHERE request_id = ?`,
       )
       .get(request.requestId);
     if (!isCommandRow(row)) return undefined;
@@ -238,7 +238,7 @@ export class ServerStateStore {
         `SELECT request_id AS requestId, request_fingerprint AS clientRequestFingerprint,
                 outcome, accepted_revision AS revision, receipt_hash AS receiptHash,
                 error_hash AS errorHash
-         FROM host_commands WHERE client_id = ? AND idempotency_key = ?`,
+         FROM server_commands WHERE client_id = ? AND idempotency_key = ?`,
       )
       .get(request.clientId, request.idempotencyKey);
     if (!isIdempotentCommandRow(idempotent)) return undefined;
@@ -280,10 +280,10 @@ export class ServerStateStore {
         response.error === undefined ? null : this.state.putText(response.error, now);
       this.state.connection
         .prepare(
-          `INSERT INTO host_commands(
+          `INSERT INTO server_commands(
              request_id, client_id, operation, idempotency_key, request_fingerprint,
              run_id, accepted_revision, outcome, receipt_hash, error_hash,
-             host_epoch, created_at, completed_at
+             server_epoch, created_at, completed_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
@@ -311,8 +311,8 @@ export class ServerStateStore {
       const launchHash = this.state.putJson(envelope, now);
       this.state.connection
         .prepare(
-          `INSERT INTO run_workers(
-             worker_epoch, run_id, generation, host_epoch, launch_envelope_hash,
+          `INSERT INTO run_runners(
+             runner_epoch, run_id, generation, server_epoch, launch_envelope_hash,
              status, started_at
            ) VALUES (?, ?, ?, ?, ?, 'starting', ?)`,
         )
@@ -330,8 +330,8 @@ export class ServerStateStore {
   attachRunnerProcess(runnerEpoch: string, pid: number, processStartIdentity: string): void {
     const changed = this.state.connection
       .prepare(
-        `UPDATE run_workers SET pid = ?, process_start_identity = ?
-         WHERE worker_epoch = ? AND status = 'starting' AND pid IS NULL`,
+        `UPDATE run_runners SET pid = ?, process_start_identity = ?
+         WHERE runner_epoch = ? AND status = 'starting' AND pid IS NULL`,
       )
       .run(pid, processStartIdentity, runnerEpoch);
     if (changed.changes !== 1) throw new Error(`Runner epoch is not starting: ${runnerEpoch}`);
@@ -341,8 +341,8 @@ export class ServerStateStore {
     const now = Date.now();
     const changed = this.state.connection
       .prepare(
-        `UPDATE run_workers SET status = 'running', ready_at = ?
-         WHERE worker_epoch = ? AND status = 'starting'`,
+        `UPDATE run_runners SET status = 'running', ready_at = ?
+         WHERE runner_epoch = ? AND status = 'starting'`,
       )
       .run(now, runnerEpoch);
     if (changed.changes !== 1) throw new Error(`Runner epoch cannot become ready: ${runnerEpoch}`);
@@ -361,9 +361,9 @@ export class ServerStateStore {
         options.diagnostic === undefined ? null : this.state.putText(options.diagnostic, now);
       const changed = this.state.connection
         .prepare(
-          `UPDATE run_workers
+          `UPDATE run_runners
            SET status = ?, finished_at = ?, exit_code = ?, signal = ?, diagnostic_hash = ?
-           WHERE worker_epoch = ? AND status IN ('starting', 'ready', 'running')`,
+           WHERE runner_epoch = ? AND status IN ('starting', 'ready', 'running')`,
         )
         .run(
           options.outcome,
@@ -383,13 +383,13 @@ export class ServerStateStore {
       .prepare(
         `SELECT request_fingerprint AS clientRequestFingerprint, outcome,
                 accepted_revision AS revision, result_hash AS resultHash, error_hash AS errorHash
-         FROM worker_messages WHERE worker_epoch = ? AND message_id = ?`,
+         FROM runner_messages WHERE runner_epoch = ? AND message_id = ?`,
       )
       .get(message.runnerEpoch, message.messageId);
     if (!isRunnerMessageRow(row)) return undefined;
     if (!row.clientRequestFingerprint.equals(runnerMessageFingerprint(message))) {
       return {
-        schema: "pi-workflows.worker-response.v1",
+        schema: "pi-workflows.runner-response.v1",
         messageId: message.messageId,
         outcome: "rejected",
         error: "Runner message ID was reused with another payload",
@@ -412,8 +412,8 @@ export class ServerStateStore {
         response.error === undefined ? null : this.state.putText(response.error, now);
       this.state.connection
         .prepare(
-          `INSERT INTO worker_messages(
-             worker_epoch, message_id, request_fingerprint, outcome, accepted_revision,
+          `INSERT INTO runner_messages(
+             runner_epoch, message_id, request_fingerprint, outcome, accepted_revision,
              result_hash, error_hash, completed_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
@@ -892,10 +892,10 @@ export class ServerStateStore {
   private serverRow(): ServerRow {
     const row = this.state.connection
       .prepare(
-        `SELECT epoch, host_id AS serverId, token_hash AS tokenHash, pid,
+        `SELECT epoch, server_id AS serverId, token_hash AS tokenHash, pid,
                 process_start_identity AS processStartIdentity, started_at AS startedAt,
                 heartbeat_at AS heartbeatAt, expires_at AS expiresAt
-         FROM workflow_host_state WHERE id = 1`,
+         FROM workflow_server_state WHERE id = 1`,
       )
       .get();
     if (!isServerRow(row)) throw new Error("Pi Workflows server state is missing");
@@ -1105,7 +1105,7 @@ function runnerMessageResponse(
   const error =
     row.errorHash === null ? undefined : state.readBlob(row.errorHash)?.content.toString("utf8");
   return {
-    schema: "pi-workflows.worker-response.v1",
+    schema: "pi-workflows.runner-response.v1",
     messageId,
     outcome: row.outcome,
     ...(row.revision === null ? {} : { revision: row.revision }),

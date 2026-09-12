@@ -123,8 +123,8 @@ export async function resolveSettingsChange(
     definition,
     request.current,
     request.patch,
-    { type: "controller", id: request.actorId },
-    "controller-request",
+    { type: "resource_manager", id: request.actorId },
+    "resource-manager-request",
   );
   return {
     schema: "pi-workflows.resolved-settings-change.v1",

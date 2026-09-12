@@ -12,7 +12,7 @@ async function setup() {
   return { store, databasePath, projectPath };
 }
 
-function claim(store: SqliteResourceManagerStore, ownerId = "worker-1"): ResourceManagerQueueClaim {
+function claim(store: SqliteResourceManagerStore, ownerId = "runner-1"): ResourceManagerQueueClaim {
   const value = store.claimNext({
     resourceManagers: ["jobs"],
     ownerId,
@@ -28,7 +28,7 @@ describe("SqliteResourceManagerStore", () => {
     const resource = store.putResource({
       resourceManager: "jobs",
       key: "one",
-      spec: { image: "worker" },
+      spec: { image: "runner" },
       initialStatus: { phase: "new" },
     });
     expect(resource.metadata).toMatchObject({ resourceManager: "jobs", key: "one", generation: 1 });
@@ -37,7 +37,7 @@ describe("SqliteResourceManagerStore", () => {
       count: 1,
     });
     expect(
-      store.state.connection.prepare("SELECT count(*) AS count FROM controller_resources").get(),
+      store.state.connection.prepare("SELECT count(*) AS count FROM managed_resources").get(),
     ).toEqual({ count: 1 });
     expect(store.listEvents()).not.toHaveLength(0);
     expect(store.listEvents({ resourceManager: "jobs", key: "one", limit: 1 })).toHaveLength(1);
@@ -113,12 +113,12 @@ describe("SqliteResourceManagerStore", () => {
   it("increments claim generations and rejects a superseded owner", async () => {
     const { store } = await setup();
     store.putResource({ resourceManager: "jobs", key: "one", spec: {}, initialStatus: {} });
-    const first = claim(store, "worker-1");
+    const first = claim(store, "runner-1");
     expect(first.generation).toBe(1);
     expect(store.requeueClaim(first, { availableAt: new Date().toISOString() })).toBe(true);
     const second = store.claimNext({
       resourceManagers: ["jobs"],
-      ownerId: "worker-2",
+      ownerId: "runner-2",
       leaseMs: 60_000,
     });
     expect(second?.generation).toBe(2);
@@ -138,7 +138,7 @@ describe("SqliteResourceManagerStore", () => {
       }),
     ).toBe(true);
     expect(store.listQueue()[0]).toMatchObject({ consecutiveErrors: 1 });
-    const next = claim(store, "worker-2");
+    const next = claim(store, "runner-2");
     expect(store.settleClaim(next)).toBe(true);
     expect(store.listQueue()).toEqual([]);
     store.close();

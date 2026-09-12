@@ -5,7 +5,7 @@ import type { JsonValue } from "../src/state/json.js";
 import { firstRunView } from "../src/viewer/cli.js";
 import { renderClientView } from "../src/viewer/tui.js";
 
-describe("host client renderer", () => {
+describe("workflow client renderer", () => {
   it("rejects a missing one-shot run", async () => {
     const client = { getRun: vi.fn(async () => null) } as unknown as WorkflowClient;
     await expect(firstRunView(client, "missing-run")).rejects.toThrow(
@@ -176,7 +176,7 @@ describe("host client renderer", () => {
     expect(lines).toContain('output {"ready":true}');
   });
 
-  it("renders every host status without inventing another reducer", () => {
+  it("renders every workflow server status without inventing another reducer", () => {
     const cases = [
       ["running", "●"],
       ["waiting", "○"],
@@ -205,7 +205,7 @@ describe("host client renderer", () => {
     }
   });
 
-  it("renders the exact host status and safe fallback values", () => {
+  it("renders the exact workflow server status and safe fallback values", () => {
     expect(
       renderClientView(
         {

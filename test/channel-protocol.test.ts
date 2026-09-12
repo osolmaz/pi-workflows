@@ -59,7 +59,7 @@ describe("channel adapter protocol", () => {
     ).toMatchObject({ kind: "channel.ready", cursor: 0 });
   });
 
-  it("rejects malformed child fields before the host handles them", () => {
+  it("rejects malformed child fields before the workflow server handles them", () => {
     expect(() =>
       parseChannelAdapterMessage(
         frame({
@@ -83,7 +83,7 @@ describe("channel adapter protocol", () => {
     ).toThrow("Decision input values must be strings");
   });
 
-  it("rejects a host command that exposes the private decision subject", () => {
+  it("rejects a server command that exposes the private decision subject", () => {
     const response: ChannelAdapterResponse = {
       schema: CHANNEL_ADAPTER_PROTOCOL_SCHEMA,
       type: "response",
@@ -172,7 +172,7 @@ describe("channel adapter protocol", () => {
     }
   });
 
-  it("accepts every host command kind", () => {
+  it("accepts every server command kind", () => {
     const reference = {
       chatId: "-200",
       messageId: "10",

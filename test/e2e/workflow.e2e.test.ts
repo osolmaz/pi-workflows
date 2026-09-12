@@ -16,7 +16,7 @@ import { WorkflowRunQueueStore } from "../../src/workflows/queue.js";
 import type { InteractiveRequestRecord } from "../../src/workflows/requests.js";
 import { WorkflowRunStore } from "../../src/workflows/store.js";
 import type { WorkflowRunState } from "../../src/workflows/types.js";
-import { makeTempDir } from "../helpers.js";
+import { currentWorkflowMessageId, makeTempDir, reportBranch } from "../helpers.js";
 import { startMockOpenAiServer } from "./mock-openai.js";
 
 const execFileAsync = promisify(execFile);
@@ -133,7 +133,7 @@ export default defineWorkflow({
 const RESOURCE_MANAGER = `import { conditionTrue, defineResourceManager } from "@osolmaz/pi-workflows/resource-managers";
 
 export default defineResourceManager({
-  name: "hosted-e2e",
+  name: "server-e2e",
   initialStatus: (spec) => ({
     phase: "new",
     resolverPid: process.pid,
@@ -344,10 +344,10 @@ async function waitForPendingInteraction(
   await waitForCondition(
     () => {
       try {
-        const host = new ServerStateStore(databasePath, { readOnly: true });
+        const state = new ServerStateStore(databasePath, { readOnly: true });
         const runs = new WorkflowRunStore(databasePath, { readOnly: true });
         try {
-          found = host
+          found = state
             .listPendingInteractions(sessionId)
             .find(
               (interaction) => runs.readRun(interaction.runId)?.state.workflowName === workflowName,
@@ -355,7 +355,7 @@ async function waitForPendingInteraction(
           return found !== undefined;
         } finally {
           runs.close();
-          host.close();
+          state.close();
         }
       } catch {
         return false;
@@ -687,8 +687,8 @@ describe.sequential("out-of-process workflow server end to end", () => {
       },
     );
 
-    projectDir = await makeTempDir("pi-workflows-host-e2e-project");
-    agentDir = await makeTempDir("pi-workflows-host-e2e-agent");
+    projectDir = await makeTempDir("pi-workflows-server-e2e-project");
+    agentDir = await makeTempDir("pi-workflows-server-e2e-agent");
     databasePath = workflowStatePath(agentDir);
     sessionDir = path.join(agentDir, "sessions");
     sessionId = randomUUID();
@@ -715,7 +715,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
       MULTI_STEP_WIDGET_WORKFLOW,
     );
     await fs.writeFile(
-      path.join(projectDir, ".pi", "resource-managers", "hosted-e2e.resource-manager.ts"),
+      path.join(projectDir, ".pi", "resource-managers", "server-e2e.resource-manager.ts"),
       RESOURCE_MANAGER,
     );
     await fs.writeFile(
@@ -753,7 +753,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     try {
       await client.request({ operation: "server.stop" });
     } catch {
-      // The host is already stopped.
+      // The workflow server is already stopped.
     }
     await mock?.close();
   });
@@ -1017,12 +1017,12 @@ describe.sequential("out-of-process workflow server end to end", () => {
 
     const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
     try {
-      const workers = store.state.connection
-        .prepare("SELECT pid, status FROM run_workers WHERE run_id = ? ORDER BY started_at")
+      const runners = store.state.connection
+        .prepare("SELECT pid, status FROM run_runners WHERE run_id = ? ORDER BY started_at")
         .all(runId) as Array<{ pid: number | null; status: string }>;
-      expect(workers).not.toHaveLength(0);
-      expect(workers.every((worker) => worker.pid !== process.pid)).toBe(true);
-      expect(workers.some((worker) => worker.status === "exited")).toBe(true);
+      expect(runners).not.toHaveLength(0);
+      expect(runners.every((runner) => runner.pid !== process.pid)).toBe(true);
+      expect(runners.some((runner) => runner.status === "exited")).toBe(true);
     } finally {
       store.close();
     }
@@ -1339,9 +1339,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     currentState.close();
     if (current === undefined) throw new Error("Durable interaction is missing");
     await waitForPiIdle(pi);
-    const entries = [...branchWorkflowEntries(await readRpcEntries(pi))].map(
-      ([workflowMessageId, piSessionEntryId]) => ({ workflowMessageId, piSessionEntryId }),
-    );
+    const branch = branchWorkflowEntries(await readRpcEntries(pi));
     await pi.stop();
     const client = new WorkflowClient({ databasePath, clientId: "e2e-replay-client" });
     try {
@@ -1351,11 +1349,15 @@ describe.sequential("out-of-process workflow server end to end", () => {
       });
       const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
       const authority = { targetSessionId: sessionId, coordinatorEpoch };
+      // Pi reports the single current message it holds on the active branch.
+      const currentMessageId = await currentWorkflowMessageId(client, sessionId);
+      const piSessionEntryId =
+        currentMessageId === null ? null : (branch.get(currentMessageId) ?? null);
       expect(
         (
-          await client.request({
-            operation: "workflowMessage.reportBranch",
-            payload: { ...authority, entries, isIdle: true, hasPendingMessages: false },
+          await reportBranch(client, authority, {
+            workflowMessageId: currentMessageId,
+            piSessionEntryId,
           })
         ).outcome,
       ).toBe("accepted");
@@ -1404,7 +1406,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     pi.send({
       id: "resource-manager-apply",
       type: "prompt",
-      message: '/resource-manager apply hosted-e2e item-1 {"value":7}',
+      message: '/resource-manager apply server-e2e item-1 {"value":7}',
     });
     await waitForCondition(
       () => {
@@ -1417,7 +1419,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
             const resource = store.getResource<
               unknown,
               { phase: string; resolverPid: number; runnerPid: number | null; value: number }
-            >({ resourceManager: "hosted-e2e", key: "item-1" });
+            >({ resourceManager: "server-e2e", key: "item-1" });
             return resource?.status.resourceManagerStatus.phase === "done";
           } finally {
             store.close();
@@ -1437,7 +1439,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
       const resource = store.getResource<
         unknown,
         { phase: string; resolverPid: number; runnerPid: number | null; value: number }
-      >({ resourceManager: "hosted-e2e", key: "item-1" });
+      >({ resourceManager: "server-e2e", key: "item-1" });
       expect(resource?.status).toMatchObject({
         observedGeneration: 1,
         resourceManagerStatus: { phase: "done", value: 7 },
@@ -1453,7 +1455,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     }
   }, 60_000);
 
-  it("reports privacy-safe host state and renders a completed run", async () => {
+  it("reports privacy-safe workflow server state and renders a completed run", async () => {
     const client = new WorkflowClient({ databasePath });
     const status = await client.request({ operation: "server.status" });
     expect(status.receipt).toMatchObject({

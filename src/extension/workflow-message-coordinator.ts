@@ -211,7 +211,7 @@ export class WorkflowMessageCoordinator {
       }
       this.abortCancelledTurn(ctx);
       // Settle a locally completed owned turn before reporting Pi idle. Otherwise
-      // the host can mistake its saved response for a lost turn and block recovery.
+      // the workflow server can mistake its saved response for a lost turn and block recovery.
       if (this.turn?.phase === "settled") {
         await this.flushTurn(client, view, callbacks.beforeTurnEnd);
       }
@@ -420,9 +420,9 @@ export class WorkflowMessageCoordinator {
   ): Promise<void> {
     if (view.coordinatorEpoch === null) return;
     const current = view.workflowMessage;
-    if (current === null) return;
     const branch = branchWorkflowEntries(ctx.sessionManager.getBranch());
-    const piSessionEntryId = branch.get(current.workflowMessageId) ?? null;
+    const piSessionEntryId =
+      current === null ? null : (branch.get(current.workflowMessageId) ?? null);
     const isIdle = ctx.isIdle();
     const hasPendingMessages = ctx.hasPendingMessages();
     const response = await client.request({
@@ -430,7 +430,7 @@ export class WorkflowMessageCoordinator {
       payload: {
         targetSessionId: view.sessionId,
         coordinatorEpoch: view.coordinatorEpoch,
-        workflowMessageId: current.workflowMessageId,
+        workflowMessageId: current?.workflowMessageId ?? null,
         piSessionEntryId,
         isIdle,
         hasPendingMessages,
@@ -439,7 +439,7 @@ export class WorkflowMessageCoordinator {
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
       throw new Error(response.error ?? "Workflow server rejected the Pi branch report");
     }
-    if (piSessionEntryId !== null) {
+    if (current !== null && piSessionEntryId !== null) {
       const message = messageById(view, current.workflowMessageId);
       if (message !== undefined) {
         message.status = "sent";

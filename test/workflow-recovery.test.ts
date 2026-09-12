@@ -152,10 +152,10 @@ it("rejects a second launch from a consumed handoff even after the first run fin
 
 it("prevents concurrent recovery siblings and cancels the sole queued child", async () => {
   const f = await fixture();
-  const host = new WorkflowServer({ databasePath: f.databasePath, claimPollMs: 60_000 });
+  const server = new WorkflowServer({ databasePath: f.databasePath, claimPollMs: 60_000 });
   const client = new WorkflowClient({ databasePath: f.databasePath });
   try {
-    await host.start();
+    await server.start();
     f.run("root");
     const source = { rootRunId: "root", runId: "root", messageId: "terminal-root" };
     f.reserve("first");
@@ -171,7 +171,7 @@ it("prevents concurrent recovery siblings and cancels the sole queued child", as
     expect(f.queue.getWorkflowRun("root")?.status).toBe("failed");
   } finally {
     await client.close();
-    await host.stop();
+    await server.stop();
     f.queue.close();
   }
 });

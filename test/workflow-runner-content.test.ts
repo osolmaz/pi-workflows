@@ -18,7 +18,7 @@ import { makeStateDatabasePath } from "./helpers.js";
 
 function accepted(result: JsonValue): WorkflowRunnerResponse {
   return {
-    schema: "pi-workflows.worker-response.v1",
+    schema: "pi-workflows.runner-response.v1",
     messageId: "message-1",
     outcome: "accepted",
     revision: 4,
@@ -33,8 +33,8 @@ describe("workflow runner content", () => {
     expect(() =>
       parseRunnerMessage(
         canonicalJson({
-          schema: "pi-workflows.worker-message.v1",
-          launchSchema: "pi-workflows.worker-launch.v1",
+          schema: "pi-workflows.runner-message.v1",
+          launchSchema: "pi-workflows.runner-launch.v1",
           messageId: "message-1",
           kind: "runner.progress",
           operation: "store.readRun",
@@ -49,7 +49,7 @@ describe("workflow runner content", () => {
   });
 
   it("keeps small results inline", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-inline") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-inline") });
     const allowed = new Set<string>();
     const response = accepted({ value: "small" });
 
@@ -59,7 +59,7 @@ describe("workflow runner content", () => {
   });
 
   it("keeps the exact frame boundary inline and references one byte over it", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-boundary") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-boundary") });
     const allowed = new Set<string>();
     const empty = accepted({ value: "" });
     const fittingBytes =
@@ -79,7 +79,7 @@ describe("workflow runner content", () => {
   });
 
   it("transfers a large result through verified bounded chunks", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-large") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-large") });
     const allowed = new Set<string>();
     const original = { value: "x".repeat(2 * 1024 * 1024) };
     const response = boundRunnerResponse(state, allowed, accepted(original));
@@ -108,7 +108,7 @@ describe("workflow runner content", () => {
   });
 
   it("rejects unapproved content and invalid offsets", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-invalid") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-invalid") });
     const digest = state.putJson({ value: true }).toString("hex");
 
     expect(() => readRunnerContentChunk(state, new Set(), digest, 0)).toThrow(/unavailable/);
@@ -119,7 +119,7 @@ describe("workflow runner content", () => {
   });
 
   it("rejects changed content metadata before parsing", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-changed") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-changed") });
     const allowed = new Set<string>();
     const response = boundRunnerResponse(
       state,
@@ -139,11 +139,11 @@ describe("workflow runner content", () => {
   });
 
   it("rejects missing or malformed stored JSON", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-malformed") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-malformed") });
     const malformed = Buffer.from("not-json", "utf8");
     const digest = state.putBlob(malformed, "application/json").toString("hex");
     const reference = {
-      schema: "pi-workflows.worker-content-reference.v1" as const,
+      schema: "pi-workflows.runner-content-reference.v1" as const,
       sha256: digest,
       mediaType: "application/json" as const,
       bytes: malformed.byteLength,
@@ -158,9 +158,9 @@ describe("workflow runner content", () => {
   });
 
   it("returns a bounded rejection when an error response is too large", async () => {
-    const state = new StateDatabase({ filePath: await makeStateDatabasePath("worker-error") });
+    const state = new StateDatabase({ filePath: await makeStateDatabasePath("runner-error") });
     const response = boundRunnerResponse(state, new Set(), {
-      schema: "pi-workflows.worker-response.v1",
+      schema: "pi-workflows.runner-response.v1",
       messageId: "message-1",
       outcome: "rejected",
       error: "x".repeat(2 * 1024 * 1024),

@@ -6,7 +6,7 @@ export type ResourceType =
   | "run"
   | "session"
   | "decision"
-  | "controller"
+  | "managed_resource"
   | "effect"
   | "channel"
   | "notification"
@@ -17,15 +17,15 @@ export type ResourceType =
 
 export type ActorType =
   | "session"
-  | "host"
-  | "controller"
+  | "server"
+  | "resource_manager"
   | "channel"
   | "human"
   | "policy"
   | "control"
   | "system";
 
-export type OwnerType = "session" | "host" | "controller" | "channel" | "system";
+export type OwnerType = "session" | "server" | "resource_manager" | "channel" | "system";
 
 export type MutationActor = {
   type: ActorType;

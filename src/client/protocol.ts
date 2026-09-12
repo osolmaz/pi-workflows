@@ -168,7 +168,7 @@ export function parseClientResponse(line: string | Buffer): ClientResponse {
 }
 
 export function clientRequestFingerprint(request: ClientRequest): Buffer {
-  // The host verifies current session authority before reading these receipts.
+  // The workflow server verifies current session authority before reading these receipts.
   // Reconnecting changes authority evidence, not the logical response.
   const sessionResponse = [
     "interaction.submit",
@@ -198,7 +198,7 @@ export function clientSocketPath(databasePath: string): string {
     const suffix = createHash("sha256").update(stateDirectory).digest("hex").slice(0, 24);
     return `\\\\.\\pipe\\pi-workflows-${suffix}`;
   }
-  return path.join(stateDirectory, "host", "host.sock");
+  return path.join(stateDirectory, "server", "server.sock");
 }
 
 export class NdjsonFrameDecoder {

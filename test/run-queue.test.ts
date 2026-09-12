@@ -114,7 +114,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("atomically reserves or adopts one compatible run without a worker claim", async () => {
+  it("atomically reserves or adopts one compatible run without a runner claim", async () => {
     const { store } = await setup();
     const options = runPreparation();
     const first = store.reserveOrAdoptWorkflowRun(options);
@@ -267,7 +267,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
     store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host",
+      runnerId: "server",
       claimToken: "park",
       leaseMs: 10_000,
     });
@@ -297,7 +297,7 @@ describe("workflow run queue in canonical SQLite", () => {
     reserve(store, "control-run");
     const claimed = store.claimWorkflowRunForControl({
       runId: "control-run",
-      runnerId: "host-control",
+      runnerId: "server-control",
       claimToken: "control-token",
       leaseMs: 5_000,
     });
@@ -318,7 +318,7 @@ describe("workflow run queue in canonical SQLite", () => {
 
     const claimed = store.claimWorkflowRun({
       runId: "pause-run",
-      runnerId: "host-one",
+      runnerId: "server-one",
       claimToken: "pause-token",
       leaseMs: 30_000,
     });
@@ -396,13 +396,13 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("schedules fresh interactive reservations through the host", async () => {
+  it("schedules fresh interactive reservations through the workflow server", async () => {
     const { store } = await setup();
     reserve(store);
     expect(
       store.claimNextWorkflowRun({
-        runnerId: "host-worker",
-        claimToken: "host-token",
+        runnerId: "server-runner",
+        claimToken: "server-token",
         leaseMs: 10_000,
       }),
     ).toMatchObject({ runId: "run-1", originSessionId: "session-1", status: "starting" });
@@ -410,7 +410,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("allows a host to reclaim an abandoned interactive start", async () => {
+  it("allows the workflow server to reclaim an abandoned interactive start", async () => {
     const { store } = await setup();
     reserve(store);
     const now = Date.now();
@@ -422,15 +422,15 @@ describe("workflow run queue in canonical SQLite", () => {
       now: new Date(now).toISOString(),
     });
     const reclaimed = store.claimNextWorkflowRun({
-      runnerId: "host-worker",
-      claimToken: "host-token",
+      runnerId: "server-runner",
+      claimToken: "server-token",
       leaseMs: 10_000,
       now: new Date(now + 2_000).toISOString(),
     });
     expect(reclaimed).toMatchObject({
       runId: "run-1",
       initialized: false,
-      claimToken: "host-token",
+      claimToken: "server-token",
       claimGeneration: 2,
     });
     store.close();
@@ -482,7 +482,7 @@ describe("workflow run queue in canonical SQLite", () => {
     });
     const next = store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host-2",
+      runnerId: "server-2",
       claimToken: "new",
       leaseMs: 10_000,
       now: new Date(now + 2_000).toISOString(),
@@ -565,7 +565,7 @@ describe("workflow run queue in canonical SQLite", () => {
     reserve(store);
     store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host-1",
+      runnerId: "server-1",
       claimToken: "token",
       leaseMs: 10_000,
     });
@@ -573,7 +573,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(store.getWorkflowRun("run-1")?.status).toBe("parked");
     const next = store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host-2",
+      runnerId: "server-2",
       claimToken: "token-2",
       leaseMs: 10_000,
     });
@@ -584,12 +584,12 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("requires an explicit resume after a worker exits without workflow progress", async () => {
+  it("requires an explicit resume after a runner exits without workflow progress", async () => {
     const { store } = await setup();
     reserve(store);
     const claimed = store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host-1",
+      runnerId: "server-1",
       claimToken: "token",
       leaseMs: 10_000,
     });
@@ -598,17 +598,17 @@ describe("workflow run queue in canonical SQLite", () => {
       store.parkWorkflowRunForRunnerNoProgress({
         runId: "run-1",
         claimToken: "token",
-        detail: "worker exited before workflow progress",
+        detail: "runner exited before workflow progress",
       }),
     ).toBe(true);
     expect(store.getWorkflowRun("run-1")).toMatchObject({
       status: "parked",
       errorCode: "runnerNoProgress",
-      errorMessage: "worker exited before workflow progress",
+      errorMessage: "runner exited before workflow progress",
     });
     expect(
       store.claimNextWorkflowRun({
-        runnerId: "host-2",
+        runnerId: "server-2",
         claimToken: "automatic-token",
         leaseMs: 10_000,
       }),
@@ -617,7 +617,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(
       store.claimWorkflowRun({
         runId: "run-1",
-        runnerId: "host-2",
+        runnerId: "server-2",
         claimToken: "resume-token",
         leaseMs: 10_000,
       }),
@@ -735,7 +735,7 @@ describe("workflow run queue in canonical SQLite", () => {
     const now = Date.now();
     store.claimWorkflowRun({
       runId: "run-1",
-      runnerId: "host-1",
+      runnerId: "server-1",
       claimToken: "expired-token",
       leaseMs: 1_000,
       now: new Date(now).toISOString(),
@@ -782,7 +782,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(
       store.claimWorkflowRun({
         runId: "run-1",
-        runnerId: "host-2",
+        runnerId: "server-2",
         claimToken: "current-token",
         leaseMs: 1_000,
         now: new Date(expiredAt + 1).toISOString(),

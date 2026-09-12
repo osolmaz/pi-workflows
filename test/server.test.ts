@@ -30,9 +30,15 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import type { InteractiveRequestRecord } from "../src/workflows/requests.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
-import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
+import {
+  ScriptedExecutor,
+  currentWorkflowMessageId,
+  makeTempDir,
+  reportBranch,
+  waitUntil,
+} from "./helpers.js";
 
-async function ownSession(client: WorkflowClient, targetSessionId = "host-test-session") {
+async function ownSession(client: WorkflowClient, targetSessionId = "server-test-session") {
   const watched = await client.request({
     operation: "view.session.watch",
     payload: {
@@ -43,10 +49,7 @@ async function ownSession(client: WorkflowClient, targetSessionId = "host-test-s
   });
   const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
   const authority = { targetSessionId, coordinatorEpoch };
-  const reported = await client.request({
-    operation: "workflowMessage.reportBranch",
-    payload: { ...authority, entries: [], isIdle: true, hasPendingMessages: false },
-  });
+  const reported = await reportBranch(client, authority);
   expect(reported.outcome).toBe("accepted");
   return authority;
 }
@@ -59,7 +62,7 @@ async function writeComputeWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-compute",
+  name: "server-compute",
   startAt: "work",
   nodes: { work: compute({ run: ({ input }) => ({ input, pid: process.pid }) }) },
   edges: [],
@@ -76,7 +79,7 @@ async function writeHeadlessAgentWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-headless-agent",
+  name: "server-headless-agent",
   startAt: "ask",
   nodes: { ask: agent({ prompt: () => "Return a result." }) },
   edges: [],
@@ -102,7 +105,7 @@ const choices = defineHumanChoices({
   stop: choice({ label: "Stop" }),
 });
 export default defineWorkflow({
-  name: "host-timed-decision",
+  name: "server-timed-decision",
   startAt: "approve",
   nodes: {
     approve: humanDecision({
@@ -151,7 +154,7 @@ const choices = defineHumanChoices({
   stop: choice({ label: "Stop" }),
 });
 export default defineWorkflow({
-  name: "host-channel-decision",
+  name: "server-channel-decision",
   startAt: "approve",
   nodes: {
     approve: humanDecision({
@@ -328,7 +331,7 @@ async function writeInteractiveWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-interactive",
+  name: "server-interactive",
   startAt: "ask",
   nodes: {
     ask: agent({ prompt: () => "Return a result." }),
@@ -348,7 +351,7 @@ async function writeTwoStepInteractiveWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-two-step-interactive",
+  name: "server-two-step-interactive",
   startAt: "first",
   nodes: {
     first: agent({ prompt: () => "Return the first result." }),
@@ -369,7 +372,7 @@ async function writeTimedInteractiveWorkflow(cwd: string, timeoutMs: number): Pr
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-timed-interactive",
+  name: "server-timed-interactive",
   startAt: "ask",
   nodes: {
     ask: agent({ timeoutMs: ${timeoutMs}, prompt: () => "Return before the deadline." }),
@@ -391,7 +394,7 @@ async function writeIncludedInteractiveWorkflow(
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-included-child",
+  name: "server-included-child",
   startAt: "ask",
   exits: { done: { from: "finish" } },
   nodes: {
@@ -407,7 +410,7 @@ export default defineWorkflow({
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-included-parent",
+  name: "server-included-parent",
   startAt: "start",
   includes: { child: includeWorkflow({ workflow: "./child.workflow.ts" }) },
   nodes: {
@@ -431,7 +434,7 @@ async function writeDeliveryWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-delivery",
+  name: "server-delivery",
   startAt: "report",
   nodes: {
     report: notify({ kind: "progress", message: () => "ServerBacked progress." }),
@@ -456,7 +459,7 @@ async function writeBlockingWorkflow(
     )};
 import { existsSync, writeFileSync } from "node:fs";
 export default defineWorkflow({
-  name: "host-blocking",
+  name: "server-blocking",
   startAt: "work",
   nodes: {
     work: compute({
@@ -466,7 +469,7 @@ export default defineWorkflow({
           writeFileSync(gate + "/entered", "entered");
           const deadline = Date.now() + 30000;
           while (!existsSync(gate + "/release")) {
-            if (Date.now() > deadline) throw new Error("Test did not release the blocked worker");
+            if (Date.now() > deadline) throw new Error("Test did not release the blocked runner");
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
           }
         } else {
@@ -490,11 +493,11 @@ async function writeBlockingEffectWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "host-blocking-effect",
+  name: "server-blocking-effect",
   startAt: "effect",
   nodes: {
     effect: action({
-      effect: manualEffect("test.host-blocking-effect"),
+      effect: manualEffect("test.server-blocking-effect"),
       run: () => {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
         return { applied: true };
@@ -531,11 +534,11 @@ import { action, defineWorkflow, ${effectFactory} } from ${JSON.stringify(
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: ${JSON.stringify(`host-${recovery}-crash`)},
+  name: ${JSON.stringify(`server-${recovery}-crash`)},
   startAt: "effect",
   nodes: {
     effect: action({
-      effect: ${effectFactory}(${JSON.stringify(`test.host-${recovery}-crash`)}),
+      effect: ${effectFactory}(${JSON.stringify(`test.server-${recovery}-crash`)}),
       run: ${run},
     }),
   },
@@ -611,7 +614,7 @@ async function startRun(options: {
       definitionSnapshot: resolved.definitionSnapshot,
       input: { value: 1 },
       launchOptions: {},
-      originSessionId: "host-test-session",
+      originSessionId: "server-test-session",
       executionMode: options.executionMode ?? "headless",
     },
   });
@@ -629,16 +632,16 @@ function processExists(pid: number): boolean {
 
 describe("global workflow server", () => {
   it("opens the canonical database and shuts down cleanly", async () => {
-    const databasePath = path.join(await makeTempDir("host-state"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
-    await host.stop();
+    const databasePath = path.join(await makeTempDir("server-state"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
+    await server.stop();
   });
 
   it("rejects a watch for a missing run", async () => {
-    const databasePath = path.join(await makeTempDir("host-missing-watch"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const databasePath = path.join(await makeTempDir("server-missing-watch"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "missing-watch-test" });
     try {
       await expect(client.watchRun("missing-run", () => undefined)).rejects.toThrow(
@@ -646,17 +649,17 @@ describe("global workflow server", () => {
       );
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
-  it("performs active state maintenance through the host-owned database", async () => {
-    const directory = await makeTempDir("host-state-maintenance");
+  it("performs active state maintenance through the workflow server-owned database", async () => {
+    const directory = await makeTempDir("server-state-maintenance");
     const databasePath = path.join(directory, "state.sqlite");
     const backupPath = path.join(directory, "backup.sqlite");
     const explicitBackupPath = path.join(directory, "explicit-backup.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "maintenance-test" });
     try {
       const before = new Date().toISOString();
@@ -682,7 +685,7 @@ describe("global workflow server", () => {
       expect(adopted).toMatchObject({ outcome: "adopted", receipt: applied.receipt });
       await expect(fs.stat(backupPath)).resolves.toBeDefined();
 
-      const mutableServer = host as unknown as {
+      const mutableServer = server as unknown as {
         state: { backup: (destination: string) => Promise<void> };
       };
       const originalBackup = mutableServer.state.backup.bind(mutableServer.state);
@@ -714,36 +717,36 @@ describe("global workflow server", () => {
       await expect(fs.stat(explicitBackupPath)).resolves.toBeDefined();
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
-  it("restores desired subscriptions after the host restarts", async () => {
-    const databasePath = path.join(await makeTempDir("host-reconnect"), "state.sqlite");
-    let host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+  it("restores desired subscriptions after the workflow server restarts", async () => {
+    const databasePath = path.join(await makeTempDir("server-reconnect"), "state.sqlite");
+    let server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath });
     const events: string[] = [];
     const unsubscribe = await client.watchRuns((event) => events.push(event.event));
     await waitUntil(() => events.includes("runs"), 5_000);
 
-    await host.stop();
+    await server.stop();
     await waitUntil(() => events.includes("unavailable"), 5_000);
-    host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     try {
       await waitUntil(() => events.filter((event) => event === "runs").length >= 2, 5_000);
     } finally {
       await unsubscribe();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("keeps one slow request from blocking other requests on the same client", async () => {
-    const databasePath = path.join(await makeTempDir("host-multiplex"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    const mutableServer = host as unknown as {
+    const databasePath = path.join(await makeTempDir("server-multiplex"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const mutableServer = server as unknown as {
       submitInteractionAndWait: (request: ClientRequest) => Promise<ClientResponse>;
     };
     mutableServer.submitInteractionAndWait = async (request) => {
@@ -755,7 +758,7 @@ describe("global workflow server", () => {
         outcome: "accepted",
       };
     };
-    await host.start();
+    await server.start();
     try {
       const client = new WorkflowClient({ databasePath });
       try {
@@ -778,14 +781,14 @@ describe("global workflow server", () => {
         await client.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("waits for socket drain before publishing another snapshot", async () => {
-    const databasePath = path.join(await makeTempDir("host-view-backpressure"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const databasePath = path.join(await makeTempDir("server-view-backpressure"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const socket = new net.Socket();
     const write = vi.spyOn(socket, "write").mockReturnValue(false);
     const connection = {
@@ -794,7 +797,7 @@ describe("global workflow server", () => {
       subscriptions: new Map([["runs", { id: "runs", kind: "runs" as const, revision: 0 }]]),
       publishing: false,
     };
-    const privateServer = host as unknown as {
+    const privateServer = server as unknown as {
       publishConnection: (target: typeof connection) => Promise<void>;
     };
     try {
@@ -808,14 +811,14 @@ describe("global workflow server", () => {
       expect(connection.publishing).toBe(false);
     } finally {
       socket.destroy();
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("ends a backpressure wait when the client socket closes", async () => {
-    const databasePath = path.join(await makeTempDir("host-backpressure-close"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const databasePath = path.join(await makeTempDir("server-backpressure-close"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const socket = new net.Socket();
     const write = vi.spyOn(socket, "write").mockReturnValue(false);
     const connection = {
@@ -824,7 +827,7 @@ describe("global workflow server", () => {
       subscriptions: new Map([["runs", { id: "runs", kind: "runs" as const, revision: 0 }]]),
       publishing: false,
     };
-    const privateServer = host as unknown as {
+    const privateServer = server as unknown as {
       publishConnection: (target: typeof connection) => Promise<void>;
     };
     try {
@@ -835,38 +838,38 @@ describe("global workflow server", () => {
       expect(connection.publishing).toBe(false);
     } finally {
       socket.destroy();
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("closes idle client sockets before it waits for listener shutdown", async () => {
-    const databasePath = path.join(await makeTempDir("host-idle-client"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
-    const socket = net.createConnection(host.endpoint);
+    const databasePath = path.join(await makeTempDir("server-idle-client"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
+    const socket = net.createConnection(server.endpoint);
     await once(socket, "connect");
     socket.resume();
     const closed = once(socket, "close");
-    await host.stop();
+    await server.stop();
     await closed;
     expect(socket.destroyed).toBe(true);
   });
 
   it("contains accepted-client socket errors", async () => {
-    const databasePath = path.join(await makeTempDir("host-client-error"), "state.sqlite");
+    const databasePath = path.join(await makeTempDir("server-client-error"), "state.sqlite");
     const logs: string[] = [];
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       onLog: (message) => logs.push(message),
     });
-    await host.start();
+    await server.start();
     try {
-      const socket = net.createConnection(host.endpoint);
+      const socket = net.createConnection(server.endpoint);
       await once(socket, "connect");
       socket.resume();
-      await waitUntil(() => (host as unknown as { sockets: Set<net.Socket> }).sockets.size === 1);
-      const acceptedSocket = [...(host as unknown as { sockets: Set<net.Socket> }).sockets][0];
+      await waitUntil(() => (server as unknown as { sockets: Set<net.Socket> }).sockets.size === 1);
+      const acceptedSocket = [...(server as unknown as { sockets: Set<net.Socket> }).sockets][0];
       if (acceptedSocket === undefined) throw new Error("accepted socket was not tracked");
       const closed = once(socket, "close");
       expect(() => acceptedSocket.emit("error", new Error("test reset"))).not.toThrow();
@@ -879,19 +882,19 @@ describe("global workflow server", () => {
         receipt: { state: "running" },
       });
     } finally {
-      await host.stop();
+      await server.stop();
     }
   });
 
   it.skipIf(process.platform === "win32")(
     "releases its claim and lock when the local listener cannot bind",
     async () => {
-      const root = await makeTempDir("host-bind-failure");
+      const root = await makeTempDir("server-bind-failure");
       const stateDirectory = path.join(root, "a".repeat(70), "b".repeat(70));
       await fs.mkdir(stateDirectory, { recursive: true });
       const databasePath = path.join(stateDirectory, "state.sqlite");
-      const host = new WorkflowServer({ databasePath, runnerId: "failed-host" });
-      await expect(host.start()).rejects.toThrow();
+      const server = new WorkflowServer({ databasePath, runnerId: "failed-server" });
+      await expect(server.start()).rejects.toThrow();
 
       const state = new ServerStateStore(databasePath, { readOnly: true });
       try {
@@ -900,17 +903,17 @@ describe("global workflow server", () => {
         state.close();
       }
       await expect(
-        fs.access(path.join(stateDirectory, "host", "host.lock.json")),
+        fs.access(path.join(stateDirectory, "server", "server.lock.json")),
       ).rejects.toThrow();
-      await host.stop();
+      await server.stop();
     },
   );
 
   it.skipIf(process.platform === "win32")(
     "reaps the headless pi process group after normal worker completion",
     async () => {
-      const cwd = await makeTempDir("host-headless-group-project");
-      const stateDir = await makeTempDir("host-headless-group-state");
+      const cwd = await makeTempDir("server-headless-group-project");
+      const stateDir = await makeTempDir("server-headless-group-state");
       const databasePath = path.join(stateDir, "state.sqlite");
       const workflowPath = await writeHeadlessAgentWorkflow(cwd);
       const binDir = path.join(cwd, "bin");
@@ -940,7 +943,7 @@ setInterval(() => {}, 1000);
         { encoding: "utf8", mode: 0o755 },
       );
       const registry = new ServerProcessRegistry(stateDir);
-      const host = new WorkflowServer({
+      const server = new WorkflowServer({
         databasePath,
         registry,
         claimPollMs: 10,
@@ -950,7 +953,7 @@ setInterval(() => {}, 1000);
         },
       });
       const client = new WorkflowClient({ databasePath });
-      await host.start();
+      await server.start();
       try {
         await startRun({ client, cwd, workflowPath, runId: "headless-group-run" });
         await waitUntil(() => {
@@ -974,41 +977,41 @@ setInterval(() => {}, 1000);
         );
         expect(registry.size).toBe(0);
       } finally {
-        await host.stop();
+        await server.stop();
       }
     },
     45_000,
   );
 
   it("uses the database directory for its local process registry", async () => {
-    const stateDir = await makeTempDir("host-state");
+    const stateDir = await makeTempDir("server-state");
     const registry = new ServerProcessRegistry(stateDir);
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath: path.join(stateDir, "state.sqlite"),
       registry,
       claimPollMs: 10,
     });
-    await host.start();
-    await host.stop();
+    await server.start();
+    await server.stop();
   });
 
   it("refuses every second server for the same global database", async () => {
-    const databasePath = path.join(await makeTempDir("host-state"), "state.sqlite");
-    const first = new WorkflowServer({ databasePath, runnerId: "host-one", claimPollMs: 10 });
-    const second = new WorkflowServer({ databasePath, runnerId: "host-two", claimPollMs: 10 });
+    const databasePath = path.join(await makeTempDir("server-state"), "state.sqlite");
+    const first = new WorkflowServer({ databasePath, runnerId: "server-one", claimPollMs: 10 });
+    const second = new WorkflowServer({ databasePath, runnerId: "server-two", claimPollMs: 10 });
     await first.start();
     await expect(second.start()).rejects.toThrow(/server/i);
     await first.stop();
   });
 
-  it("recovers a validating submission when the host restarts before activation", async () => {
-    const cwd = await makeTempDir("host-validation-recovery-project");
+  it("recovers a validating submission when the workflow server restarts before activation", async () => {
+    const cwd = await makeTempDir("server-validation-recovery-project");
     const databasePath = path.join(
-      await makeTempDir("host-validation-recovery-state"),
+      await makeTempDir("server-validation-recovery-state"),
       "state.sqlite",
     );
     const workflowPath = await writeInteractiveWorkflow(cwd);
-    const first = new WorkflowServer({ databasePath, runnerId: "host-first", claimPollMs: 10 });
+    const first = new WorkflowServer({ databasePath, runnerId: "server-first", claimPollMs: 10 });
     await first.start();
     await startRun({
       client: new WorkflowClient({ databasePath }),
@@ -1021,7 +1024,7 @@ setInterval(() => {}, 1000);
     await waitUntil(() => {
       const state = new ServerStateStore(databasePath, { readOnly: true });
       try {
-        interaction = state.listPendingInteractions("host-test-session")[0];
+        interaction = state.listPendingInteractions("server-test-session")[0];
         return interaction !== undefined;
       } finally {
         state.close();
@@ -1043,7 +1046,7 @@ setInterval(() => {}, 1000);
 
     const restarted = new WorkflowServer({
       databasePath,
-      runnerId: "host-restarted",
+      runnerId: "server-restarted",
       claimPollMs: 10,
     });
     await restarted.start();
@@ -1065,15 +1068,15 @@ setInterval(() => {}, 1000);
   }, 60_000);
 
   it("adopts a durable submission after reconnect while rejecting stale authority", async () => {
-    const cwd = await makeTempDir("host-adopted-submission-project");
+    const cwd = await makeTempDir("server-adopted-submission-project");
     const databasePath = path.join(
-      await makeTempDir("host-adopted-submission-state"),
+      await makeTempDir("server-adopted-submission-state"),
       "state.sqlite",
     );
     const workflowPath = await writeInteractiveWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     let client = new WorkflowClient({ databasePath, clientId: "submission-owner" });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -1086,7 +1089,7 @@ setInterval(() => {}, 1000);
       await waitUntil(() => {
         const observed = new ServerStateStore(databasePath, { readOnly: true });
         try {
-          interaction = observed.listPendingInteractions("host-test-session")[0];
+          interaction = observed.listPendingInteractions("server-test-session")[0];
           return interaction !== undefined;
         } finally {
           observed.close();
@@ -1193,17 +1196,17 @@ setInterval(() => {}, 1000);
       }
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 60_000);
 
   it("resumes with more than 2 MiB of server-owned session history", async () => {
-    const cwd = await makeTempDir("host-large-resume-project");
-    const databasePath = path.join(await makeTempDir("host-large-resume-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-large-resume-project");
+    const databasePath = path.join(await makeTempDir("server-large-resume-state"), "state.sqlite");
     const workflowPath = await writeTwoStepInteractiveWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -1216,7 +1219,7 @@ setInterval(() => {}, 1000);
       await waitUntil(() => {
         const observed = new ServerStateStore(databasePath, { readOnly: true });
         try {
-          interaction = observed.listPendingInteractions("host-test-session")[0];
+          interaction = observed.listPendingInteractions("server-test-session")[0];
           return interaction !== undefined;
         } finally {
           observed.close();
@@ -1264,7 +1267,7 @@ setInterval(() => {}, 1000);
         const observed = new ServerStateStore(databasePath, { readOnly: true });
         try {
           secondInteraction = observed
-            .listPendingInteractions("host-test-session")
+            .listPendingInteractions("server-test-session")
             .find((candidate) => candidate.requestId !== pendingInteraction.requestId);
           return secondInteraction !== undefined;
         } finally {
@@ -1308,7 +1311,7 @@ setInterval(() => {}, 1000);
       expect(completedStore.readRun("large-resume-run")?.sessionEntries).toHaveLength(18);
       const crashed = completedStore.state.connection
         .prepare(
-          "SELECT count(*) AS count FROM run_workers WHERE run_id = ? AND status = 'crashed'",
+          "SELECT count(*) AS count FROM run_runners WHERE run_id = ? AND status = 'crashed'",
         )
         .get("large-resume-run") as { count: number };
       expect(crashed.count).toBe(0);
@@ -1325,7 +1328,7 @@ setInterval(() => {}, 1000);
           `SELECT count(*) AS count, COALESCE(sum(b.byte_length), 0) AS bytes
            FROM (
              SELECT DISTINCT m.result_hash AS resultHash
-             FROM worker_messages m JOIN run_workers w ON w.worker_epoch = m.worker_epoch
+             FROM runner_messages m JOIN run_runners w ON w.runner_epoch = m.runner_epoch
              WHERE w.run_id = ? AND m.result_hash IS NOT NULL
            ) results JOIN blobs b ON b.blob_hash = results.resultHash`,
         )
@@ -1334,7 +1337,7 @@ setInterval(() => {}, 1000);
         .prepare(
           `SELECT m.message_id AS messageId, m.outcome,
                   m.accepted_revision AS revision, m.result_hash AS resultHash
-           FROM worker_messages m JOIN run_workers w ON w.worker_epoch = m.worker_epoch
+           FROM runner_messages m JOIN run_runners w ON w.runner_epoch = m.runner_epoch
            WHERE w.run_id = ? AND m.result_hash IS NOT NULL`,
         )
         .all("large-resume-run") as Array<{
@@ -1346,7 +1349,7 @@ setInterval(() => {}, 1000);
       const frameBytes = resultRows.map(
         (row) =>
           encodeRunnerLine({
-            schema: "pi-workflows.worker-response.v1",
+            schema: "pi-workflows.runner-response.v1",
             messageId: row.messageId,
             outcome: row.outcome,
             ...(row.revision === null ? {} : { revision: row.revision }),
@@ -1363,13 +1366,13 @@ setInterval(() => {}, 1000);
       completedStore.close();
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 60_000);
 
   it("prunes expired state after recovery and after a later runner exit", async () => {
-    const cwd = await makeTempDir("host-automatic-prune-project");
-    const databasePath = path.join(await makeTempDir("host-automatic-prune-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-automatic-prune-project");
+    const databasePath = path.join(await makeTempDir("server-automatic-prune-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
     const seedStore = new WorkflowRunStore(databasePath);
     try {
@@ -1386,13 +1389,13 @@ setInterval(() => {}, 1000);
     }
 
     const logs: string[] = [];
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       onLog: (message) => logs.push(message),
     });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await waitUntil(() => {
         const store = new WorkflowRunStore(databasePath, { readOnly: true });
@@ -1418,7 +1421,7 @@ setInterval(() => {}, 1000);
         laterStore.close();
       }
 
-      const internal = host as unknown as {
+      const internal = server as unknown as {
         lastAutomaticStatePruneAt: number | null;
         requestAutomaticStatePrune(): void;
       };
@@ -1461,24 +1464,24 @@ setInterval(() => {}, 1000);
       settled.close();
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 60_000);
 
   it("keeps cleanup failures nonfatal and does not retry them in a tight loop", async () => {
     const databasePath = path.join(
-      await makeTempDir("host-automatic-prune-failure"),
+      await makeTempDir("server-automatic-prune-failure"),
       "state.sqlite",
     );
     const logs: string[] = [];
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       onLog: (message) => logs.push(message),
     });
     const lockPath = `${databasePath}.maintenance.lock`;
     await fs.writeFile(lockPath, "busy");
-    await host.start();
+    await server.start();
     try {
       await waitUntil(
         () =>
@@ -1490,7 +1493,7 @@ setInterval(() => {}, 1000);
       ).toHaveLength(1);
 
       await fs.rm(lockPath);
-      const internal = host as unknown as {
+      const internal = server as unknown as {
         nextAutomaticStatePruneAttemptAt: number;
         requestAutomaticStatePrune(): void;
       };
@@ -1501,19 +1504,19 @@ setInterval(() => {}, 1000);
       );
     } finally {
       await fs.rm(lockPath, { force: true });
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("resolves a protected decision timeout and resumes the same run", async () => {
-    const cwd = await makeTempDir("host-decision-timeout-project");
+    const cwd = await makeTempDir("server-decision-timeout-project");
     const databasePath = path.join(
-      await makeTempDir("host-decision-timeout-state"),
+      await makeTempDir("server-decision-timeout-state"),
       "state.sqlite",
     );
     const workflowPath = await writeTimedDecisionWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     try {
       await startRun({
         client: new WorkflowClient({ databasePath }),
@@ -1555,13 +1558,13 @@ setInterval(() => {}, 1000);
         state.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
-  it("keeps the host available and reports an invalid channel configuration", async () => {
-    const databasePath = path.join(await makeTempDir("host-channel-invalid-state"), "state.sqlite");
-    const configDir = await makeTempDir("host-channel-invalid-config");
+  it("keeps the workflow server available and reports an invalid channel configuration", async () => {
+    const databasePath = path.join(await makeTempDir("server-channel-invalid-state"), "state.sqlite");
+    const configDir = await makeTempDir("server-channel-invalid-config");
     await fs.writeFile(
       path.join(configDir, "channels.json"),
       `${JSON.stringify({
@@ -1572,13 +1575,13 @@ setInterval(() => {}, 1000);
       })}\n`,
       { mode: 0o600 },
     );
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       env: { PI_WORKFLOWS_CONFIG_DIR: configDir },
     });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       expect(await client.request({ operation: "server.status" })).toMatchObject({
         outcome: "accepted",
@@ -1594,14 +1597,14 @@ setInterval(() => {}, 1000);
         });
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
-  it("supervises Telegram presentation, answer, and settlement through the host", async () => {
-    const cwd = await makeTempDir("host-channel-project");
-    const databasePath = path.join(await makeTempDir("host-channel-state"), "state.sqlite");
-    const configDir = await makeTempDir("host-channel-config");
+  it("supervises Telegram presentation, answer, and settlement through the workflow server", async () => {
+    const cwd = await makeTempDir("server-channel-project");
+    const databasePath = path.join(await makeTempDir("server-channel-state"), "state.sqlite");
+    const configDir = await makeTempDir("server-channel-config");
     const tokenFile = path.join(configDir, "telegram-token");
     const logPath = path.join(configDir, "adapter-log.jsonl");
     await fs.writeFile(tokenFile, "fixture-token\n", { mode: 0o600 });
@@ -1635,7 +1638,7 @@ setInterval(() => {}, 1000);
     );
     const adapterEntryPath = await writeFakeChannelAdapter(cwd);
     const workflowPath = await writeChannelDecisionWorkflow(cwd);
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       channelAdapterEntryPath: adapterEntryPath,
@@ -1645,7 +1648,7 @@ setInterval(() => {}, 1000);
       },
     });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -1683,7 +1686,7 @@ setInterval(() => {}, 1000);
       }, 30_000);
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
     const lines = (await fs.readFile(logPath, "utf8"))
       .trim()
@@ -1714,9 +1717,9 @@ setInterval(() => {}, 1000);
   }, 60_000);
 
   it("marks an interrupted Telegram effect ambiguous and retries only after explicit recovery", async () => {
-    const cwd = await makeTempDir("host-channel-crash-project");
-    const databasePath = path.join(await makeTempDir("host-channel-crash-state"), "state.sqlite");
-    const configDir = await makeTempDir("host-channel-crash-config");
+    const cwd = await makeTempDir("server-channel-crash-project");
+    const databasePath = path.join(await makeTempDir("server-channel-crash-state"), "state.sqlite");
+    const configDir = await makeTempDir("server-channel-crash-config");
     const tokenFile = path.join(configDir, "telegram-token");
     const logPath = path.join(configDir, "adapter.log");
     await fs.writeFile(tokenFile, "test-token\n", { mode: 0o600 });
@@ -1748,7 +1751,7 @@ setInterval(() => {}, 1000);
       })}\n`,
       { mode: 0o600 },
     );
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       channelAdapterEntryPath: await writeCrashingChannelAdapter(cwd),
@@ -1758,29 +1761,20 @@ setInterval(() => {}, 1000);
       },
     });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       const subscribed = await client.request({
         operation: "view.session.watch",
         payload: {
           subscriptionId: "channel-crash-session",
-          sessionId: "host-test-session",
+          sessionId: "server-test-session",
           coordinator: true,
         },
       });
       const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
         ?.coordinatorEpoch;
       if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
-      await client.request({
-        operation: "workflowMessage.reportBranch",
-        payload: {
-          targetSessionId: "host-test-session",
-          coordinatorEpoch,
-          entries: [],
-          isIdle: true,
-          hasPendingMessages: false,
-        },
-      });
+      await reportBranch(client, { targetSessionId: "server-test-session", coordinatorEpoch });
       await startRun({
         client,
         cwd,
@@ -1814,7 +1808,7 @@ setInterval(() => {}, 1000);
         operation: "channel.recover",
         idempotencyKey: recoveryId,
         payload: {
-          targetSessionId: "host-test-session",
+          targetSessionId: "server-test-session",
           coordinatorEpoch,
           messageId: firstAmbiguous,
           action: "retry",
@@ -1852,7 +1846,7 @@ setInterval(() => {}, 1000);
           operation: "channel.recover",
           idempotencyKey: confirmId,
           payload: {
-            targetSessionId: "host-test-session",
+            targetSessionId: "server-test-session",
             coordinatorEpoch,
             messageId: secondAmbiguous,
             action: "confirm",
@@ -1878,7 +1872,7 @@ setInterval(() => {}, 1000);
       }
     } finally {
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 60_000);
 
@@ -1901,11 +1895,11 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
   } })
 }, edges: [] });`,
     );
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
     const observed = new ServerStateStore(databasePath, { readOnly: true });
     let submission: Promise<unknown> | undefined;
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -1915,10 +1909,10 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
         executionMode: "interactive",
       });
       await waitUntil(
-        () => observed.listPendingInteractions("host-test-session").length === 1,
+        () => observed.listPendingInteractions("server-test-session").length === 1,
         30_000,
       );
-      const interaction = observed.listPendingInteractions("host-test-session")[0];
+      const interaction = observed.listPendingInteractions("server-test-session")[0];
       if (interaction === undefined) throw new Error("request missing");
       const message = observed.workflowMessages
         .listRun(interaction.runId)
@@ -1926,16 +1920,10 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
       if (message === undefined) throw new Error("step message missing");
       const authority = await ownSession(client);
       expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            ...authority,
-            entries: [
-              { workflowMessageId: message.workflowMessageId, piSessionEntryId: "step-entry" },
-            ],
-            isIdle: false,
-            hasPendingMessages: false,
-          },
+        await reportBranch(client, authority, {
+          workflowMessageId: message.workflowMessageId,
+          piSessionEntryId: "step-entry",
+          isIdle: false,
         }),
       ).toMatchObject({ outcome: "accepted" });
       expect(
@@ -1987,21 +1975,21 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
     } finally {
       await client.close();
       await submission;
-      await host.stop();
+      await server.stop();
       observed.close();
     }
   }, 45_000);
 
-  it("counts only active model time across overlapping pause, disconnect, and host recovery", async () => {
-    const cwd = await makeTempDir("host-interaction-timeout-project");
+  it("counts only active model time across overlapping pause, disconnect, and workflow server recovery", async () => {
+    const cwd = await makeTempDir("server-interaction-timeout-project");
     const databasePath = path.join(
-      await makeTempDir("host-interaction-timeout-state"),
+      await makeTempDir("server-interaction-timeout-state"),
       "state.sqlite",
     );
     const workflowPath = await writeTimedInteractiveWorkflow(cwd, 1_500);
-    let host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    let server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     let client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     const state = new ServerStateStore(databasePath, { readOnly: true });
     const runId = "interaction-timeout-run";
     const timing = () =>
@@ -2024,34 +2012,32 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
         operation: "view.session.watch",
         payload: {
           subscriptionId: "timeout-watch",
-          sessionId: "host-test-session",
+          sessionId: "server-test-session",
           coordinator: true,
         },
       });
       const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
       expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch,
-            entries: [
-              { workflowMessageId: message.workflowMessageId, piSessionEntryId: "step-entry" },
-            ],
+        await reportBranch(
+          client,
+          { targetSessionId: "server-test-session", coordinatorEpoch },
+          {
+            workflowMessageId: message.workflowMessageId,
+            piSessionEntryId: "step-entry",
             isIdle,
             hasPendingMessages: !isIdle,
           },
-        }),
+        ),
       ).toMatchObject({ outcome: "accepted" });
       return coordinatorEpoch;
     };
     try {
       await startRun({ client, cwd, workflowPath, runId, executionMode: "interactive" });
       await waitUntil(
-        () => state.listPendingInteractions("host-test-session").length === 1,
+        () => state.listPendingInteractions("server-test-session").length === 1,
         30_000,
       );
-      const interaction = state.listPendingInteractions("host-test-session")[0];
+      const interaction = state.listPendingInteractions("server-test-session")[0];
       if (interaction === undefined) throw new Error("request missing");
       const initial = timing();
       expect(initial).toMatchObject({ timeoutMs: 1_500, elapsedMs: 0, openIntervals: 0 });
@@ -2059,16 +2045,16 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
         outcome: "accepted",
       });
       await client.close();
-      await host.stop();
+      await server.stop();
       await new Promise((resolve) => setTimeout(resolve, 1_600));
-      host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+      server = new WorkflowServer({ databasePath, claimPollMs: 10 });
       client = new WorkflowClient({ databasePath });
-      await host.start();
+      await server.start();
       expect(timing()).toEqual(initial);
       expect(state.getInteraction(interaction.requestId)?.status).toBe("pending");
       await client.request({ operation: "run.resume", runId });
       const message = state.workflowMessages
-        .listSession("host-test-session")
+        .listSession("server-test-session")
         .findLast((candidate) => candidate.sourceId === interaction.requestId);
       if (message === undefined) throw new Error("resumed message missing");
       let coordinatorEpoch = await connect(message, false);
@@ -2077,7 +2063,7 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
         workflowMessageId: message.workflowMessageId,
         workflowTurnId: "active-turn",
         runId,
-        targetSessionId: "host-test-session",
+        targetSessionId: "server-test-session",
       };
       expect(
         await client.request({
@@ -2111,11 +2097,11 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
       await client.close();
       await waitUntil(() => timing().status === "interrupted", 30_000);
       const disconnected = timing();
-      await host.stop();
+      await server.stop();
       await new Promise((resolve) => setTimeout(resolve, 1_600));
-      host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+      server = new WorkflowServer({ databasePath, claimPollMs: 10 });
       client = new WorkflowClient({ databasePath });
-      await host.start();
+      await server.start();
       expect(timing().elapsedMs).toBe(disconnected.elapsedMs);
       expect(timing().openIntervals).toBe(0);
       expect(state.getInteraction(interaction.requestId)?.status).toBe("pending");
@@ -2134,7 +2120,7 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
           runId,
           expectedRevision: interaction.revision,
           payload: {
-            targetSessionId: "host-test-session",
+            targetSessionId: "server-test-session",
             coordinatorEpoch,
             requestId: interaction.requestId,
             submissionId: "late-timeout-submission",
@@ -2151,18 +2137,18 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
     } finally {
       state.close();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 60_000);
 
   it("rejects changed mounted source before the resumed child executes it", async () => {
-    const cwd = await makeTempDir("host-mounted-source-project");
-    const databasePath = path.join(await makeTempDir("host-mounted-source-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-mounted-source-project");
+    const databasePath = path.join(await makeTempDir("server-mounted-source-state"), "state.sqlite");
     const markerPath = path.join(cwd, "changed-source-executed");
     const { workflowPath, childPath } = await writeIncludedInteractiveWorkflow(cwd);
     const first = new WorkflowServer({
       databasePath,
-      runnerId: "host-source-first",
+      runnerId: "server-source-first",
       claimPollMs: 10,
     });
     await first.start();
@@ -2177,7 +2163,7 @@ export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes
     await waitUntil(() => {
       const observed = new ServerStateStore(databasePath, { readOnly: true });
       try {
-        interaction = observed.listPendingInteractions("host-test-session")[0];
+        interaction = observed.listPendingInteractions("server-test-session")[0];
         return interaction !== undefined;
       } finally {
         observed.close();
@@ -2205,7 +2191,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
 
     const restarted = new WorkflowServer({
       databasePath,
-      runnerId: "host-source-restarted",
+      runnerId: "server-source-restarted",
       claimPollMs: 10,
     });
     await restarted.start();
@@ -2230,13 +2216,13 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
   }, 60_000);
 
   it("fails a workflow load error without starting a replacement worker", async () => {
-    const cwd = await makeTempDir("host-source-load-project");
-    const databasePath = path.join(await makeTempDir("host-source-load-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-source-load-project");
+    const databasePath = path.join(await makeTempDir("server-source-load-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
     const originalSource = await fs.readFile(workflowPath, "utf8");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
       await fs.writeFile(workflowPath, `${originalSource}\n// changed before worker load\n`);
@@ -2252,7 +2238,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           definitionSnapshot: resolved.definitionSnapshot,
           input: { value: 1 },
           launchOptions: {},
-          originSessionId: "host-test-session",
+          originSessionId: "server-test-session",
           executionMode: "interactive",
         },
       });
@@ -2274,7 +2260,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       });
       try {
         const workers = failed.state.connection
-          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .prepare("SELECT COUNT(*) AS count FROM run_runners WHERE run_id = ?")
           .get("source-load-run") as { count: number };
         expect(workers.count).toBe(1);
         const terminalMessages = failed.state.connection
@@ -2292,22 +2278,22 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         client.request({ operation: "run.resume", runId: "source-load-run" }),
       ).resolves.toMatchObject({ outcome: "rejected" });
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("does not restart a worker that exits before workflow progress", async () => {
-    const cwd = await makeTempDir("host-worker-no-progress-project");
+    const cwd = await makeTempDir("server-worker-no-progress-project");
     const databasePath = path.join(
-      await makeTempDir("host-worker-no-progress-state"),
+      await makeTempDir("server-worker-no-progress-state"),
       "state.sqlite",
     );
     const workflowPath = await writeComputeWorkflow(cwd);
     const runnerPath = path.join(cwd, "worker-no-progress.mjs");
     await fs.writeFile(runnerPath, "process.exit(1);\n", "utf8");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10, runnerEntryPath: runnerPath });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10, runnerEntryPath: runnerPath });
     const client = new WorkflowClient({ databasePath, clientId: "worker-no-progress-client" });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "worker-no-progress-run" });
       await waitUntil(() => {
@@ -2330,24 +2316,24 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         });
         expect(
           store.state.connection
-            .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+            .prepare("SELECT COUNT(*) AS count FROM run_runners WHERE run_id = ?")
             .get("worker-no-progress-run"),
         ).toEqual({ count: 1 });
       } finally {
         store.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("commits active cancellation before it returns the durable receipt", async () => {
-    const cwd = await makeTempDir("host-cancel-project");
-    const databasePath = path.join(await makeTempDir("host-cancel-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-cancel-project");
+    const databasePath = path.join(await makeTempDir("server-cancel-state"), "state.sqlite");
     const workflowPath = await writeBlockingWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath, clientId: "cancel-client" });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -2424,17 +2410,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       ).resolves.toMatchObject({ outcome: "adopted", receipt: { status: "cancelled" } });
     } finally {
       vi.restoreAllMocks();
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("keeps a cancelled turn active until Pi confirms settlement", async () => {
-    const cwd = await makeTempDir("host-late-turn-project");
-    const databasePath = path.join(await makeTempDir("host-late-turn-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-late-turn-project");
+    const databasePath = path.join(await makeTempDir("server-late-turn-state"), "state.sqlite");
     const workflowPath = await writeInteractiveWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath, clientId: "late-turn-client" });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -2448,7 +2434,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         const state = new ServerStateStore(databasePath, { readOnly: true });
         try {
           message = state.workflowMessages
-            .listSession("host-test-session")
+            .listSession("server-test-session")
             .find((candidate) => candidate.kind === "step");
           return message !== undefined;
         } finally {
@@ -2461,7 +2447,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         try {
           const worker = state.state.connection
             .prepare(
-              `SELECT status FROM run_workers
+              `SELECT status FROM run_runners
                WHERE run_id = ? ORDER BY started_at DESC LIMIT 1`,
             )
             .get("late-turn-run") as { status: string } | undefined;
@@ -2475,28 +2461,23 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         operation: "view.session.watch",
         payload: {
           subscriptionId: "late-turn-session",
-          sessionId: "host-test-session",
+          sessionId: "server-test-session",
           coordinator: true,
         },
       });
       const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
         ?.coordinatorEpoch;
       if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
-      await client.request({
-        operation: "workflowMessage.reportBranch",
-        payload: {
-          targetSessionId: "host-test-session",
-          coordinatorEpoch,
-          entries: [
-            {
-              workflowMessageId: message.workflowMessageId,
-              piSessionEntryId: "late-turn-entry",
-            },
-          ],
+      await reportBranch(
+        client,
+        { targetSessionId: "server-test-session", coordinatorEpoch },
+        {
+          workflowMessageId: message.workflowMessageId,
+          piSessionEntryId: "late-turn-entry",
           isIdle: false,
           hasPendingMessages: true,
         },
-      });
+      );
       const started = {
         state: "started" as const,
         workflowMessageId: message.workflowMessageId,
@@ -2527,14 +2508,16 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         receipt: { runId: "late-turn-run", status: "cancelled" },
       });
       let cancelled: unknown;
-      const stopWatching = await client.watchSession("host-test-session", (event) => {
+      const stopWatching = await client.watchSession("server-test-session", (event) => {
         cancelled = event.payload;
       });
       await waitUntil(() => cancelled !== undefined);
       expect(cancelled).toMatchObject({
         openWorkflowTurn: { workflowTurnId: "late-turn-1", state: "started" },
-        cancelledWorkflowMessageIds: [message.workflowMessageId],
-        nextWorkflowMessageId: null,
+        workflowMessage: {
+          workflowMessageId: message.workflowMessageId,
+          deliveryCancelled: true,
+        },
       });
       await stopWatching();
       await expect(
@@ -2587,21 +2570,21 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         state.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("cancels a committed run before its scheduled activation starts", async () => {
-    const cwd = await makeTempDir("host-cancel-pending-project");
-    const databasePath = path.join(await makeTempDir("host-cancel-pending-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-cancel-pending-project");
+    const databasePath = path.join(await makeTempDir("server-cancel-pending-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
       const runId = "cancel-pending-run";
-      const responses = await sendServerPipeline(host.endpoint, [
+      const responses = await sendServerPipeline(server.endpoint, [
         {
           schema: "pi-workflows.client.v1",
           type: "request",
@@ -2619,7 +2602,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
             definitionSnapshot: resolved.definitionSnapshot,
             input: { value: 1 },
             launchOptions: {},
-            originSessionId: "host-test-session",
+            originSessionId: "server-test-session",
             executionMode: "headless",
           },
         },
@@ -2648,27 +2631,27 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       try {
         expect(store.getWorkflowRun(runId)?.status).toBe("cancelled");
         const workers = store.state.connection
-          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .prepare("SELECT COUNT(*) AS count FROM run_runners WHERE run_id = ?")
           .get(runId) as { count: number };
         expect(workers.count).toBe(0);
       } finally {
         store.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("cancels a parked interaction in the same durable transition", async () => {
-    const cwd = await makeTempDir("host-cancel-interaction-project");
+    const cwd = await makeTempDir("server-cancel-interaction-project");
     const databasePath = path.join(
-      await makeTempDir("host-cancel-interaction-state"),
+      await makeTempDir("server-cancel-interaction-state"),
       "state.sqlite",
     );
     const workflowPath = await writeInteractiveWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath, clientId: "cancel-interaction-client" });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -2681,10 +2664,10 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await waitUntil(() => {
         const state = new ServerStateStore(databasePath, { readOnly: true });
         try {
-          interaction = state.listPendingInteractions("host-test-session")[0];
+          interaction = state.listPendingInteractions("server-test-session")[0];
           const worker = state.state.connection
             .prepare(
-              `SELECT status FROM run_workers
+              `SELECT status FROM run_runners
                WHERE run_id = ? ORDER BY started_at DESC LIMIT 1`,
             )
             .get("cancel-interaction-run") as { status: string } | undefined;
@@ -2714,7 +2697,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const state = new ServerStateStore(databasePath, { readOnly: true });
       try {
         expect(state.getInteraction(interaction.requestId)?.status).toBe("cancelled");
-        expect(state.listPendingInteractions("host-test-session")).toEqual([]);
+        expect(state.listPendingInteractions("server-test-session")).toEqual([]);
       } finally {
         state.close();
       }
@@ -2736,17 +2719,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         error: "Interactive request revision conflict",
       });
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("marks an applying effect ambiguous before cancellation returns", async () => {
-    const cwd = await makeTempDir("host-cancel-effect-project");
-    const databasePath = path.join(await makeTempDir("host-cancel-effect-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-cancel-effect-project");
+    const databasePath = path.join(await makeTempDir("server-cancel-effect-state"), "state.sqlite");
     const workflowPath = await writeBlockingEffectWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath, clientId: "cancel-effect-client" });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "cancel-effect-run" });
       await waitUntil(() => {
@@ -2761,7 +2744,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
                JOIN runs r ON r.resource_id = e.source_resource_id
                WHERE r.run_id = ? AND e.effect_type = ?`,
             )
-            .get("cancel-effect-run", "test.host-blocking-effect") as
+            .get("cancel-effect-run", "test.server-blocking-effect") as
             | { status: string }
             | undefined;
           return effect?.status === "applying";
@@ -2794,7 +2777,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
              JOIN effect_attempts a ON a.effect_id = e.effect_id
              WHERE r.run_id = ? AND e.effect_type = ?`,
           )
-          .get("cancel-effect-run", "test.host-blocking-effect") as
+          .get("cancel-effect-run", "test.server-blocking-effect") as
           | {
               effectId: string;
               status: string;
@@ -2818,17 +2801,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         store.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("executes workflow code only in a supervised child", async () => {
-    const cwd = await makeTempDir("host-child-project");
-    const databasePath = path.join(await makeTempDir("host-child-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-child-project");
+    const databasePath = path.join(await makeTempDir("server-child-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "child-run" });
       await waitUntil(() => {
@@ -2852,17 +2835,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         store.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
-  it("stores and serves hosted notifications and terminal workflow messages", async () => {
-    const cwd = await makeTempDir("host-delivery-project");
-    const databasePath = path.join(await makeTempDir("host-delivery-state"), "state.sqlite");
+  it("stores and serves server notifications and terminal workflow messages", async () => {
+    const cwd = await makeTempDir("server-delivery-project");
+    const databasePath = path.join(await makeTempDir("server-delivery-state"), "state.sqlite");
     const workflowPath = await writeDeliveryWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({
         client,
@@ -2884,7 +2867,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       }, 30_000);
 
       const state = new ServerStateStore(databasePath, { readOnly: true });
-      const messages = state.workflowMessages.listSession("host-test-session");
+      const messages = state.workflowMessages.listSession("server-test-session");
       state.close();
       expect(messages.map((message) => message.kind)).toEqual(["notification", "terminal"]);
       expect(messages[0]?.content.content).toBe("ServerBacked progress.");
@@ -2895,31 +2878,37 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         operation: "view.session.watch",
         payload: {
           subscriptionId: "delivery-session",
-          sessionId: "host-test-session",
+          sessionId: "server-test-session",
           coordinator: true,
         },
       });
       const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
         ?.coordinatorEpoch;
       if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
+      const authority = { targetSessionId: "server-test-session", coordinatorEpoch };
+      // Pi confirms and delivers one current message at a time. Confirm the
+      // notification first, because it is the oldest message that needs Pi.
+      const first = await currentWorkflowMessageId(client, authority.targetSessionId);
+      expect(first).toBe(messages[0]?.workflowMessageId);
       expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch,
-            entries: messages.map((message, index) => ({
-              workflowMessageId: message.workflowMessageId,
-              piSessionEntryId: `entry-${index + 1}`,
-            })),
-            isIdle: true,
-            hasPendingMessages: false,
-          },
+        await reportBranch(client, authority, {
+          workflowMessageId: first,
+          piSessionEntryId: "entry-1",
         }),
-      ).toMatchObject({ outcome: "accepted" });
-
+      ).toMatchObject({ receipt: { outcome: "present" } });
+      // The terminal message is current once the notification has an entry.
       const terminal = messages[1];
       if (terminal === undefined) throw new Error("terminal workflow message missing");
+      expect(await currentWorkflowMessageId(client, authority.targetSessionId)).toBe(
+        terminal.workflowMessageId,
+      );
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: terminal.workflowMessageId,
+          piSessionEntryId: "entry-2",
+        }),
+      ).toMatchObject({ receipt: { outcome: "present" } });
+
       await expect(
         client.request({
           operation: "workflowTurn.report",
@@ -2948,20 +2937,20 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         afterStaleReport.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("cancels a parked run while its released handoff worker is still cached", async () => {
-    const cwd = await makeTempDir("host-cancel-handoff-project");
-    const databasePath = path.join(await makeTempDir("host-cancel-handoff-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-cancel-handoff-project");
+    const databasePath = path.join(await makeTempDir("server-cancel-handoff-state"), "state.sqlite");
     const workflowPath = await writeInteractiveWorkflow(cwd);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    const activeRuns = (host as unknown as { activeRuns: Map<string, unknown> }).activeRuns;
+    const activeRuns = (server as unknown as { activeRuns: Map<string, unknown> }).activeRuns;
     const runId = "cancel-handoff-run";
     const stop = vi.fn(async () => undefined);
-    await host.start();
+    await server.start();
     const observed = new ServerStateStore(databasePath, { readOnly: true });
     try {
       await startRun({ client, cwd, workflowPath, runId, executionMode: "interactive" });
@@ -2993,23 +2982,23 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       activeRuns.delete(runId);
       observed.close();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("renews a live claim while workflow code blocks longer than its lease", async () => {
-    const cwd = await makeTempDir("host-blocked-worker-project");
-    const databasePath = path.join(await makeTempDir("host-blocked-worker-state"), "state.sqlite");
-    const gate = await makeTempDir("host-blocked-worker-gate");
+    const cwd = await makeTempDir("server-blocked-worker-project");
+    const databasePath = path.join(await makeTempDir("server-blocked-worker-state"), "state.sqlite");
+    const gate = await makeTempDir("server-blocked-worker-gate");
     const workflowPath = await writeBlockingWorkflow(cwd, 0, gate);
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath,
       claimPollMs: 10,
       serverRenewMs: 100,
       runClaimLeaseMs: 1_000,
     });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "blocked-child-run" });
       await waitUntil(() => {
@@ -3026,7 +3015,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await waitUntil(() => existsSync(path.join(gate, "entered")), 30_000);
       const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
-        // The worker's initial claim uses its normal lease. Wait for the host
+        // The runner's initial claim uses its normal lease. Wait for the workflow server
         // heartbeat to apply this test's shorter lease before measuring renewal.
         await waitUntil(() => {
           const expiry = Date.parse(
@@ -3063,21 +3052,21 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       }, 30_000);
     } finally {
       await fs.writeFile(path.join(gate, "release"), "release");
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("retries an interrupted idempotent effect and adopts its durable reservation", async () => {
-    const cwd = await makeTempDir("host-idempotent-effect-project");
+    const cwd = await makeTempDir("server-idempotent-effect-project");
     const databasePath = path.join(
-      await makeTempDir("host-idempotent-effect-state"),
+      await makeTempDir("server-idempotent-effect-state"),
       "state.sqlite",
     );
     const markerPath = path.join(cwd, "effect-applied");
     const workflowPath = await writeCrashEffectWorkflow(cwd, "idempotent", markerPath);
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "idempotent-crash-run" });
       await waitUntil(() => {
@@ -3099,12 +3088,12 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
              JOIN runs r ON r.resource_id = e.source_resource_id
              WHERE r.run_id = ? AND e.effect_type = ?`,
           )
-          .get("idempotent-crash-run", "test.host-idempotent-crash") as
+          .get("idempotent-crash-run", "test.server-idempotent-crash") as
           | { status: string; attemptCount: number }
           | undefined;
         expect(effect).toEqual({ status: "applied", attemptCount: 2 });
         const workers = store.state.connection
-          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .prepare("SELECT COUNT(*) AS count FROM run_runners WHERE run_id = ?")
           .get("idempotent-crash-run") as { count: number };
         expect(workers.count).toBe(2);
       } finally {
@@ -3112,17 +3101,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       }
       expect(await fs.readFile(markerPath, "utf8")).toBe("applied");
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
   it("parks an interrupted manual effect as ambiguous without retrying it", async () => {
-    const cwd = await makeTempDir("host-manual-effect-project");
-    const databasePath = path.join(await makeTempDir("host-manual-effect-state"), "state.sqlite");
+    const cwd = await makeTempDir("server-manual-effect-project");
+    const databasePath = path.join(await makeTempDir("server-manual-effect-state"), "state.sqlite");
     const workflowPath = await writeCrashEffectWorkflow(cwd, "manual");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "manual-crash-run" });
       await waitUntil(() => {
@@ -3146,12 +3135,12 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
              JOIN runs r ON r.resource_id = e.source_resource_id
              WHERE r.run_id = ? AND e.effect_type = ?`,
           )
-          .get("manual-crash-run", "test.host-manual-crash") as
+          .get("manual-crash-run", "test.server-manual-crash") as
           | { status: string; attemptCount: number }
           | undefined;
         expect(effect).toEqual({ status: "ambiguous", attemptCount: 1 });
         const workers = store.state.connection
-          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .prepare("SELECT COUNT(*) AS count FROM run_runners WHERE run_id = ?")
           .get("manual-crash-run") as { count: number };
         expect(workers.count).toBe(1);
       } finally {
@@ -3160,15 +3149,15 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const status = await client.request({ operation: "server.status" });
       expect(status.receipt).toMatchObject({ ambiguousEffects: 1 });
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 45_000);
 
-  it("returns privacy-safe host status counts", async () => {
-    const databasePath = path.join(await makeTempDir("host-status"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath });
+  it("returns privacy-safe workflow server status counts", async () => {
+    const databasePath = path.join(await makeTempDir("server-status"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath });
     const client = new WorkflowClient({ databasePath });
-    await host.start();
+    await server.start();
     try {
       const status = await client.request({ operation: "server.status" });
       expect(status.receipt).toMatchObject({
@@ -3184,7 +3173,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       expect(status.receipt).not.toHaveProperty("pid");
       expect(status.receipt).not.toHaveProperty("processStartIdentity");
     } finally {
-      await host.stop();
+      await server.stop();
     }
   });
 });

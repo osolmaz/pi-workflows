@@ -51,7 +51,7 @@ class ResourceRunnerTransport {
 
   async request<T>(operation: ResourceRunnerOperation, payload: JsonValue): Promise<T> {
     const message: ResourceRunnerMessage = {
-      schema: "pi-workflows.controller-worker-message.v1",
+      schema: "pi-workflows.resource-runner-message.v1",
       launchSchema: this.launch.schema,
       messageId: randomUUID(),
       runnerEpoch: this.launch.runnerEpoch,

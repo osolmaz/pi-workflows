@@ -390,8 +390,8 @@ function assertSettingsSize(value: JsonValue): void {
 function assertActorType(value: unknown): asserts value is ActorType {
   if (
     value !== "session" &&
-    value !== "host" &&
-    value !== "controller" &&
+    value !== "server" &&
+    value !== "resource_manager" &&
     value !== "channel" &&
     value !== "human" &&
     value !== "policy" &&

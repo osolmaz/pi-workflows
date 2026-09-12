@@ -2,11 +2,11 @@ import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 
 export const MAX_WORKFLOW_RUNNER_PROTOCOL_MESSAGE_BYTES = 1024 * 1024;
 export const WORKFLOW_RUNNER_CONTENT_CHUNK_BYTES = 512 * 1024;
-export const WORKFLOW_RUNNER_MESSAGE_SCHEMA = "pi-workflows.worker-message.v1" as const;
-export const WORKFLOW_RUNNER_RESPONSE_SCHEMA = "pi-workflows.worker-response.v1" as const;
+export const WORKFLOW_RUNNER_MESSAGE_SCHEMA = "pi-workflows.runner-message.v1" as const;
+export const WORKFLOW_RUNNER_RESPONSE_SCHEMA = "pi-workflows.runner-response.v1" as const;
 export const WORKFLOW_RUNNER_CONTENT_REFERENCE_SCHEMA =
-  "pi-workflows.worker-content-reference.v1" as const;
-export const WORKFLOW_RUNNER_CONTENT_CHUNK_SCHEMA = "pi-workflows.worker-content-chunk.v1" as const;
+  "pi-workflows.runner-content-reference.v1" as const;
+export const WORKFLOW_RUNNER_CONTENT_CHUNK_SCHEMA = "pi-workflows.runner-content-chunk.v1" as const;
 
 export type WorkflowRunnerCommand =
   | { kind: "start"; input: JsonValue }
@@ -57,7 +57,7 @@ const WORKFLOW_RUNNER_CONTROL_OPERATIONS = ["runner.ready", "runner.exiting"] as
 
 export type WorkflowRunnerMessage = {
   schema: typeof WORKFLOW_RUNNER_MESSAGE_SCHEMA;
-  launchSchema: "pi-workflows.worker-launch.v1";
+  launchSchema: "pi-workflows.runner-launch.v1";
   messageId: string;
   kind: WorkflowRunnerMessageKind;
   operation: WorkflowRunnerStoreOperation | "runner.ready" | "runner.exiting";
@@ -163,7 +163,7 @@ export function parseRunnerMessage(line: Buffer | string): WorkflowRunnerMessage
   const value = parseRunnerValue(line);
   if (
     value.schema !== WORKFLOW_RUNNER_MESSAGE_SCHEMA ||
-    value.launchSchema !== "pi-workflows.worker-launch.v1"
+    value.launchSchema !== "pi-workflows.runner-launch.v1"
   ) {
     throw new Error("Invalid workflow runner message schema");
   }

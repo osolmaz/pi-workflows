@@ -35,7 +35,7 @@ function createStore(receipts: Array<Record<string, unknown> | Error>) {
 }
 
 describe("RemoteSessionRecordingStore", () => {
-  it("sends every recording operation through one durable host command", async () => {
+  it("sends every recording operation through one durable server command", async () => {
     const { store, requestDurable } = createStore([
       { bound: true },
       {},
@@ -88,7 +88,7 @@ describe("RemoteSessionRecordingStore", () => {
     );
   });
 
-  it("rejects malformed host outcomes and receipts", async () => {
+  it("rejects malformed server outcomes and receipts", async () => {
     const rejectedClient = {
       requestDurable: vi.fn(async () => ({ outcome: "rejected", error: "denied" })),
     };

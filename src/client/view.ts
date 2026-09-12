@@ -261,8 +261,11 @@ export type WorkflowSessionView = {
 export type WorkflowBranchReport = {
   targetSessionId: string;
   coordinatorEpoch: string;
-  /** The one current workflow message the server asked Pi to confirm. */
-  workflowMessageId: string;
+  /**
+   * The one current workflow message the server asked Pi to confirm, or null
+   * when the session holds no workflow message yet.
+   */
+  workflowMessageId: string | null;
   /** The Pi session entry for that message, or null when Pi does not hold it. */
   piSessionEntryId: string | null;
   isIdle: boolean;
@@ -273,7 +276,7 @@ export type WorkflowBranchReportReceipt = {
   schema: typeof BRANCH_REPORT_RECEIPT_SCHEMA;
   /** Whether Pi holds the reported message, and what the server did with it. */
   outcome: "present" | "absent";
-  workflowMessageId: string;
+  workflowMessageId: string | null;
 };
 
 export type WorkflowTurnReportReceipt = {

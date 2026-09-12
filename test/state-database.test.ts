@@ -203,8 +203,8 @@ describe("StateMutationStore", () => {
 
     const second = mutations.claim({
       resourceId,
-      ownerType: "host",
-      ownerId: "host-b",
+      ownerType: "server",
+      ownerId: "server-b",
       expectedRevision: 1,
       leaseMs: 100,
       now: 111,
@@ -231,7 +231,7 @@ describe("StateMutationStore", () => {
       {
         resourceId,
         operation: "run.update",
-        actor: { type: "host", id: "host-b" },
+        actor: { type: "server", id: "server-b" },
         expectedRevision: 2,
         lease: second,
       },
@@ -251,8 +251,8 @@ describe("StateMutationStore", () => {
     const resourceId = mutations.ensureResource("run", "lease-run", 100);
     const claim = mutations.claim({
       resourceId,
-      ownerType: "host",
-      ownerId: "host-a",
+      ownerType: "server",
+      ownerId: "server-a",
       expectedRevision: 0,
       leaseMs: 100,
       now: 100,
@@ -261,8 +261,8 @@ describe("StateMutationStore", () => {
     expect(
       mutations.claim({
         resourceId,
-        ownerType: "host",
-        ownerId: "host-b",
+        ownerType: "server",
+        ownerId: "server-b",
         expectedRevision: 1,
         leaseMs: 100,
         now: 101,

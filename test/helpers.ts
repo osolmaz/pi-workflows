@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { WorkflowClient } from "../src/client/client.js";
+import type { ClientResponse } from "../src/client/protocol.js";
 import { canonicalJson } from "../src/state/json.js";
 import { resourceIdFor } from "../src/state/mutation.js";
 import { initializeViewerRun } from "../src/state/viewer.js";
@@ -129,6 +131,64 @@ export function decisionPrompt(
     },
     ...(expiresAt !== undefined ? { expiresAt } : {}),
   };
+}
+
+export type SessionAuthority = { targetSessionId: string; coordinatorEpoch: string };
+
+/**
+ * Return the one current workflow message id the server asks Pi to confirm, or
+ * null when the session holds no workflow message yet.
+ */
+export async function currentWorkflowMessageId(
+  client: WorkflowClient,
+  sessionId: string,
+): Promise<string | null> {
+  const seen: { messageId: string | null; received: boolean } = {
+    messageId: null,
+    received: false,
+  };
+  const unsubscribe = await client.watchSession(sessionId, (event) => {
+    if (event.event !== "session_snapshot") return;
+    const payload = event.payload as {
+      workflowMessage?: { workflowMessageId?: unknown } | null;
+    };
+    const value = payload.workflowMessage?.workflowMessageId;
+    seen.messageId = typeof value === "string" ? value : null;
+    seen.received = true;
+  });
+  try {
+    await waitUntil(() => seen.received, 5_000);
+  } finally {
+    await unsubscribe();
+  }
+  return seen.messageId;
+}
+
+/** Report the branch Pi holds for the one current workflow message. */
+export async function reportBranch(
+  client: WorkflowClient,
+  authority: SessionAuthority,
+  options: {
+    workflowMessageId?: string | null;
+    piSessionEntryId?: string | null;
+    isIdle?: boolean;
+    hasPendingMessages?: boolean;
+  } = {},
+): Promise<ClientResponse> {
+  const workflowMessageId =
+    options.workflowMessageId === undefined
+      ? await currentWorkflowMessageId(client, authority.targetSessionId)
+      : options.workflowMessageId;
+  return await client.request({
+    operation: "workflowMessage.reportBranch",
+    payload: {
+      ...authority,
+      workflowMessageId,
+      piSessionEntryId: options.piSessionEntryId ?? null,
+      isIdle: options.isIdle ?? true,
+      hasPendingMessages: options.hasPendingMessages ?? false,
+    },
+  });
 }
 
 /** Poll until `predicate` is true, failing after `timeoutMs`. */

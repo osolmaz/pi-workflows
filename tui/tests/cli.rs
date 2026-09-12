@@ -39,7 +39,7 @@ fn help_describes_one_frame_rendering() {
 #[test]
 fn once_reports_an_invalid_snapshot_without_waiting_for_the_loading_timeout() {
     let home = tempfile::tempdir().unwrap();
-    let socket_path = home.path().join(".pi/agent/workflows/host/host.sock");
+    let socket_path = home.path().join(".pi/agent/workflows/server/server.sock");
     std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
