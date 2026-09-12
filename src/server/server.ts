@@ -1015,6 +1015,14 @@ export class WorkflowServer {
       workflowMessageId === null || piSessionEntryId === null
         ? []
         : [{ workflowMessageId, piSessionEntryId }];
+    // Pi reports one message, so only that message's source has branch evidence
+    // in this report. A report of no message proves that the branch holds no
+    // workflow message at all, which covers every pending interaction.
+    const reportedSourceId =
+      workflowMessageId === null
+        ? null
+        : (messages.find((message) => message.workflowMessageId === workflowMessageId)?.sourceId ??
+          null);
     const reconciledRunIds = new Set<string>();
     this.state.transaction(() => {
       if (coordinator.needsTimerResume) {
@@ -1049,6 +1057,9 @@ export class WorkflowServer {
         for (const interaction of this.serverState.listPendingInteractions(
           report.targetSessionId,
         )) {
+          // An unreported source keeps its own recovery on the next report that
+          // names it, so a missing entry is never assumed from another message.
+          if (workflowMessageId !== null && interaction.requestId !== reportedSourceId) continue;
           const sourceMessages = refreshed.filter(
             (message) => message.sourceId === interaction.requestId,
           );
