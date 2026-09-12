@@ -1483,54 +1483,177 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
-  it("leaves out a node row that cannot fit the frame by itself", async () => {
-    const projectPath = await makeTempDir("node-huge-project");
-    const databasePath = path.join(await makeTempDir("node-huge-state"), "state.sqlite");
+  it.each([
+    {
+      placement: "first",
+      expectStart: 1,
+      expectIds: ["node-000", "node-001", "node-002"],
+      expectLast: "node-002",
+    },
+    // A row in the middle stops the window before it, so the rows that arrived
+    // stay contiguous and the next cursor is exact.
+    { placement: "middle", expectStart: 0, expectIds: ["aaa"], expectLast: "zzz" },
+  ])(
+    "leaves out a node row that cannot fit the frame by itself: $placement",
+    async ({ placement, expectStart, expectIds, expectLast }) => {
+      const projectPath = await makeTempDir(`node-huge-project-${placement}`);
+      const databasePath = path.join(
+        await makeTempDir(`node-huge-state-${placement}`),
+        "state.sqlite",
+      );
+      const state = new StateDatabase({ filePath: databasePath });
+      const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+      const serverState = new ServerStateStore(databasePath, { state });
+      // A valid node id has no length limit.
+      const hugeId = `m${"x".repeat(200 * 1024)}`;
+      const nodeIds =
+        placement === "first"
+          ? [hugeId, "node-000", "node-001", "node-002"]
+          : ["aaa", hugeId, "zzz"];
+      const startAt = placement === "first" ? hugeId : "aaa";
+      const workflow = compileWorkflowDefinition(
+        defineWorkflow({
+          name: "node-huge-row",
+          startAt,
+          nodes: Object.fromEntries(
+            nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+          ),
+          edges: nodeIds.slice(1).map((nodeId, index) => ({
+            from: nodeIds[index] ?? startAt,
+            to: nodeId,
+          })),
+        }),
+      );
+      const snapshot = createDefinitionSnapshot(workflow);
+      const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+      const runId = `run-node-huge-row-${placement}`;
+      const sessionId = `session-node-huge-row-${placement}`;
+      claimTestRun(queue, {
+        runId,
+        workflowName: workflow.name,
+        workflowSourceRef: "builtin:node-huge-row",
+        workflowSource: {
+          root: { kind: "builtin", id: "node-huge-row", revision: "test" },
+          mounted: [],
+        },
+        definitionDigest,
+        definitionSnapshot: snapshot,
+        input: {},
+        runnerId: "node-huge-row",
+        claimToken: `claim-node-huge-row-${placement}`,
+        leaseMs: 60_000,
+        originSessionId: sessionId,
+      });
+      const runs = new WorkflowRunStore(databasePath, {
+        state,
+        authorityProvider: () =>
+          queue.workflowRunAuthority(runId, `claim-node-huge-row-${placement}`),
+      });
+      // The run is claimed but never started, so the default window follows the
+      // last row with a lead, which keeps the huge row inside the window.
+      const views = new ServerViewStore(
+        state,
+        queue,
+        serverState,
+        runs,
+        () => false,
+        () => false,
+      );
+      const view = views.session(sessionId, null);
+      const run = view.run;
+      if (run === null) throw new Error("session run missing");
+      expect(run.nodeTotal).toBe(nodeIds.length);
+      // The window starts after a row it cannot carry, or stops before it.
+      expect(run.nodeStart).toBe(expectStart);
+      expect(run.nodes.map((row) => row.nodeId)).toEqual(expectIds);
+      expect(Buffer.byteLength(canonicalJson(run.nodes), "utf8")).toBeLessThan(64 * 1024);
+      const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
+      expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+      // A later window skips the row it cannot carry and reaches the rest.
+      const next = views.session(sessionId, null, expectStart + expectIds.length).run;
+      expect(next?.nodes.some((row) => row.nodeId === hugeId)).toBe(false);
+      expect(next?.nodes.at(-1)?.nodeId).toBe(expectLast);
+      state.close();
+    },
+    60_000,
+  );
+
+  it("keeps a cancelled step current until Pi confirms its delivery", async () => {
+    const projectPath = await makeTempDir("cancelled-delivery-project");
+    const databasePath = path.join(await makeTempDir("cancelled-delivery-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
-    // A valid node id has no length limit, and this one must sort first so the
-    // default window starts on it.
-    const hugeId = `a${"x".repeat(200 * 1024)}`;
-    const nodeIds = [hugeId, "node-000", "node-001", "node-002"];
-    const workflow = compileWorkflowDefinition(
-      defineWorkflow({
-        name: "node-huge-row",
-        startAt: hugeId,
-        nodes: Object.fromEntries(
-          nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
-        ),
-        edges: nodeIds.slice(1).map((nodeId, index) => ({
-          from: nodeIds[index] ?? hugeId,
-          to: nodeId,
-        })),
-      }),
-    );
+    const workflow = compileWorkflowDefinition(rawWorkflow);
     const snapshot = createDefinitionSnapshot(workflow);
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-    const runId = "run-node-huge-row";
+    const runId = "run-cancelled-delivery";
+    const sessionId = "session-cancelled-delivery";
     claimTestRun(queue, {
       runId,
       workflowName: workflow.name,
-      workflowSourceRef: "builtin:node-huge-row",
+      workflowSourceRef: "builtin:echo",
       workflowSource: {
-        root: { kind: "builtin", id: "node-huge-row", revision: "test" },
+        root: { kind: "builtin", id: "echo", revision: "test" },
         mounted: [],
       },
       definitionDigest,
       definitionSnapshot: snapshot,
-      input: {},
-      runnerId: "node-huge-row",
-      claimToken: "claim-node-huge-row",
+      input: { task: "cancelled" },
+      runnerId: "cancelled-delivery",
+      claimToken: "claim-cancelled-delivery",
       leaseMs: 60_000,
-      originSessionId: "session-node-huge-row",
+      originSessionId: sessionId,
     });
     const runs = new WorkflowRunStore(databasePath, {
       state,
-      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-node-huge-row"),
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-cancelled-delivery"),
     });
-    // The run is claimed but never started, so the default window follows the
-    // first row, which is the row that cannot fit.
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "cancelled" } }),
+    }).run(workflow, { task: "cancelled" }, { runId });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const requestId = "cancelled-delivery-source";
+    serverState.createInteractiveRequest({
+      requestId,
+      runId,
+      attemptId,
+      targetSessionId: sessionId,
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId,
+          runId,
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    const pending = serverState.workflowMessages.latestForSource("step", requestId);
+    if (pending === undefined) throw new Error("step message missing");
+    // Pi delivered the message, which the branch report records without a turn.
+    serverState.workflowMessages.adoptBranch(
+      sessionId,
+      [{ workflowMessageId: pending.workflowMessageId, piSessionEntryId: "entry-cancelled" }],
+      new Set([pending.workflowMessageId]),
+    );
+    // The run is cancelled while Pi has not reported the turn yet.
+    state.connection
+      .prepare(
+        "UPDATE interactive_requests SET status = 'cancelled', revision = revision + 1 WHERE request_id = ?",
+      )
+      .run(requestId);
     const views = new ServerViewStore(
       state,
       queue,
@@ -1539,16 +1662,29 @@ describe("current session state", () => {
       () => false,
       () => false,
     );
-    const view = views.session("session-node-huge-row", null);
-    const run = view.run;
-    if (run === null) throw new Error("session run missing");
-    expect(run.nodeTotal).toBe(nodeIds.length);
-    // The window starts after the row it cannot carry, so the frame stays bounded.
-    expect(run.nodeStart).toBe(1);
-    expect(run.nodes.map((row) => row.nodeId)).toEqual(nodeIds.slice(1));
-    expect(Buffer.byteLength(canonicalJson(run.nodes), "utf8")).toBeLessThan(64 * 1024);
-    const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
-    expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    // The cancelled step stays current, because the extension must still learn
+    // that its delivered turn is cancelled and stop it.
+    const cancelled = views.session(sessionId, null).workflowMessage;
+    expect(cancelled?.workflowMessageId).toBe(pending.workflowMessageId);
+    expect(cancelled?.deliveryCancelled).toBe(true);
+    // Once Pi reports the turn, the delivery is reconciled.
+    const turn = serverState.workflowMessages.startTurn({
+      workflowMessageId: pending.workflowMessageId,
+      runId,
+      targetSessionId: sessionId,
+    });
+    expect(views.session(sessionId, null).workflowMessage?.workflowMessageId).toBe(
+      pending.workflowMessageId,
+    );
+    serverState.workflowMessages.endTurn({
+      workflowMessageId: pending.workflowMessageId,
+      workflowTurnId: turn.workflowTurnId,
+      runId,
+      targetSessionId: sessionId,
+      stopReason: "completed",
+      responseSessionEntryId: "entry-cancelled-reply",
+    });
+    expect(views.session(sessionId, null).workflowMessage).toBeNull();
     state.close();
   }, 60_000);
 
