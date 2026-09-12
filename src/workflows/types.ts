@@ -903,7 +903,7 @@ export interface AgentStepExecutor {
    * leave the run claimable for an origin session. Omission is unsupported.
    */
   readonly assistantMessageMode?: "visible" | "park" | "unsupported";
-  /** True when the host records active time while this executor parks and resumes an attempt. */
+  /** True when the workflow server records active time while this executor parks and resumes an attempt. */
   readonly preservesActiveTimeBudget?: boolean;
   /** Must enforce the exact contract allowlist before every tool executes. */
   readonly enforcesToolAllowlist?: boolean;

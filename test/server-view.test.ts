@@ -54,7 +54,7 @@ const controlFixture = JSON.parse(
   agentSnapshot: { display: WorkflowDisplay };
 };
 
-describe("host workflow display reducer", () => {
+describe("workflow server display reducer", () => {
   it("keeps the server-owned control fixture aligned with the reducer", () => {
     expect(WORKFLOW_DISPLAY_CONTROLS).toEqual(controlFixture.controls);
     expect(controlFixture.agentSnapshot.display).toEqual(display({ pendingRequestKind: "agent" }));
@@ -200,9 +200,9 @@ describe("host workflow display reducer", () => {
     expect(workflowPageStart(300, 299)).toBe(44);
   });
 
-  it("keeps large content and replay history reachable through bounded host views", async () => {
-    const projectPath = await makeTempDir("host-view-large-project");
-    const databasePath = path.join(await makeTempDir("host-view-large-state"), "state.sqlite");
+  it("keeps large content and replay history reachable through bounded server views", async () => {
+    const projectPath = await makeTempDir("server-view-large-project");
+    const databasePath = path.join(await makeTempDir("server-view-large-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -221,7 +221,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: largeInput,
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-view",
       leaseMs: 60_000,
       originSessionId: "session-large-view",
@@ -250,7 +250,7 @@ describe("host workflow display reducer", () => {
     expect(runs.readContentBlob("run-large-view", "invalid", "application/json")).toBeUndefined();
     const largeOutput = {
       text: "x".repeat(2 * 1024 * 1024),
-      userArtifact: { $artifact: { path: "user-data", note: "not a host reference" } },
+      userArtifact: { $artifact: { path: "user-data", note: "not a server reference" } },
     };
     const result = await new WorkflowEngine({
       store: runs,
@@ -505,8 +505,8 @@ describe("host workflow display reducer", () => {
   }, 60_000);
 
   it("keeps complete graph history reachable outside the bounded snapshot", async () => {
-    const projectPath = await makeTempDir("host-view-graph-project");
-    const databasePath = path.join(await makeTempDir("host-view-graph-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-graph-project");
+    const databasePath = path.join(await makeTempDir("server-view-graph-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -540,7 +540,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-graph",
       leaseMs: 60_000,
       originSessionId: "session-large-graph",
@@ -585,8 +585,8 @@ describe("host workflow display reducer", () => {
   }, 60_000);
 
   it("bounds large workflow topology and keeps the full definition reachable", async () => {
-    const projectPath = await makeTempDir("host-view-topology-project");
-    const databasePath = path.join(await makeTempDir("host-view-topology-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-topology-project");
+    const databasePath = path.join(await makeTempDir("server-view-topology-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -607,7 +607,7 @@ describe("host workflow display reducer", () => {
       startAt: "node-0",
       nodes,
       edges,
-      operatorData: { $artifact: { path: "operator-owned", note: "not a host reference" } },
+      operatorData: { $artifact: { path: "operator-owned", note: "not a server reference" } },
     };
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
     claimTestRun(queue, {
@@ -621,7 +621,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-topology",
       leaseMs: 60_000,
       originSessionId: "session-large-topology",
@@ -682,8 +682,8 @@ describe("host workflow display reducer", () => {
   });
 
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
-    const projectPath = await makeTempDir("host-view-project");
-    const databasePath = path.join(await makeTempDir("host-view-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-project");
+    const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -701,7 +701,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-view",
       leaseMs: 60_000,
       originSessionId: "session-view",

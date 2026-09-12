@@ -21,7 +21,7 @@ export class ServerProcessRegistry {
   private readonly processes = new Map<number, ProcessIdentity>();
 
   constructor(storeDir: string) {
-    this.filePath = path.join(storeDir, "host.children.json");
+    this.filePath = path.join(storeDir, "server.children.json");
   }
 
   register(pid: number): ProcessIdentity {

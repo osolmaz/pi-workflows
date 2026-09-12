@@ -921,7 +921,7 @@ export class WorkflowRunStore {
         }
         const definitionHash = this.state.putJson(snapshot, now);
         if (state.parentRunId !== undefined) {
-          throw new Error("A restart must have an explicit host reservation");
+          throw new Error("A restart must have an explicit workflow server reservation");
         }
         this.state.connection
           .prepare(
@@ -3144,7 +3144,7 @@ export class WorkflowRunStore {
   ): void {
     if (actor.type === "human") return;
     if (
-      (actor.type === "session" || actor.type === "controller") &&
+      (actor.type === "session" || actor.type === "resource_manager") &&
       row.actorType === actor.type &&
       row.actorId === (actor.id ?? null) &&
       row.sourceType === source
@@ -4119,7 +4119,7 @@ export class WorkflowRunStore {
         lastEventSeq: segment.eventCount,
         failure: {
           failedAt: new Date().toISOString(),
-          code: "host_interrupted",
+          code: "server_interrupted",
           message: reason,
         },
       };
@@ -4664,8 +4664,8 @@ function assertSourceType(source: string): void {
 function assertActorType(value: string): ActorType {
   if (
     value !== "session" &&
-    value !== "host" &&
-    value !== "controller" &&
+    value !== "server" &&
+    value !== "resource_manager" &&
     value !== "channel" &&
     value !== "human" &&
     value !== "policy" &&

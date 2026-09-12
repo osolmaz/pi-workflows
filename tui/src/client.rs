@@ -1699,7 +1699,7 @@ mod tests {
                 "finishedAt":"2026-01-01T00:00:01.000Z",
                 "status":"completed",
                 "traceSchema":"pi-workflows.trace-event.v1",
-                "paths":{"workflow":"host","state":"host","trace":"host"}
+                "paths":{"workflow":"server","state":"server","trace":"server"}
             },
             "state": {
                 "schema":"pi-workflows.run-state.v1",
@@ -1782,7 +1782,7 @@ mod tests {
                 "finishedAt":null,
                 "status":"running",
                 "traceSchema":"pi-workflows.trace-event.v1",
-                "paths":{"workflow":"host","state":"host","trace":"host"}
+                "paths":{"workflow":"server","state":"server","trace":"server"}
             },
             "state": {
                 "schema":"pi-workflows.run-state.v1",

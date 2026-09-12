@@ -27,7 +27,7 @@ describe("WorkflowEngine additional paths", () => {
     expect(engine.databasePath).toBe(databasePath);
   });
 
-  it("yields to the host event loop after each committed graph transition", async () => {
+  it("yields to the event loop after each committed graph transition", async () => {
     let serverTurnRan = false;
     const serverTurn = setImmediate(() => {
       serverTurnRan = true;

@@ -7,9 +7,9 @@ import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
-import { makeTempDir, waitUntil } from "./helpers.js";
+import { makeTempDir, reportBranch, waitUntil } from "./helpers.js";
 
-async function setup(maxWorkers: number) {
+async function setup(maxRunners: number) {
   const cwd = await makeTempDir("scheduler-project");
   const databasePath = path.join(await makeTempDir("scheduler-state"), "state.sqlite");
   const workflowPath = path.join(cwd, "gate.workflow.ts");
@@ -28,9 +28,9 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
   } }),
 }, edges: [] });`,
   );
-  const host = new WorkflowServer({ databasePath, claimPollMs: 10, maxWorkers });
+  const server = new WorkflowServer({ databasePath, claimPollMs: 10, maxRunners });
   const client = new WorkflowClient({ databasePath });
-  await host.start();
+  await server.start();
   const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
   const queue = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
   const state = new ServerStateStore(databasePath, { readOnly: true });
@@ -38,7 +38,7 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
     cwd,
     databasePath,
     client,
-    host,
+    server,
     resolved,
     queue,
     state,
@@ -65,7 +65,7 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
     },
     async close() {
       await client.close();
-      await host.stop();
+      await server.stop();
       queue.close();
       state.close();
     },
@@ -75,16 +75,16 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
 describe("shared execution scheduler", () => {
   it.each([0, -1, 1.5, Number.NaN])(
     "rejects invalid capacity %s before opening state",
-    (maxWorkers) => {
-      expect(() => new WorkflowServer({ maxWorkers })).toThrow(
-        "maxWorkers must be a positive safe integer",
+    (maxRunners) => {
+      expect(() => new WorkflowServer({ maxRunners })).toThrow(
+        "maxRunners must be a positive safe integer",
       );
     },
   );
 
   it("shares startup capacity between pre-existing workflows and resource reconciles", async () => {
     const test = await setup(1);
-    await test.host.stop();
+    await test.server.stop();
     const resourceDirectory = path.join(test.cwd, ".pi", "resource-managers");
     await fs.mkdir(resourceDirectory, { recursive: true });
     const resourceStarted = path.join(test.cwd, "resource.started");
@@ -120,20 +120,20 @@ export default defineResourceManager({ name: "gate", initialStatus: () => ({}),
     });
     resources.putResource({ resourceManager: "gate", key: "one", spec: {}, initialStatus: {} });
     seed.close();
-    const host = new WorkflowServer({
+    const server = new WorkflowServer({
       databasePath: test.databasePath,
       claimPollMs: 10,
-      maxWorkers: 1,
+      maxRunners: 1,
     });
     try {
-      await host.start();
+      await server.start();
       let peakWorkers = 0;
       await vi.waitFor(
         async () => {
           const status = await test.client.request({ operation: "server.status" });
           peakWorkers = Math.max(
             peakWorkers,
-            (status.receipt as { executionWorkers: number }).executionWorkers,
+            (status.receipt as { executionRunners: number }).executionRunners,
           );
           expect(existsSync(path.join(test.cwd, "startup-work.started"))).toBe(true);
         },
@@ -145,20 +145,20 @@ export default defineResourceManager({ name: "gate", initialStatus: () => ({}),
       await waitUntil(() => existsSync(resourceStarted), 30_000);
       expect(test.queue.getWorkflowRun("startup-work")?.status).toBe("done");
       expect((await test.client.request({ operation: "server.status" })).receipt).toMatchObject({
-        executionWorkers: 1,
-        maxWorkers: 1,
+        executionRunners: 1,
+        maxRunners: 1,
       });
       await fs.writeFile(resourceRelease, "release");
       await vi.waitFor(
         async () => {
           expect((await test.client.request({ operation: "server.status" })).receipt).toMatchObject(
-            { executionWorkers: 0 },
+            { executionRunners: 0 },
           );
         },
         { timeout: 30_000 },
       );
     } finally {
-      await host.stop();
+      await server.stop();
       await test.close();
     }
   }, 60_000);
@@ -176,7 +176,7 @@ export default defineResourceManager({ name: "gate", initialStatus: () => ({}),
         4,
       );
       const status = await test.client.request({ operation: "server.status" });
-      expect(status.receipt).toMatchObject({ executionWorkers: 2, maxWorkers: 2 });
+      expect(status.receipt).toMatchObject({ executionRunners: 2, maxRunners: 2 });
       const cancelled = running[0];
       if (cancelled === undefined) throw new Error("No active worker");
       expect(
@@ -242,10 +242,7 @@ export default defineWorkflow({ name: "agent", startAt: "work", nodes: { work: a
       };
       expect(
         (
-          await test.client.request({
-            operation: "workflowMessage.reportBranch",
-            payload: { ...authority, entries: [], isIdle: true, hasPendingMessages: false },
-          })
+          await reportBranch(test.client, authority)
         ).outcome,
       ).toBe("accepted");
       const submitted = test.client.request({
@@ -267,8 +264,8 @@ export default defineWorkflow({ name: "agent", startAt: "work", nodes: { work: a
       expect(test.state.getInteraction(interaction.requestId)?.status).toBe("pending");
       expect(test.queue.getWorkflowRun("interactive")?.status).toBe("parked");
       expect((await test.client.request({ operation: "server.status" })).receipt).toMatchObject({
-        executionWorkers: 1,
-        maxWorkers: 1,
+        executionRunners: 1,
+        maxRunners: 1,
       });
       await test.release("blocker");
       expect((await submitted).outcome).toBe("accepted");

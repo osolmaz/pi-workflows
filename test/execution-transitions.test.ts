@@ -43,7 +43,7 @@ function apply(current: WorkflowRunState, transition: WorkflowTransition) {
   return applyExecutionTransition(current, definition, transition, now);
 }
 
-describe("host-owned execution transitions", () => {
+describe("server-owned execution transitions", () => {
   it("rejects skipped graph nodes, rewritten attempt starts, and fabricated completion", () => {
     const guarded: WorkflowDefinitionSnapshot = {
       ...definition,

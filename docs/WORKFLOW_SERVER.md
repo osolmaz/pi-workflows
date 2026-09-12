@@ -115,13 +115,13 @@ Claim rejection uses `ClaimLostError` with one internal reason:
 
 Logs may show the run ID, generation, and reason. They must not show a raw token or token hash.
 
-## Worker scheduling
+## Runner scheduling
 
-`WorkflowRunQueueStore` in `src/workflows/queue.ts` owns run reservations, queue state, and execution claims. `SqliteResourceManagerStore` owns managed resources and reconcile state, not workflow scheduling. The host is the only reconciliation runtime; the separate `ResourceManagerRuntime` API has been removed. Reconcile results and failure requeues commit atomically, and a worker that loses its claim cannot write a failure or start a retry. They share the existing SQLite connection and revision helpers; neither introduces another database.
+`WorkflowRunQueueStore` in `src/workflows/queue.ts` owns run reservations, queue state, and execution claims. `SqliteResourceManagerStore` owns managed resources and reconcile state, not workflow scheduling. The workflow server is the only reconciliation runtime; the separate `ResourceManagerRuntime` API has been removed. Reconcile results and failure requeues commit atomically, and a runner that loses its claim cannot write a failure or start a retry. They share the existing SQLite connection and revision helpers; neither introduces another database.
 
 One scheduler admits workflow runners and resource-manager reconciles. Start and restart reserve a queued run; resume makes existing work eligible. Accepted responses, validation candidates, and expired interactive deadlines use the same admission path. Requests remain durable while capacity is full.
 
-The default capacity is four execution workers. Set `PI_WORKFLOWS_MAX_WORKERS` to a positive integer before starting the host to change it. Embedded test hosts can use `WorkflowServer({ maxWorkers })`. Capacity includes pending launches and live workers. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.
+The default capacity is four execution runners. Set `PI_WORKFLOWS_MAX_RUNNERS` to a positive integer before starting the workflow server to change it. Embedded test servers can use `WorkflowServer({ maxRunners })`. Capacity includes pending launches and live runners. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.
 
 An interactive run holds its origin-session reservation while queued, running, waiting, or paused. Independent headless runs do not reserve a Pi session. Only terminal completion or explicit cancellation releases an interactive reservation.
 
@@ -132,8 +132,8 @@ The run and queue projections follow these states:
 | Run state   | Queue state | Claim | Runner   | Meaning                                                 |
 | ----------- | ----------- | ----- | -------- | ------------------------------------------------------- |
 | `queued`    | `queued`    | none  | none     | Ready for server scheduling.                            |
-| `running`   | `starting`  | host  | starting | A runner launch is being recorded.                      |
-| `running`   | `running`   | host  | live     | A runner is executing one node.                         |
+| `running`   | `starting`  | server | starting | A runner launch is being recorded.                      |
+| `running`   | `running`   | server | live     | A runner is executing one node.                         |
 | `running`   | `parked`    | none  | none     | Execution stopped at a durable boundary and can resume. |
 | `waiting`   | `parked`    | none  | none     | A checkpoint or interactive request needs input.        |
 | `completed` | `done`      | none  | none     | The run finished successfully.                          |
@@ -141,7 +141,7 @@ The run and queue projections follow these states:
 | `timed_out` | `failed`    | none  | none     | The run exceeded a declared timeout.                    |
 | `cancelled` | `cancelled` | none  | none     | Cancellation completed.                                 |
 
-The `host` claim-owner value and `pi-workflows.worker-launch.v1` launch schema are retained version-1 internal identifiers. They do not name public components.
+The `server` claim-owner value and the `pi-workflows.runner-launch.v1` launch schema are the current version-1 identifiers.
 
 A lifecycle transaction updates the run, queue, attempt, decision, lease, event, and viewer facts that belong to one transition. The database must not commit a failed event while the run remains running, or a terminal queue row while the run remains nonterminal.
 
@@ -155,7 +155,7 @@ A runner launch envelope contains:
 
 ```json
 {
-  "schema": "pi-workflows.worker-launch.v1",
+  "schema": "pi-workflows.runner-launch.v1",
   "runId": "run-id",
   "generation": 2,
   "runnerEpoch": "opaque-id",
@@ -269,16 +269,16 @@ Each history page has both an item limit and an encoded byte budget. Oversized v
 
 The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
 
-The server keeps execution status separate from worker and Pi activity:
+The server keeps execution status separate from runner and Pi activity:
 
 1. A durable terminal result keeps its terminal label, including during reporting or cleanup. An unresolved external effect still exposes a review action.
 2. A nonterminal run with an ambiguous external effect is `ambiguous`.
-3. A durable pause is `paused`, even while its worker or Pi turn stops.
+3. A durable pause is `paused`, even while its runner or Pi turn stops.
 4. A pending request is `waiting`. Its kind determines the response action: `submit` and `update` for an agent, `answer` for an ordinary checkpoint, `human-answer` for a protected decision, and no tool completion action for a visible-response request.
-5. Otherwise, active worker or Pi execution is `running`.
+5. Otherwise, active runner or Pi execution is `running`.
 6. Parked resumable work or admitted work that has not started is `queued`.
 
-`display.activity` reports the supervised worker or exact Pi turn independently. Waiting alone never permits an answer. Command handlers check the exact request again before they change state.
+`display.activity` reports the supervised runner or exact Pi turn independently. Waiting alone never permits an answer. Command handlers check the exact request again before they change state.
 
 Server connection failure is the client condition `unavailable`, not a `display.status` value. `paused` is never inferred from a parked queue, pending interaction, stale cursor, or missing activity report.
 
@@ -360,7 +360,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Server commands
 
-`host_commands` stores request ID, client ID, operation, idempotency key, durable request fingerprint, run ID, accepted revision, outcome, receipt or error hash, and timestamps. The request ID is transport identity and is not part of the fingerprint. The request primary key prevents one request ID from naming two payloads. The client and idempotency-key uniqueness adopts the same durable payload across transport attempts.
+`server_commands` stores request ID, client ID, operation, idempotency key, durable request fingerprint, run ID, accepted revision, outcome, receipt or error hash, and timestamps. The request ID is transport identity and is not part of the fingerprint. The request primary key prevents one request ID from naming two payloads. The client and idempotency-key uniqueness adopts the same durable payload across transport attempts.
 
 ### Interactive requests
 
@@ -370,7 +370,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Runner epochs
 
-`run_workers` stores run ID, generation, runner epoch, launch envelope hash, process identity, status, start time, ready time, finish time, exit code, signal, and bounded diagnostic hash. One run and generation can have several sequential runner epochs, but only one may be active.
+`run_runners` stores run ID, generation, runner epoch, launch envelope hash, process identity, status, start time, ready time, finish time, exit code, signal, and bounded diagnostic hash. One run and generation can have several sequential runner epochs, but only one may be active.
 
 These tables remain part of `pi-workflows-state` schema version 1. The DDL digest changes in place under the alpha policy.
 
@@ -490,10 +490,10 @@ Resource manager reconcile code runs in a supervised resource runner, not in the
 Use separate states and messages for these failures:
 
 - `claimLost`: another generation owns the run, or the claim expired.
-- `workerCrashed`: the child exited without a terminal protocol message after it saved progress.
+- `runnerCrashed`: the child exited without a terminal protocol message after it saved progress.
 - `runnerNoProgress`: the child exited before the saved run revision advanced and needs explicit resume or cancellation.
-- `workerTimedOut`: the child exceeded a declared deadline.
-- `hostUnavailable`: the client cannot reach or start the server.
+- `runnerTimedOut`: the child exceeded a declared deadline.
+- `serverUnavailable`: the client cannot reach or start the server.
 - `sourceChanged`: the workflow source does not match the saved identity.
 - `effectAmbiguous`: an external action may have applied without a receipt.
 - `nodeFailed`: workflow code returned a normal failure.

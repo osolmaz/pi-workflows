@@ -59,7 +59,7 @@ fn state_directory() -> PathBuf {
 fn default_socket() -> PathBuf {
     let state_directory = state_directory();
     #[cfg(unix)]
-    return state_directory.join("host").join("host.sock");
+    return state_directory.join("server").join("server.sock");
     #[cfg(windows)]
     {
         use sha2::{Digest, Sha256};
@@ -71,7 +71,7 @@ fn default_socket() -> PathBuf {
         return PathBuf::from(format!(r"\\.\pipe\pi-workflows-{suffix}"));
     }
     #[cfg(not(any(unix, windows)))]
-    state_directory.join("host").join("host.sock")
+    state_directory.join("server").join("server.sock")
 }
 
 async fn server_available(socket_path: &PathBuf) -> bool {

@@ -375,7 +375,7 @@ describe("WorkflowMessageCoordinator", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(coordinator.activeTurnMessage()).toBeUndefined();
   });
-  it("clears an explicit follow-up turn locally as soon as the host accepts its end", async () => {
+  it("clears an explicit follow-up turn locally as soon as the workflow server accepts its end", async () => {
     const message = followUpMessage();
     const current = view(message);
     const branch: Record<string, unknown>[] = [];

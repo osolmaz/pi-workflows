@@ -3538,7 +3538,7 @@ mod tests {
                 "finishedAt":null,
                 "status":"waiting",
                 "traceSchema":"pi-workflows.trace-event.v1",
-                "paths":{"workflow":"host","state":"host","trace":"host"}
+                "paths":{"workflow":"server","state":"server","trace":"server"}
             },
             "display": {
                 "status":"running",

@@ -50,7 +50,7 @@ describe("SQLite delivery lifecycle", () => {
     expect(store.getResource({ resourceManager: "missing", key: "none" })).toBeUndefined();
     expect(store.getResourceByUid("missing")).toBeUndefined();
     expect(
-      store.claimNext({ resourceManagers: [], ownerId: "worker", leaseMs: 10_000 }),
+      store.claimNext({ resourceManagers: [], ownerId: "runner", leaseMs: 10_000 }),
     ).toBeUndefined();
     expect(
       queue.renewWorkflowRunClaim({
@@ -61,11 +61,11 @@ describe("SQLite delivery lifecycle", () => {
     ).toBe(false);
     store.putResource({ resourceManager: "jobs", key: "one", spec: {}, initialStatus: {} });
     expect(
-      store.claimNext({ resourceManagers: ["other"], ownerId: "worker", leaseMs: 10_000 }),
+      store.claimNext({ resourceManagers: ["other"], ownerId: "runner", leaseMs: 10_000 }),
     ).toBeUndefined();
     const claim = store.claimNext({
       resourceManagers: ["jobs"],
-      ownerId: "worker",
+      ownerId: "runner",
       leaseMs: 10_000,
     });
     if (claim === undefined) throw new Error("claim missing");
@@ -116,7 +116,7 @@ describe("SQLite delivery lifecycle", () => {
         {
           resourceManager: "jobs",
           key: "one",
-          ownerId: "worker",
+          ownerId: "runner",
           token: "none",
           generation: 1,
           queueVersion: 1,
@@ -305,7 +305,7 @@ describe("SQLite delivery lifecycle", () => {
     });
     const claim = store.claimNext({
       resourceManagers: ["jobs"],
-      ownerId: "worker",
+      ownerId: "runner",
       leaseMs: 60_000,
     });
     if (claim === undefined) throw new Error("claim missing");

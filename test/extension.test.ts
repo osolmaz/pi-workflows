@@ -20,7 +20,7 @@ afterEach(async () => {
     try {
       await client.request({ operation: "server.stop" });
     } catch {
-      // The test did not start a host or already stopped it.
+      // The test did not start a workflow server or already stopped it.
     }
   }
   testHome = undefined;
@@ -161,10 +161,10 @@ function makePi(options: {
 }
 
 async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
-  testHome = await makeTempDir("pi-workflows-hosted-extension-home");
+  testHome = await makeTempDir("pi-workflows-server-extension-home");
   vi.stubEnv("HOME", testHome);
   vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", shortcutsConfigDir());
-  const cwd = await makeTempDir("pi-workflows-hosted-extension-project");
+  const cwd = await makeTempDir("pi-workflows-server-extension-project");
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
     workflowPath,
@@ -172,7 +172,7 @@ async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-interactive",
+  name: "server-interactive",
   startAt: "ask",
   nodes: {
     ask: agent({ prompt: () => "Return a result." }),
@@ -231,7 +231,7 @@ async function writeTallWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-tall",
+  name: "server-tall",
   startAt: "ask",
   nodes: {
     ask: agent({ prompt: () => "Return a result." }),
@@ -253,7 +253,7 @@ async function writeValidatedWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-validated",
+  name: "server-validated",
   startAt: "ask",
   nodes: {
     ask: agent({
@@ -313,7 +313,7 @@ const gate = humanDecision({
 } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
 ${gate}
 export default defineWorkflow({
-  name: ${JSON.stringify(protectedDecision ? "protected-hosted" : "checkpoint-hosted")},
+  name: ${JSON.stringify(protectedDecision ? "protected-server" : "checkpoint-server")},
   startAt: "gate",
   nodes: {
     gate,
@@ -344,7 +344,7 @@ export default defineWorkflow({
   startAt: "notify",
   nodes: {
     notify: notify({ message: () => ${JSON.stringify(
-      options.notification ?? "Passive hosted update.",
+      options.notification ?? "Passive server update.",
     )} }),
     done: compute({ run: () => ({ complete: true }) }),
   },
@@ -505,8 +505,8 @@ function sessionSnapshotEvent(revision: number, payload: WorkflowSessionView): C
   };
 }
 
-describe("pi-workflows hosted extension", () => {
-  it("reports channel status through the hosted client", async () => {
+describe("pi-workflows workflow server extension", () => {
+  it("reports channel status through the workflow client", async () => {
     const { cwd } = await setupProject();
     const fake = makePi({ cwd });
     await fake.emit("session_start");
@@ -527,7 +527,7 @@ describe("pi-workflows hosted extension", () => {
 
     const state = new StateDatabase({ filePath: workflowStatePath(), mode: "read-only" });
     try {
-      expect(state.connection.prepare("SELECT count(*) AS count FROM host_commands").get()).toEqual(
+      expect(state.connection.prepare("SELECT count(*) AS count FROM server_commands").get()).toEqual(
         { count: 0 },
       );
     } finally {
@@ -535,7 +535,7 @@ describe("pi-workflows hosted extension", () => {
     }
   }, 30_000);
 
-  it("reconnects the session after initial host startup fails", async () => {
+  it("reconnects the session after initial workflow server startup fails", async () => {
     const { cwd, workflowPath } = await setupProject();
     const originalEnsureAvailable = WorkflowClient.prototype.ensureAvailable;
     const ensureAvailable = vi
@@ -618,7 +618,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 30_000);
 
-  it("starts, presents, updates, and completes an interactive hosted run", async () => {
+  it("starts, presents, updates, and completes an interactive run", async () => {
     const { cwd, workflowPath } = await setupProject();
     const durableRequests = vi.spyOn(WorkflowClient.prototype, "requestDurable");
     const fake = makePi({ cwd });
@@ -755,7 +755,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("shows host state and pauses a waiting step when Escape aborts its turn", async () => {
+  it("shows workflow server state and pauses a waiting step when Escape aborts its turn", async () => {
     const { cwd, workflowPath } = await setupProject();
     const abort = new AbortController();
     abort.abort();
@@ -773,7 +773,7 @@ describe("pi-workflows hosted extension", () => {
       bold: (text) => text,
       fg: (_color, text) => text,
     }).render(80);
-    expect(rendered.join("\n")).toContain("workflow hosted-interactive");
+    expect(rendered.join("\n")).toContain("workflow server-interactive");
     fake.shortcuts.get("shift+down")?.(fake.ctx);
     fake.shortcuts.get("shift+up")?.(fake.ctx);
 
@@ -968,7 +968,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.runCommand(workflowPath);
     await waitUntil(() => fake.widgets.some((widget) => Array.isArray(widget)), 30_000);
     const widget = fake.widgets.findLast((value) => Array.isArray(value));
-    expect(widget).toEqual(expect.arrayContaining([expect.stringContaining("hosted-interactive")]));
+    expect(widget).toEqual(expect.arrayContaining([expect.stringContaining("server-interactive")]));
     await fake.runCommand("cancel");
     await fake.emit("session_shutdown");
     expect(fake.widgets.at(-1)).toBeUndefined();
@@ -1355,7 +1355,7 @@ export default defineWorkflow({
     expect(
       fake.sent.find((entry) => entry.customType === "pi-workflows-notification"),
     ).toMatchObject({
-      content: "Passive hosted update.",
+      content: "Passive server update.",
       delivery: { triggerTurn: false },
     });
     expect(fake.sent.find((entry) => entry.customType === "pi-workflows-terminal")).toMatchObject({
@@ -1441,7 +1441,7 @@ export default defineWorkflow({
     await fake.emit("session_shutdown");
   }, 90_000);
 
-  it("applies managed resources through the host and a source resolver child", async () => {
+  it("applies managed resources through the workflow server and a source resolver child", async () => {
     const { cwd } = await setupProject();
     const directory = path.join(cwd, ".pi", "resource-managers");
     await fs.mkdir(directory, { recursive: true });

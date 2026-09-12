@@ -143,7 +143,7 @@ const AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS = 5 * 60 * 1_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RESOURCE_MANAGER_CLAIM_LEASE_MS = 120_000;
 const RESOURCE_MANAGER_RENEW_MS = 30_000;
-const DEFAULT_MAX_WORKERS = 4;
+const DEFAULT_MAX_RUNNERS = 4;
 const DEFAULT_RESOURCE_MANAGER_TIMEOUT_MS = 60_000;
 
 export type WorkflowServerOptions = {
@@ -155,8 +155,8 @@ export type WorkflowServerOptions = {
   piArgs?: string[];
   env?: Record<string, string>;
   claimPollMs?: number;
-  /** Combined capacity for workflow and resource-manager execution workers. */
-  maxWorkers?: number;
+  /** Combined capacity for workflow runner and resource runner processes. */
+  maxRunners?: number;
   serverLeaseMs?: number;
   serverRenewMs?: number;
   runClaimLeaseMs?: number;
@@ -269,7 +269,7 @@ export class WorkflowServer {
   private started = false;
   private schedulerActive = false;
   private preferResourceManager = false;
-  private readonly maxWorkers: number;
+  private readonly maxRunners: number;
   private decisionTimeoutActive = false;
   private decisionChannelConfig: DecisionChannelConfig | null = null;
   private decisionChannelError: string | null = null;
@@ -284,15 +284,15 @@ export class WorkflowServer {
 
   constructor(options: WorkflowServerOptions = {}) {
     this.options = options;
-    this.maxWorkers = options.maxWorkers ?? DEFAULT_MAX_WORKERS;
-    if (!Number.isSafeInteger(this.maxWorkers) || this.maxWorkers < 1) {
-      throw new Error("maxWorkers must be a positive safe integer");
+    this.maxRunners = options.maxRunners ?? DEFAULT_MAX_RUNNERS;
+    if (!Number.isSafeInteger(this.maxRunners) || this.maxRunners < 1) {
+      throw new Error("maxRunners must be a positive safe integer");
     }
-    this.serverId = options.runnerId ?? `host-${randomUUID()}`;
+    this.serverId = options.runnerId ?? `server-${randomUUID()}`;
     this.databasePath = path.resolve(options.databasePath ?? workflowStatePath());
-    this.stateDirectory = path.join(path.dirname(this.databasePath), "host");
+    this.stateDirectory = path.join(path.dirname(this.databasePath), "server");
     this.socketPath = clientSocketPath(this.databasePath);
-    this.lockPath = path.join(this.stateDirectory, "host.lock.json");
+    this.lockPath = path.join(this.stateDirectory, "server.lock.json");
     this.state = new StateDatabase({ filePath: this.databasePath });
     this.serverState = new ServerStateStore(this.databasePath, { state: this.state });
     this.recovery = new WorkflowRecovery(this.state);
@@ -480,13 +480,13 @@ export class WorkflowServer {
       this.state.connection
         .prepare(
           `UPDATE leases SET expires_at = ?
-           WHERE owner_id = ? AND owner_type IN ('host', 'controller') AND expires_at > ?`,
+           WHERE owner_id = ? AND owner_type IN ('server', 'resource_manager') AND expires_at > ?`,
         )
         .run(now, previousServerId, now);
       this.state.connection
         .prepare(
-          `UPDATE run_workers SET status = 'orphaned', finished_at = ?
-           WHERE host_epoch < ? AND status IN ('starting', 'ready', 'running')`,
+          `UPDATE run_runners SET status = 'orphaned', finished_at = ?
+           WHERE server_epoch < ? AND status IN ('starting', 'ready', 'running')`,
         )
         .run(now, serverEpoch);
     });
@@ -975,17 +975,19 @@ export class WorkflowServer {
     );
     const messages = this.serverState.workflowMessages.listSession(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
-    // Pi reports one current message. Absent means Pi does not hold it on the
-    // active branch, so the message stays pending and is delivered again.
+    // Pi reports its one current message, or null when it holds none yet. A
+    // present report without an entry means the message stays pending.
+    const workflowMessageId = report.workflowMessageId;
     const piSessionEntryId =
-      report.piSessionEntryId !== null && allowed.has(report.workflowMessageId)
+      workflowMessageId !== null &&
+      report.piSessionEntryId !== null &&
+      allowed.has(workflowMessageId)
         ? report.piSessionEntryId
         : null;
-    const present = piSessionEntryId !== null;
     const entries =
-      piSessionEntryId === null
+      workflowMessageId === null || piSessionEntryId === null
         ? []
-        : [{ workflowMessageId: report.workflowMessageId, piSessionEntryId }];
+        : [{ workflowMessageId, piSessionEntryId }];
     const reconciledRunIds = new Set<string>();
     this.state.transaction(() => {
       if (coordinator.needsTimerResume) {
@@ -1042,8 +1044,8 @@ export class WorkflowServer {
     this.publishViews();
     return clientResponse(request.requestId, "accepted", {
       schema: BRANCH_REPORT_RECEIPT_SCHEMA,
-      outcome: present ? "present" : "absent",
-      workflowMessageId: report.workflowMessageId,
+      outcome: piSessionEntryId === null ? "absent" : "present",
+      workflowMessageId,
       coordinatorEpoch: coordinator.epoch,
     });
   }
@@ -1433,7 +1435,7 @@ export class WorkflowServer {
           if (
             !this.queue.cancelWorkflowRun({
               runId: active.record.runId,
-              // Handoff has already released this worker's claim. The queue's
+              // Handoff has already released this runner's claim. The queue's
               // unclaimed path still rejects a different live owner atomically.
               ...(active.control === "handoff" ? {} : { claimToken: active.claimToken }),
             })
@@ -2036,10 +2038,10 @@ export class WorkflowServer {
         "SELECT COUNT(*) AS count FROM interactive_requests WHERE status = 'pending'",
       ),
       ambiguousEffects: count("SELECT COUNT(*) AS count FROM effects WHERE status = 'ambiguous'"),
-      pendingResourceManagers: count("SELECT COUNT(*) AS count FROM controller_queue"),
+      pendingResourceManagers: count("SELECT COUNT(*) AS count FROM managed_resource_queue"),
       activeResourceRunners: this.activeResourceManagers.size,
-      executionWorkers: this.executionWorkerCount(),
-      maxWorkers: this.maxWorkers,
+      executionRunners: this.executionRunnerCount(),
+      maxRunners: this.maxRunners,
       lifecycleContradictions: violations.filter((item) => item.code === "queueState").length,
       stateViolations: violations,
     };
@@ -2185,7 +2187,7 @@ export class WorkflowServer {
       counts: {
         resources: count("SELECT COUNT(*) AS count FROM resources"),
         runs: count("SELECT COUNT(*) AS count FROM runs"),
-        resourceManagers: count("SELECT COUNT(*) AS count FROM controller_resources"),
+        resourceManagers: count("SELECT COUNT(*) AS count FROM managed_resources"),
         decisions: count("SELECT COUNT(*) AS count FROM human_decisions"),
         settingsScopes: count("SELECT COUNT(*) AS count FROM workflow_settings"),
         pendingInteractions: count(
@@ -2626,7 +2628,7 @@ export class WorkflowServer {
       );
       this.activeChannels.clear();
 
-      this.markApplyingChannelEffectsAmbiguous(undefined, "host_restarted_without_receipt");
+      this.markApplyingChannelEffectsAmbiguous(undefined, "server_restarted_without_receipt");
       const configuredDir = this.options.env?.PI_WORKFLOWS_CONFIG_DIR;
       const loaded = await loadDecisionChannelConfig(configuredDir);
       this.decisionChannelConfig = loaded?.channels ?? null;
@@ -3182,8 +3184,8 @@ export class WorkflowServer {
       const rows = this.state.connection
         .prepare(
           `SELECT DISTINCT p.canonical_path AS projectPath
-           FROM controller_queue q
-           JOIN controller_resources c ON c.controller_resource_id = q.controller_resource_id
+           FROM managed_resource_queue q
+           JOIN managed_resources c ON c.managed_resource_id = q.managed_resource_id
            JOIN projects p ON p.project_id = c.project_id
            JOIN leases l ON l.resource_id = c.resource_id
            WHERE q.available_at <= ? AND (l.owner_id IS NULL OR l.expires_at <= ?)
@@ -3248,7 +3250,7 @@ export class WorkflowServer {
     const key = `${projectPath}\u0000${claim.resourceManager}\u0000${claim.key}`;
     const reconcileId = randomUUID();
     const envelope: ResourceRunnerLaunchEnvelope = {
-      schema: "pi-workflows.controller-worker-launch.v1",
+      schema: "pi-workflows.resource-runner-launch.v1",
       runnerEpoch,
       serverEpoch: this.claim.epoch,
       generation: claim.generation,
@@ -3427,8 +3429,8 @@ export class WorkflowServer {
           runId: request.runId,
           requestId: request.actorRequestKey,
           targetSessionId,
-          actor: { type: "controller", id: request.managedResourceUid },
-          source: "controller-request",
+          actor: { type: "resource_manager", id: request.managedResourceUid },
+          source: "resource-manager-request",
           prompt: request.prompt,
         });
         return {
@@ -3443,8 +3445,8 @@ export class WorkflowServer {
         const result = this.runStore.removeFollowUp({
           runId: request.runId,
           followUpId: request.followUpId,
-          actor: { type: "controller", id: request.managedResourceUid },
-          source: "controller-request",
+          actor: { type: "resource_manager", id: request.managedResourceUid },
+          source: "resource-manager-request",
         });
         return {
           runId: request.runId,
@@ -3515,8 +3517,8 @@ export class WorkflowServer {
       scopeId,
       requestId: request.actorRequestKey,
       expectedChangeNumber: request.expectedChangeNumber ?? scope.changeNumber,
-      actor: { type: "controller", id: request.managedResourceUid },
-      source: "controller-request",
+      actor: { type: "resource_manager", id: request.managedResourceUid },
+      source: "resource-manager-request",
       patch: proposal.patch,
     });
     return {
@@ -3647,7 +3649,7 @@ export class WorkflowServer {
     const now = new Date();
     const delay = Math.min(60_000, 1_000 * 2 ** Math.min(active.claim.consecutiveErrors, 6));
     this.state.transaction(() => {
-      // A replaced worker cannot record a failure or schedule another attempt.
+      // A replaced runner cannot record a failure or schedule another attempt.
       if (
         !active.store.renewClaim(active.claim, RESOURCE_MANAGER_CLAIM_LEASE_MS, now.toISOString())
       )
@@ -3792,7 +3794,7 @@ export class WorkflowServer {
     this.pendingRunClaims.delete(runId);
   }
 
-  private executionWorkerCount(): number {
+  private executionRunnerCount(): number {
     return (
       new Set([...this.activeRuns.keys(), ...this.pendingRunClaims.keys()]).size +
       this.activeResourceManagers.size
@@ -3804,7 +3806,7 @@ export class WorkflowServer {
       this.stopping ||
       this.claim === null ||
       this.schedulerActive ||
-      this.executionWorkerCount() >= this.maxWorkers
+      this.executionRunnerCount() >= this.maxRunners
     )
       return;
     this.schedulerActive = true;
@@ -3828,7 +3830,7 @@ export class WorkflowServer {
         if (launched) this.preferResourceManager = false;
       }
     } catch (error) {
-      this.log(`worker scheduling failed: ${errorMessage(error)}`);
+      this.log(`runner scheduling failed: ${errorMessage(error)}`);
     } finally {
       this.schedulerActive = false;
       if (launched && !this.stopping) setImmediate(() => void this.claimOne());
@@ -3901,7 +3903,7 @@ export class WorkflowServer {
       return;
     }
     const envelope: WorkflowRunnerLaunchEnvelope = {
-      schema: "pi-workflows.worker-launch.v1",
+      schema: "pi-workflows.runner-launch.v1",
       runId,
       generation,
       runnerEpoch: randomUUID(),
@@ -4779,10 +4781,10 @@ export class WorkflowServer {
   private completeResourceManagerWorkflow(runId: string, state: WorkflowRunState): void {
     const row = this.state.connection
       .prepare(
-        `SELECT w.request_id AS requestId, c.controller_name AS resourceManager,
+        `SELECT w.request_id AS requestId, c.resource_manager_name AS resourceManager,
                 c.resource_key AS resourceKey, p.canonical_path AS projectPath
-         FROM controller_workflows w
-         JOIN controller_resources c ON c.controller_resource_id = w.controller_resource_id
+         FROM managed_resource_workflows w
+         JOIN managed_resources c ON c.managed_resource_id = w.managed_resource_id
          JOIN projects p ON p.project_id = c.project_id
          WHERE w.run_id = ? LIMIT 1`,
       )
@@ -5026,7 +5028,7 @@ function acquireServerLock(
   }
   fs.writeFileSync(
     lockPath,
-    `${JSON.stringify({ schema: "pi-workflows.host-lock.v1", ...record })}\n`,
+    `${JSON.stringify({ schema: "pi-workflows.server-lock.v1", ...record })}\n`,
     { encoding: "utf8", mode: 0o600, flag: "wx" },
   );
 }
@@ -5057,7 +5059,7 @@ function runnerResponse(
   revision?: number,
 ): WorkflowRunnerResponse {
   return {
-    schema: "pi-workflows.worker-response.v1",
+    schema: "pi-workflows.runner-response.v1",
     messageId: message.messageId,
     outcome,
     ...(revision === undefined ? {} : { revision }),
@@ -5073,7 +5075,7 @@ function resourceRunnerResponse(
   error?: string,
 ): ResourceRunnerResponse {
   return {
-    schema: "pi-workflows.controller-worker-response.v1",
+    schema: "pi-workflows.resource-runner-response.v1",
     messageId: message.messageId,
     outcome,
     ...(result === undefined ? {} : { result }),
@@ -5251,7 +5253,10 @@ function parseWorkflowBranchReport(payload: JsonValue): WorkflowBranchReport {
   return {
     targetSessionId: requireString(value.targetSessionId, "targetSessionId"),
     coordinatorEpoch: requireString(value.coordinatorEpoch, "coordinatorEpoch"),
-    workflowMessageId: requireString(value.workflowMessageId, "workflowMessageId"),
+    workflowMessageId:
+      value.workflowMessageId === null
+        ? null
+        : requireString(value.workflowMessageId, "workflowMessageId"),
     piSessionEntryId,
     isIdle: requireBoolean(value.isIdle, "isIdle"),
     hasPendingMessages: requireBoolean(value.hasPendingMessages, "hasPendingMessages"),
@@ -5381,7 +5386,7 @@ function isLockRecord(
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as { schema?: unknown }).schema === "pi-workflows.host-lock.v1" &&
+    (value as { schema?: unknown }).schema === "pi-workflows.server-lock.v1" &&
     typeof (value as { pid?: unknown }).pid === "number" &&
     typeof (value as { startIdentity?: unknown }).startIdentity === "string" &&
     typeof (value as { serverId?: unknown }).serverId === "string"

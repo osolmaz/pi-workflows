@@ -392,7 +392,7 @@ function treeHasBlocker(
     ) ||
     hasRow(
       database,
-      `SELECT 1 FROM run_workers
+      `SELECT 1 FROM run_runners
        WHERE run_id IN (${values}) AND status IN (${placeholders(ACTIVE_RUNNER_STATUSES)})`,
       [...runIds, ...ACTIVE_RUNNER_STATUSES],
     ) ||
@@ -447,7 +447,7 @@ function treeHasBlocker(
     ) ||
     hasRow(
       database,
-      `SELECT 1 FROM controller_workflows
+      `SELECT 1 FROM managed_resource_workflows
        WHERE run_id IN (${values}) OR reserved_run_id IN (${values})`,
       [...runIds, ...runIds],
     ) ||
@@ -524,8 +524,8 @@ function deleteUnusedDefinitionsAndProjects(database: Database.Database): void {
       `DELETE FROM projects
        WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.project_id = projects.project_id)
          AND NOT EXISTS (
-           SELECT 1 FROM controller_resources
-           WHERE controller_resources.project_id = projects.project_id
+           SELECT 1 FROM managed_resources
+           WHERE managed_resources.project_id = projects.project_id
          )`,
     )
     .run();

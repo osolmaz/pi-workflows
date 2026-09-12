@@ -340,7 +340,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.registerCommand("workflow", {
     description:
-      "Start or control a hosted workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, clear, restart, answer, change-settings, queue-follow-up, remove-follow-up",
+      "Start or control a workflow server run: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, clear, restart, answer, change-settings, queue-follow-up, remove-follow-up",
     getArgumentCompletions: async (prefix: string) => {
       const workflows = await listWorkflowMetadata(process.cwd());
       const items = [
@@ -500,7 +500,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("resource-manager", {
-    description: "Manage hosted managed resources: list, get, apply, reconcile, or delete",
+    description: "Manage managed resources: list, get, apply, reconcile, or delete",
     getArgumentCompletions: (prefix: string) => {
       const items = ["list", "get", "apply", "reconcile", "delete"]
         .filter((value) => value.startsWith(prefix))
@@ -525,7 +525,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     name: "workflow",
     label: "Workflow",
     description: [
-      "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete hosted workflow runs.",
+      "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete workflow runs.",
       "A pending step starts a new model turn after your current turn ends. After you start a run, end your turn so the step can be delivered. Do not sleep, poll, or wait for a step inside your turn.",
       "Protected human decisions cannot be answered with this model-facing tool.",
       "When the user asks to continue or resume the active workflow, call workflow resume immediately.",
@@ -913,7 +913,7 @@ async function executeCommand(
         },
       });
       return {
-        message: `Created hosted workflow ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract. The first step arrives as a new model turn. End this turn now so it can be delivered, and do not wait for it inside this turn.`,
+        message: `Created workflow run ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract. The first step arrives as a new model turn. End this turn now so it can be delivered, and do not wait for it inside this turn.`,
         details: { action: "start", runId, response: response.receipt ?? null },
       };
     }

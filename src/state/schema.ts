@@ -22,10 +22,10 @@ CREATE TABLE projects (
   created_at INTEGER NOT NULL
 ) STRICT;
 
-CREATE TABLE workflow_host_state (
+CREATE TABLE workflow_server_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
-  host_id TEXT,
+  server_id TEXT,
   token_hash BLOB CHECK (token_hash IS NULL OR length(token_hash) = 32),
   pid INTEGER CHECK (pid IS NULL OR pid > 0),
   process_start_identity TEXT,
@@ -33,16 +33,16 @@ CREATE TABLE workflow_host_state (
   heartbeat_at INTEGER,
   expires_at INTEGER,
   CHECK (
-    (host_id IS NULL AND token_hash IS NULL AND pid IS NULL AND process_start_identity IS NULL
+    (server_id IS NULL AND token_hash IS NULL AND pid IS NULL AND process_start_identity IS NULL
       AND started_at IS NULL AND heartbeat_at IS NULL AND expires_at IS NULL)
     OR
-    (host_id IS NOT NULL AND token_hash IS NOT NULL AND pid IS NOT NULL
+    (server_id IS NOT NULL AND token_hash IS NOT NULL AND pid IS NOT NULL
       AND process_start_identity IS NOT NULL AND started_at IS NOT NULL
       AND heartbeat_at IS NOT NULL AND expires_at IS NOT NULL)
   )
 ) STRICT;
 
-INSERT INTO workflow_host_state(id, epoch) VALUES (1, 0);
+INSERT INTO workflow_server_state(id, epoch) VALUES (1, 0);
 
 CREATE TABLE blobs (
   blob_hash BLOB PRIMARY KEY CHECK (length(blob_hash) = 32),
@@ -56,7 +56,7 @@ CREATE TABLE blobs (
 CREATE TABLE resources (
   resource_id TEXT PRIMARY KEY,
   resource_type TEXT NOT NULL CHECK (resource_type IN (
-    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'settings', 'follow_up'
+    'run', 'session', 'decision', 'managed_resource', 'effect', 'channel', 'settings', 'follow_up'
   )),
   aggregate_key TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
@@ -68,7 +68,7 @@ CREATE TABLE resources (
 CREATE TABLE leases (
   resource_id TEXT PRIMARY KEY REFERENCES resources(resource_id) ON DELETE CASCADE,
   generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
-  owner_type TEXT CHECK (owner_type IN ('session', 'host', 'controller', 'channel', 'system')),
+  owner_type TEXT CHECK (owner_type IN ('session', 'server', 'resource_manager', 'channel', 'system')),
   owner_id TEXT,
   token_hash BLOB CHECK (token_hash IS NULL OR length(token_hash) = 32),
   acquired_at INTEGER,
@@ -91,7 +91,7 @@ CREATE TABLE events (
   resource_revision INTEGER NOT NULL CHECK (resource_revision > 0),
   event_type TEXT NOT NULL,
   actor_type TEXT NOT NULL CHECK (actor_type IN (
-    'session', 'host', 'controller', 'channel', 'human', 'policy', 'control', 'system'
+    'session', 'server', 'resource_manager', 'channel', 'human', 'policy', 'control', 'system'
   )),
   actor_id TEXT,
   lease_generation INTEGER CHECK (lease_generation IS NULL OR lease_generation > 0),
@@ -238,7 +238,7 @@ CREATE TABLE workflow_setting_changes (
   request_id TEXT NOT NULL,
   change_number INTEGER NOT NULL CHECK (change_number > 0),
   actor_type TEXT NOT NULL CHECK (actor_type IN (
-    'session', 'host', 'controller', 'channel', 'human', 'policy', 'control', 'system'
+    'session', 'server', 'resource_manager', 'channel', 'human', 'policy', 'control', 'system'
   )),
   actor_id TEXT,
   source_type TEXT NOT NULL,
@@ -258,7 +258,7 @@ CREATE TABLE workflow_follow_ups (
   order_number INTEGER NOT NULL CHECK (order_number > 0),
   target_session_id TEXT NOT NULL,
   actor_type TEXT NOT NULL CHECK (actor_type IN (
-    'session', 'host', 'controller', 'channel', 'human', 'policy', 'control', 'system'
+    'session', 'server', 'resource_manager', 'channel', 'human', 'policy', 'control', 'system'
   )),
   actor_id TEXT,
   source_type TEXT NOT NULL,
@@ -295,7 +295,7 @@ CREATE INDEX run_queue_claim_idx ON run_queue(status, available_at, created_at);
 CREATE UNIQUE INDEX run_queue_active_session_idx ON run_queue(origin_session_id)
 WHERE origin_session_id IS NOT NULL AND status IN ('queued', 'starting', 'running', 'parked');
 
-CREATE TABLE host_commands (
+CREATE TABLE server_commands (
   request_id TEXT PRIMARY KEY,
   client_id TEXT NOT NULL,
   operation TEXT NOT NULL CHECK (operation IN (
@@ -316,19 +316,19 @@ CREATE TABLE host_commands (
   )),
   receipt_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
-  host_epoch INTEGER NOT NULL CHECK (host_epoch > 0),
+  server_epoch INTEGER NOT NULL CHECK (server_epoch > 0),
   created_at INTEGER NOT NULL,
   completed_at INTEGER NOT NULL,
   UNIQUE (client_id, idempotency_key)
 ) STRICT;
 
-CREATE INDEX host_commands_run_idx ON host_commands(run_id, created_at);
+CREATE INDEX server_commands_run_idx ON server_commands(run_id, created_at);
 
-CREATE TABLE run_workers (
-  worker_epoch TEXT PRIMARY KEY,
+CREATE TABLE run_runners (
+  runner_epoch TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   generation INTEGER NOT NULL CHECK (generation > 0),
-  host_epoch INTEGER NOT NULL CHECK (host_epoch > 0),
+  server_epoch INTEGER NOT NULL CHECK (server_epoch > 0),
   launch_envelope_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   pid INTEGER,
   process_start_identity TEXT,
@@ -345,12 +345,12 @@ CREATE TABLE run_workers (
   CHECK ((pid IS NULL) = (process_start_identity IS NULL))
 ) STRICT;
 
-CREATE UNIQUE INDEX run_workers_active_idx ON run_workers(run_id)
+CREATE UNIQUE INDEX run_runners_active_idx ON run_runners(run_id)
 WHERE status IN ('starting', 'ready', 'running');
-CREATE INDEX run_workers_generation_idx ON run_workers(run_id, generation, started_at);
+CREATE INDEX run_runners_generation_idx ON run_runners(run_id, generation, started_at);
 
-CREATE TABLE worker_messages (
-  worker_epoch TEXT NOT NULL REFERENCES run_workers(worker_epoch) ON DELETE CASCADE,
+CREATE TABLE runner_messages (
+  runner_epoch TEXT NOT NULL REFERENCES run_runners(runner_epoch) ON DELETE CASCADE,
   message_id TEXT NOT NULL,
   request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
   outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'adopted', 'rejected', 'claimLost')),
@@ -358,7 +358,7 @@ CREATE TABLE worker_messages (
   result_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
   completed_at INTEGER NOT NULL,
-  PRIMARY KEY (worker_epoch, message_id)
+  PRIMARY KEY (runner_epoch, message_id)
 ) STRICT;
 
 CREATE TABLE node_attempts (
@@ -633,11 +633,11 @@ CREATE TABLE human_decision_submissions (
   PRIMARY KEY (decision_id, attempt_id)
 ) STRICT;
 
-CREATE TABLE controller_resources (
-  controller_resource_id TEXT PRIMARY KEY,
+CREATE TABLE managed_resources (
+  managed_resource_id TEXT PRIMARY KEY,
   resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
   project_id TEXT REFERENCES projects(project_id),
-  controller_name TEXT NOT NULL,
+  resource_manager_name TEXT NOT NULL,
   resource_key TEXT NOT NULL,
   uid TEXT NOT NULL UNIQUE,
   generation INTEGER NOT NULL CHECK (generation > 0),
@@ -646,21 +646,21 @@ CREATE TABLE controller_resources (
   deletion_requested_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE (project_id, controller_name, resource_key)
+  UNIQUE (project_id, resource_manager_name, resource_key)
 ) STRICT;
 
-CREATE INDEX controller_resources_name_idx ON controller_resources(controller_name, resource_key);
+CREATE INDEX managed_resources_name_idx ON managed_resources(resource_manager_name, resource_key);
 
-CREATE TABLE controller_finalizers (
-  controller_resource_id TEXT NOT NULL REFERENCES controller_resources(controller_resource_id) ON DELETE CASCADE,
+CREATE TABLE managed_resource_finalizers (
+  managed_resource_id TEXT NOT NULL REFERENCES managed_resources(managed_resource_id) ON DELETE CASCADE,
   finalizer TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0),
-  PRIMARY KEY (controller_resource_id, finalizer),
-  UNIQUE (controller_resource_id, position)
+  PRIMARY KEY (managed_resource_id, finalizer),
+  UNIQUE (managed_resource_id, position)
 ) STRICT;
 
-CREATE TABLE controller_queue (
-  controller_resource_id TEXT PRIMARY KEY REFERENCES controller_resources(controller_resource_id) ON DELETE CASCADE,
+CREATE TABLE managed_resource_queue (
+  managed_resource_id TEXT PRIMARY KEY REFERENCES managed_resources(managed_resource_id) ON DELETE CASCADE,
   available_at INTEGER NOT NULL,
   queue_version INTEGER NOT NULL DEFAULT 1 CHECK (queue_version > 0),
   consecutive_errors INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0),
@@ -669,11 +669,11 @@ CREATE TABLE controller_queue (
   updated_at INTEGER NOT NULL
 ) STRICT;
 
-CREATE INDEX controller_queue_claim_idx ON controller_queue(available_at, created_at);
+CREATE INDEX managed_resource_queue_claim_idx ON managed_resource_queue(available_at, created_at);
 
-CREATE TABLE controller_workflows (
+CREATE TABLE managed_resource_workflows (
   request_id TEXT PRIMARY KEY,
-  controller_resource_id TEXT NOT NULL REFERENCES controller_resources(controller_resource_id) ON DELETE CASCADE,
+  managed_resource_id TEXT NOT NULL REFERENCES managed_resources(managed_resource_id) ON DELETE CASCADE,
   request_key TEXT NOT NULL,
   workflow_name TEXT NOT NULL,
   input_fingerprint BLOB NOT NULL CHECK (length(input_fingerprint) = 32),
@@ -686,7 +686,7 @@ CREATE TABLE controller_workflows (
   error_hash BLOB REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE (controller_resource_id, request_key)
+  UNIQUE (managed_resource_id, request_key)
 ) STRICT;
 
 CREATE TABLE effects (
@@ -697,7 +697,7 @@ CREATE TABLE effects (
   effect_type TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,
   payload_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  owner_scope TEXT NOT NULL CHECK (owner_scope IN ('run', 'controller', 'channel', 'system')),
+  owner_scope TEXT NOT NULL CHECK (owner_scope IN ('run', 'resource_manager', 'channel', 'system')),
   status TEXT NOT NULL CHECK (status IN (
     'pending', 'applying', 'applied', 'rejected', 'ambiguous', 'cancelled'
   )),

@@ -29,7 +29,7 @@ async function fixture() {
   });
   const claim = store.claimNext({
     resourceManagers: ["demo"],
-    ownerId: "test-worker",
+    ownerId: "test-runner",
     leaseMs: 60_000,
   });
   if (claim === undefined) throw new Error("resource manager claim missing");
@@ -243,7 +243,7 @@ describe("ResourceManagerEffectService", () => {
 });
 
 describe("ResourceManagerWorkflowCoordinator", () => {
-  it("rejects control methods that the host does not provide", async () => {
+  it("rejects control methods that the workflow server does not provide", async () => {
     const { store, resource, claim } = await fixture();
     const workflows = new ResourceManagerWorkflowCoordinator(store, {
       ensure: async (request) => ({ state: "running", runId: request.runId }),
@@ -420,7 +420,7 @@ describe("ResourceManagerWorkflowCoordinator", () => {
       ensure: async (request) => {
         reservedRunId = request.runId;
         expect(store.getWorkflowByRequestId(request.requestId)?.runId).toBe(request.runId);
-        throw new Error("host stopped after startup");
+        throw new Error("server stopped after startup");
       },
     });
     const childRequest = { requestKey: "repair:a", workflow: "repair", input: {} };
@@ -428,7 +428,7 @@ describe("ResourceManagerWorkflowCoordinator", () => {
       firstCoordinator
         .forResource(resource, claim, new AbortController().signal)
         .ensure(childRequest),
-    ).rejects.toThrow(/host stopped/);
+    ).rejects.toThrow(/server stopped/);
     expect(reservedRunId).toEqual(expect.any(String));
 
     const secondCoordinator = new ResourceManagerWorkflowCoordinator(store, {
@@ -493,7 +493,7 @@ describe("ResourceManagerWorkflowCoordinator", () => {
     expect(() => coordinator.complete("missing", { state: "succeeded" })).toThrow(/not found/);
   });
 
-  it("leaves requests pending when the host has no scheduler", async () => {
+  it("leaves requests pending when the workflow server has no scheduler", async () => {
     const { store, resource, claim } = await fixture();
     const record = await new ResourceManagerWorkflowCoordinator(store)
       .forResource(resource, claim, new AbortController().signal)
