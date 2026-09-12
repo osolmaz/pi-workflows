@@ -447,3 +447,91 @@ The change is complete when all of these statements are true:
 - The client protocol has one version-1 path with no compatibility code.
 - Pi core and Pi session schemas do not change.
 - All required checks, end-to-end tests, the live low-cost model test, and CI pass.
+
+## Implementation record
+
+Status: implemented on 2026-09-12, before merge.
+
+Commits:
+
+- `feat(state): send only current workflow state to Pi`
+- `fix(server): keep the next actionable message current`
+- `fix(client): bound reconnect and isolate one failed view`
+- `refactor(client): remove the unused run_patch event`
+- `refactor(state): rename components to workflow server, runner, and resource manager`
+- the documentation, test, and naming sweep commit that carries this record.
+
+### Departures from this plan
+
+1. **The widget keeps its own adapter instead of a rewritten data path.** `buildWidgetView(state,
+snapshot, ...)` keeps its signature. A new `src/extension/session-run-adapter.ts` rebuilds the
+   minimal run state, snapshot, and update records that the widget needs from the compact session
+   run. Reason: the widget has about a thousand lines of behavior tests. The adapter keeps those
+   tests meaningful, keeps the server-owned facts intact, and avoids a rewrite that the acceptance
+   criteria do not require.
+
+2. **The branch report names one message or no message.** `WorkflowBranchReport.workflowMessageId`
+   is `string | null`. A session that holds no workflow message yet must still clear the pending
+   branch report. Without a nullable value the coordinator can never report, and workflow commands
+   stay blocked. The server receipt reports `present` or `absent`. This replaces the removed
+   `workflowMessageIds` array.
+
+3. **One open turn per target session is a schema rule.** This plan already required a single open
+   turn. The implementation adds `workflow_turns_open_session_idx` beside
+   `workflow_turns_open_message_idx`, and `startTurn` rejects a second open turn for the same
+   session with the integrity error `Workflow session <id> already has open turn <turnId>`.
+
+4. **A failed subscription projection drops only that subscription.** `publishConnection` isolates
+   each subscriber. A failing projection emits `unavailable` with reason code `projection_failed`,
+   removes only that subscription, and logs `client view error for subscription <id>`. The client
+   re-arms with capped backoff: 1 s doubling to 30 s.
+
+5. **`apply_patch` and `PatchOp` stay in the Rust protocol module.** The `run_patch` event is gone
+   from the client schema and from both implementations. The RFC 6902 helpers remain as tested
+   public protocol utilities, because the Rust protocol test suite uses them directly.
+
+6. **Component naming was cut over in the same change.** See the next section. The plan did not name
+   this work, and it added one commit. It does not change the acceptance criteria.
+
+### Component naming cutover
+
+The public vocabulary is now workflow server, workflow runner, resource manager, resource runner,
+and managed resource. The cutover changed names in place. It adds no alias, no second storage path,
+and no compatibility reader.
+
+- SQLite: `workflow_server_state`, `server_id`, `server_commands`, `server_epoch`, `run_runners`,
+  `runner_epoch`, `runner_messages`, `managed_resources`, `managed_resource_finalizers`,
+  `managed_resource_queue`, `managed_resource_workflows`, `resource_manager_name`, and the matching
+  indexes.
+- Stored values: resource type `managed_resource`; owner and actor `server` and `resource_manager`.
+- Protocol schemas: `runner-launch.v1`, `runner-message.v1`, `runner-response.v1`,
+  `runner-content-reference.v1`, `runner-content-chunk.v1`, `resource-runner-launch.v1`,
+  `resource-runner-message.v1`, `resource-runner-response.v1`, `server-lock.v1`.
+- Paths and options: state directory `server`, `server.sock`, `server.lock.json`,
+  `server.children.json`, `maxRunners`, `executionRunners`, `PI_WORKFLOWS_MAX_RUNNERS`.
+- Server identifiers use the `server-` prefix; managed resources use `managed-resource-`.
+
+Dated plan records under `docs/plans/` and `docs/2026-*.md` keep their original wording, because they
+are historical records of the state at their date.
+
+The stored database changes shape. This repository is in alpha, so the server reports the existing
+reset instruction when it opens an older database. No migration is added.
+
+### Acceptance evidence
+
+| Criterion                                                | Evidence                                                                                                                                                                                                                                      |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi receives only current workflow state                  | `src/client/view.ts` `WorkflowSessionView` carries one `workflowMessage`, one `interaction`, one `openWorkflowTurn`, and the compact run. `test/server-view.test.ts` "keeps the session snapshot bounded while stored message history grows". |
+| At most one message and one open turn in the snapshot    | The `WorkflowSessionView` type has single fields, not arrays. `workflow_turns_open_session_idx` rejects a second open turn.                                                                                                                   |
+| No complete run view or message history                  | `ServerViewStore.session()` reads `currentWorkflowMessage`, `currentInteraction`, and `sessionRun` with `graphCursor: 0`.                                                                                                                     |
+| Snapshot stays bounded as history grows                  | The new test stores 25 messages of about 300 KiB each (more than 4 MiB) and asserts the encoded `session_snapshot` frame stays below 256 KiB.                                                                                                 |
+| Large current message through verified bounded chunks    | `WorkflowMessageCoordinator.prepareContent` hydrates content by reference and verifies `contentDigest` before delivery; a mismatch throws `Workflow message <id> content failed its digest check`.                                            |
+| Old messages and complete run details remain available   | The new test reads bounded `readRunView` pages for the same run. `piw` history and message pages are unchanged.                                                                                                                               |
+| Reconnect and branch recovery inspect one message        | `reportBranch` carries one nullable message id; `hasUnconfirmedBranchEntry` tracks one message.                                                                                                                                               |
+| A sent message is adopted, not sent twice                | `test/extension.test.ts` delivery, reminder, and recovery cases; `test/workflow-message-coordinator.test.ts` 21 cases.                                                                                                                        |
+| Delivery, reminder, terminal, and follow-up behavior     | The same extension and coordinator tests, with `deliveryCancelled` on the one current message.                                                                                                                                                |
+| Oversized frame cannot close the connection or loop fast | `publishConnection` isolates one subscription; the client re-arms with capped backoff (`RECONNECT_MAX_ATTEMPTS`, 250 ms to 10 s) and reports `reconnect_exhausted`.                                                                           |
+| A stale snapshot renders but cannot authorize            | The extension keeps the last view, adds the `stale` marker, and refuses commands and branch reports for a stale session id.                                                                                                                   |
+| Bounded widget scrolling                                 | The widget adapter rebuilds only current rows; `test/extension.test.ts` widget cases cover focus, scroll, and follow-up pages.                                                                                                                |
+| One version-1 path, no compatibility code                | `run_patch` is removed from the client schema, the TypeScript client, and the Rust client. No alias or second message path exists.                                                                                                            |
+| Pi core and Pi session schemas unchanged                 | No file outside this repository changed. The extension sends workflow messages through the existing Pi session API.                                                                                                                           |

@@ -129,17 +129,17 @@ An interactive run holds its origin-session reservation while queued, running, w
 
 The run and queue projections follow these states:
 
-| Run state   | Queue state | Claim | Runner   | Meaning                                                 |
-| ----------- | ----------- | ----- | -------- | ------------------------------------------------------- |
-| `queued`    | `queued`    | none  | none     | Ready for server scheduling.                            |
+| Run state   | Queue state | Claim  | Runner   | Meaning                                                 |
+| ----------- | ----------- | ------ | -------- | ------------------------------------------------------- |
+| `queued`    | `queued`    | none   | none     | Ready for server scheduling.                            |
 | `running`   | `starting`  | server | starting | A runner launch is being recorded.                      |
 | `running`   | `running`   | server | live     | A runner is executing one node.                         |
-| `running`   | `parked`    | none  | none     | Execution stopped at a durable boundary and can resume. |
-| `waiting`   | `parked`    | none  | none     | A checkpoint or interactive request needs input.        |
-| `completed` | `done`      | none  | none     | The run finished successfully.                          |
-| `failed`    | `failed`    | none  | none     | The run failed with a durable error.                    |
-| `timed_out` | `failed`    | none  | none     | The run exceeded a declared timeout.                    |
-| `cancelled` | `cancelled` | none  | none     | Cancellation completed.                                 |
+| `running`   | `parked`    | none   | none     | Execution stopped at a durable boundary and can resume. |
+| `waiting`   | `parked`    | none   | none     | A checkpoint or interactive request needs input.        |
+| `completed` | `done`      | none   | none     | The run finished successfully.                          |
+| `failed`    | `failed`    | none   | none     | The run failed with a durable error.                    |
+| `timed_out` | `failed`    | none   | none     | The run exceeded a declared timeout.                    |
+| `cancelled` | `cancelled` | none   | none     | Cancellation completed.                                 |
 
 The `server` claim-owner value and the `pi-workflows.runner-launch.v1` launch schema are the current version-1 identifiers.
 

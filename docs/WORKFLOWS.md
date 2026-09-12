@@ -289,7 +289,7 @@ adopt its turn.
 
 A fresh restart targets `runId` plus `expectedRevision`. It starts from the original
 input in a new run and does not copy old steps, changed settings, decisions, or
-effects. The host rejects a stale revision or unsettled external effects before
+effects. The workflow server rejects a stale revision or unsettled external effects before
 reserving work. An identical retry adopts the same child run.
 
 An owned terminal turn can start or restart work within existing user permission.
@@ -419,7 +419,7 @@ a manual effect becomes ambiguous. This is not an exactly-once claim.
 
 ### checkpoint
 
-Creates a durable input request and parks the worker. The run is waiting, not
+Creates a durable input request and parks the run. The run is waiting, not
 terminal. Its input, settings, history, and active attempt stay unchanged.
 The optional callback creates the request content once. It does not complete
 the node.
@@ -823,9 +823,9 @@ and resume later by running that wait again from the beginning.
 A monitor uses the session's single active workflow slot. It does not provide
 cron syntax, calendar scheduling, OS notifications, or a background service.
 
-## Worker capacity
+## Runner capacity
 
-Workflow runs and resource-manager reconciles share one host scheduler. Start, restart, resume, result validation, and timeout recovery all wait for the same worker capacity. The default is four execution runners; set `PI_WORKFLOWS_MAX_RUNNERS` before starting the host to change it. Waiting and paused requests keep their durable identity without occupying a worker. A submitted candidate stays durable until a worker can validate it. Cancellation does not wait for capacity.
+Workflow runs and resource-manager reconciles share one workflow server scheduler. Start, restart, resume, result validation, and timeout recovery all wait for the same runner capacity. The default is four execution runners; set `PI_WORKFLOWS_MAX_RUNNERS` before starting the workflow server to change it. Waiting and paused requests keep their durable identity without occupying a runner. A submitted candidate stays durable until a runner can validate it. Cancellation does not wait for capacity.
 
 One unfinished interactive run reserves its origin Pi session, including while waiting or paused. Independent headless work does not reserve that session.
 
@@ -885,17 +885,17 @@ work. A terminal run creates its own terminal workflow message through the share
 
 ## Runtime behavior
 
-Runs execute one node at a time. Workers propose narrow transitions; the host
+Runs execute one node at a time. Runners propose narrow transitions; the workflow server
 validates and commits them before execution moves on. A start must follow the
 accepted graph route. A completed run must return its accepted final node output.
-Workers cannot skip a checkpoint, rewrite an active attempt's start, or replace
+Runners cannot skip a checkpoint, rewrite an active attempt's start, or replace
 the full saved run state. Defaults worth knowing:
 
 - Node timeout is 15 minutes unless the node sets `timeoutMs` to a positive
   number or context callback. A timed-out node has outcome `timed_out` and can
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
   turn, and late output for that attempt is rejected. Interactive runs save the
-  resolved budget before they park. The host records active intervals with a
+  resolved budget before they park. The workflow server records active intervals with a
   monotonic clock. Message delivery, waiting, pauses, disconnects, wall-clock
   changes, and server downtime do not consume the limit. Recovery keeps the last
   saved elapsed-time sample without rewriting the attempt's start timestamp.
