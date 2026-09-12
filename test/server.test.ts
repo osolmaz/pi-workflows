@@ -2904,6 +2904,38 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       expect(messages[1]?.content.content).toContain('"finalOutput":{"delivered":true}');
       expect(messages[1]?.content).toMatchObject({ display: true, triggerTurn: true });
 
+      // The detailed viewer reads the complete message history through the
+      // `workflow_messages` run page and the updates page stays its own kind.
+      const messagePage = await client.request({
+        operation: "view.page",
+        runId: "delivery-run",
+        payload: { kind: "workflow_messages", cursor: 0 },
+      });
+      expect(messagePage.receipt).toMatchObject({
+        schema: "pi-workflows.run-page.v1",
+        runId: "delivery-run",
+        kind: "workflow_messages",
+        cursor: 0,
+        start: 0,
+        total: messages.length,
+      });
+      expect(
+        (messagePage.receipt as { items?: Array<{ workflowMessageId?: string }> }).items?.map(
+          (item) => item.workflowMessageId,
+        ),
+      ).toEqual(messages.map((message) => message.workflowMessageId));
+      const updatePage = await client.request({
+        operation: "view.page",
+        runId: "delivery-run",
+        payload: { kind: "updates", cursor: 0 },
+      });
+      expect(updatePage.receipt).toMatchObject({ kind: "updates" });
+      expect(
+        (updatePage.receipt as { items?: Array<{ workflowMessageId?: string }> }).items?.every(
+          (item) => item.workflowMessageId === undefined,
+        ),
+      ).toBe(true);
+
       const subscribed = await client.request({
         operation: "view.session.watch",
         payload: {

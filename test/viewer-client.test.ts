@@ -120,6 +120,78 @@ describe("workflow client renderer", () => {
     expect(hydrateContent).toHaveBeenCalledOnce();
   });
 
+  it("assembles the complete workflow message page through the protocol", async () => {
+    const request = vi.fn(
+      async (options: {
+        payload?: { kind?: string; cursor?: number };
+        expectedRevision?: number;
+      }) => {
+        const cursor = options.payload?.cursor ?? 0;
+        return {
+          outcome: "accepted" as const,
+          receipt: {
+            schema: "pi-workflows.run-page.v1",
+            runId: "run-messages",
+            revision: 3,
+            kind: options.payload?.kind,
+            cursor,
+            start: cursor,
+            total: 2,
+            items: [{ workflowMessageId: `message-${cursor + 1}`, order: cursor + 1 }],
+          },
+        };
+      },
+    );
+    const client = {
+      request,
+      hydrateContent: vi.fn(async (_runId: string, value: JsonValue) => value),
+    } as unknown as WorkflowClient;
+
+    const view = (await materializeRunView(client, {
+      schema: "pi-workflows.run-view.v1",
+      runId: "run-messages",
+      revision: 3,
+      state: { steps: [] },
+      stepStart: 0,
+      stepTotal: 0,
+      graphCursor: 0,
+      graphSteps: [],
+      takenTransitions: [],
+      graphHistory: { steps: [], transitions: [] },
+      workflow: { schema: "pi-workflows.definition-snapshot.v1", nodes: {}, edges: [] },
+      tracePage: { start: 0, total: 0, items: [] },
+      session: {
+        entryPage: { start: 0, total: 0, items: [] },
+        eventPage: { start: 0, total: 0, items: [] },
+      },
+      settingsScopes: [],
+      settingsStart: 0,
+      settingsTotal: 0,
+      followUpQueue: { items: [] },
+      followUpStart: 0,
+      followUpTotal: 0,
+      updates: [],
+      updateStart: 0,
+      updateTotal: 0,
+      workflowMessages: [{ workflowMessageId: "message-1", order: 1 }],
+      workflowMessageStart: 0,
+      workflowMessageTotal: 2,
+    })) as Record<string, JsonValue>;
+
+    expect(request).toHaveBeenCalledWith({
+      operation: "view.page",
+      runId: "run-messages",
+      expectedRevision: 3,
+      payload: { kind: "workflow_messages", cursor: 1 },
+    });
+    expect(view.workflowMessages).toEqual([
+      { workflowMessageId: "message-1", order: 1 },
+      { workflowMessageId: "message-2", order: 2 },
+    ]);
+    expect(view.workflowMessageStart).toBe(0);
+    expect(view.workflowMessageTotal).toBe(2);
+  });
+
   it("rejects a page from another run revision", async () => {
     const client = {
       request: vi.fn(async () => ({
