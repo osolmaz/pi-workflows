@@ -1787,6 +1787,79 @@ export default defineResourceManager({
     }
   }, 60_000);
 
+  it("starts a new session without the previous projection backoff", async () => {
+    const { cwd } = await setupProject();
+    if (testHome === undefined) throw new Error("the test home directory is not configured");
+    const socketPath = clientSocketPath(workflowStatePath(testHome));
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const watches: Array<{ subscriptionId: string; sessionId: string }> = [];
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const server = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: "projection-backoff",
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true, coordinatorEpoch: "projection-epoch" },
+            }),
+          );
+          if (message.operation !== "view.session.watch") continue;
+          const payload = message.payload as { subscriptionId: string; sessionId: string };
+          watches.push(payload);
+          // Every published projection fails, so the retry deadline grows.
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "event",
+              subscriptionId: payload.subscriptionId,
+              event: "unavailable",
+              payload: {
+                schema: "pi-workflows.subscription-failure.v1",
+                reasonCode: "projection_failed",
+                message: "session view exceeds one frame",
+              },
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const fake = makePi({ cwd });
+    try {
+      await fake.emit("session_start");
+      // Three failures grow the retry deadline to several seconds.
+      await waitUntil(() => watches.length >= 3, 30_000);
+      await fake.emit("session_shutdown");
+      const started = Date.now();
+      await fake.emit("session_start");
+      await waitUntil(() => watches.length >= 4, 10_000);
+      // The next session starts with a fresh retry budget instead of waiting for
+      // the deadline the closed session left behind.
+      expect(Date.now() - started).toBeLessThan(1_500);
+      await fake.emit("session_shutdown");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
   it("stays quiet for a usable shortcuts file", async () => {
     const { cwd } = await setupProject();
     await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
