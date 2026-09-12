@@ -5214,12 +5214,24 @@ function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind, cursor: n
       items: Array.isArray(queue.items) ? queue.items : [],
     };
   }
-  return {
-    ...base,
-    start: view.updateStart,
-    total: view.updateTotal,
-    items: view.updates,
-  };
+  if (kind === "workflow_messages") {
+    return {
+      ...base,
+      start: view.workflowMessageStart,
+      total: view.workflowMessageTotal,
+      items: view.workflowMessages,
+    };
+  }
+  if (kind === "updates") {
+    return {
+      ...base,
+      start: view.updateStart,
+      total: view.updateTotal,
+      items: view.updates,
+    };
+  }
+  // A new page kind must add its receipt above instead of returning update rows.
+  throw new Error(`view.page kind ${kind} has no receipt`);
 }
 
 function clientResponse(
