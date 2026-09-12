@@ -1741,18 +1741,20 @@ export default defineResourceManager({
     await fake.runCommand(workflowPath);
     const rendered = (): string =>
       fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
-    await waitUntil(() => rendered().includes("ctrl+alt+↑/↓ scroll"), 30_000);
+    // Wait for the step that is pending delivery. Its node is the one the widget
+    // shows as working, so the window starts at the top and both keys can move.
+    await waitUntil(() => rendered().includes("waiting on step: ask"), 30_000);
 
     const before = rendered();
-    fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
-    const scrolledUp = rendered();
-    expect(scrolledUp).not.toBe(before);
-    expect(scrolledUp).toContain("ƒ n0");
-
     fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+    const scrolledDown = rendered();
+    expect(scrolledDown).not.toBe(before);
+    expect(scrolledDown).toContain("ƒ n3");
+
+    fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
     const scrolledBack = rendered();
-    expect(scrolledBack).not.toBe(scrolledUp);
-    expect(scrolledBack).toContain("ƒ n3");
+    expect(scrolledBack).not.toBe(scrolledDown);
+    expect(scrolledBack).toContain("ƒ n0");
     await fake.emit("session_shutdown");
   }, 60_000);
 });
