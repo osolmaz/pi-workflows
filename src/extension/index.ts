@@ -644,10 +644,15 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     const sessionClient = client;
-    sessionView.setNodePager((cursor) => {
-      if (generation !== sessionGeneration || staleSessionIds.has(sessionId)) return;
+    sessionView.setNodePager(async (cursor) => {
+      if (generation !== sessionGeneration || staleSessionIds.has(sessionId)) {
+        // A stale view has no authority, so the window stays where it is and the
+        // request stays retryable.
+        throw new Error("Workflow session view is stale");
+      }
+      const moved = await sessionClient.setSessionNodeWindow(sessionId, cursor);
+      if (!moved) throw new Error("Workflow session subscription is not active");
       sessionPagedWindow = true;
-      void sessionClient.setSessionNodeWindow(sessionId, cursor).catch(() => undefined);
     });
 
     const connectSession = (): void => {
@@ -663,11 +668,16 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       const task = (async () => {
         try {
           await sessionClient.ensureAvailable();
+          // The server publishes the first snapshot while this call is still in
+          // flight, so a failed subscription can arrive before it returns. Keep
+          // that fact, because a later unsubscribe callback is then worthless.
+          let subscriptionDropped = false;
           const unsubscribe = await sessionClient.watchSession(
             sessionId,
             (event) => {
               if (generation !== sessionGeneration || sessionContext !== ctx) return;
               if (event.event === "unavailable") {
+                subscriptionDropped = true;
                 staleSessionIds.add(sessionId);
                 const failure = subscriptionFailure(event.payload);
                 sessionView.markStale(failure.message, ctx);
@@ -719,8 +729,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
             },
             { coordinator: true },
           );
-          if (generation !== sessionGeneration || sessionContext !== ctx) {
-            await unsubscribe();
+          if (generation !== sessionGeneration || sessionContext !== ctx || subscriptionDropped) {
+            await unsubscribe().catch(() => undefined);
             return;
           }
           sessionUnsubscribe = unsubscribe;

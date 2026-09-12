@@ -2020,6 +2020,18 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
         targetSessionId: sessionId,
         coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
       };
+      // A report of a message this session never had is refused, so a stale or
+      // wrong-session report cannot authorize idle recovery.
+      await expect(
+        reportBranch(client, authority, {
+          workflowMessageId: "unknown-workflow-message",
+          piSessionEntryId: "unknown-entry",
+          isIdle: true,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "rejected",
+        error: expect.stringContaining("unknown workflow message"),
+      });
       // Pi confirms the step message it holds.
       expect(
         await reportBranch(client, authority, {
