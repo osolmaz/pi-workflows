@@ -7,8 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import { WorkflowClient } from "../src/client/client.js";
 import {
-  MAX_SOCKET_PATH_BYTES,
   encodeProtocolLine,
+  maxSocketPathBytes,
   parseClientMessage,
   type ClientRequest,
   type ClientResponse,
@@ -640,7 +640,7 @@ describe("global workflow server", () => {
   });
 
   it("reports a socket path above the operating system limit before it listens", async () => {
-    const databasePath = path.join("/tmp", "p".repeat(MAX_SOCKET_PATH_BYTES), "state.sqlite");
+    const databasePath = path.join("/tmp", "p".repeat(maxSocketPathBytes("linux")), "state.sqlite");
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await expect(server.start()).rejects.toThrow(/operating system limit/);
   });

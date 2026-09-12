@@ -579,7 +579,13 @@ export class ServerViewStore {
           nodeId === state.currentNode && typeof state.statusDetail === "string"
             ? state.statusDetail
             : null,
-        startedAt: nodeId === state.currentNode ? (facts?.startedAt ?? null) : null,
+        // The widget shows the current node, or the waiting node while the run
+        // is running, as the node it is working on. Both need their start time
+        // so the elapsed segment stays visible.
+        startedAt:
+          nodeId === state.currentNode || nodeId === state.waitingOn
+            ? (facts?.startedAt ?? null)
+            : null,
         durationMs: facts?.durationMs ?? null,
         error: detail ? this.readAttemptError(facts?.errorHash ?? null) : null,
         humanDecision: sessionHumanDecision(node, state, nodeId),
