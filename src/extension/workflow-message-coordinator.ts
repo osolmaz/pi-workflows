@@ -153,6 +153,9 @@ export class WorkflowMessageCoordinator {
   }
 
   toolCallBlockReason(toolName: string, input: unknown): string | undefined {
+    // A lost subscription removes the authority the turn's allowlist came from,
+    // so no tool may run from it until a fresh snapshot confirms the turn again.
+    if (this.fenced) return "The workflow server connection is unavailable; no tools may run.";
     const turn = this.turn;
     if (turn === null || turn.phase !== "running") return undefined;
     if (turn.stopRequested) return "The workflow-owned turn was cancelled; no more tools may run.";

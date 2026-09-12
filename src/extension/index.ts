@@ -640,6 +640,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
     serverUnavailableNotified = false;
+    // A new session starts with a fresh projection retry budget, so backoff from
+    // a previous session cannot delay this one.
+    sessionSubscriptionFailures = 0;
+    sessionSubscriptionRetryAt = 0;
     for (const notice of pendingShortcutNotices.splice(0)) ctx.ui.notify(notice, "warning");
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
@@ -854,6 +858,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     sessionUnsubscribe = null;
     sessionConnectionId = null;
     sessionConnectTask = null;
+    sessionSubscriptionFailures = 0;
+    sessionSubscriptionRetryAt = 0;
     serverUnavailableNotified = false;
     await client.close();
     client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });

@@ -645,6 +645,48 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(2);
   });
 
+  it("blocks every tool while a lost subscription leaves the turn unconfirmed", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    message.content.details = {
+      workflowMessageId: message.workflowMessageId,
+      contract: { requestId: "exact-request", allowedTools: ["read"] },
+    };
+    message.contentDigest = contentDigestOf(message.content);
+    coordinator.updateView(view(message));
+    const branch: unknown[] = [];
+    let idle = true;
+    const ctx = {
+      isIdle: () => idle,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+    });
+    await coordinator.synchronize(
+      { sendMessage } as never,
+      clientDouble(
+        vi.fn(async (options: Record<string, unknown>) => acceptedServerRequest(options)),
+      ),
+      ctx,
+    );
+    // The confirmed turn permits its allowlisted tool and blocks the rest.
+    expect(coordinator.toolCallBlockReason("read", {})).toBeUndefined();
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("not allowed");
+    // A lost subscription removes the authority the allowlist came from, so the
+    // running turn may not act until a fresh snapshot confirms it again.
+    coordinator.fence();
+    expect(coordinator.toolCallBlockReason("read", {})).toContain("unavailable");
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("unavailable");
+    coordinator.updateView(view(message));
+    expect(coordinator.toolCallBlockReason("read", {})).toBeUndefined();
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("not allowed");
+  });
+
   it("enforces the owned turn allowlist before acknowledgment without restricting ordinary chat", async () => {
     const coordinator = new WorkflowMessageCoordinator();
     const message = followUpMessage();
