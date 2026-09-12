@@ -1088,6 +1088,23 @@ describe("built-in autoimplement", () => {
     ).toBe(false);
   });
 
+  it("tells the decision node that the model owns the route and forbids waiting", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
+    const prompt = await decide.prompt({
+      input: { task: "Ship the fix", repository: "/repo", scope: "Only /repo" },
+      outputs: { observe: { decisionNumber: 1, availableRoutes: ["implementation"] } },
+      results: {},
+      state: { steps: [] } as never,
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    });
+    expect(prompt).toContain("You are the decider for this turn");
+    expect(prompt).toContain("The workflow cannot choose a route without the one you submit");
+    expect(prompt).toContain("do not edit files and do not perform a mutation");
+    expect(decide.statusDetail).toBe("choose one route and submit it now");
+  });
+
   it("uses one controller for all branch choices and returns", async () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     const edge = (from: string) => compiled.edges.find((candidate) => candidate.from === from);

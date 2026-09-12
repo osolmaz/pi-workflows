@@ -1595,13 +1595,13 @@ export const autoimplementWorkflow = defineWorkflow({
     }),
     decide: agent({
       timeoutMs: 30 * 60_000,
-      statusDetail: "deciding the next autoimplementation action",
+      statusDetail: "choose one route and submit it now",
       prompt: (context) => {
         const request = context.input as AutoimplementInput;
         const observation = context.outputs.observe as AutoimplementObservation;
         return [
           "Decide the next Autoimplement branch from current evidence.",
-          "This is a read-only controller turn. Inspect local and remote state when needed, but do not edit files or perform a mutation.",
+          "You are the decider for this turn. The workflow cannot choose a route without the one you submit. Inspect local and remote state when you need it, but do not edit files and do not perform a mutation.",
           "Choose exactly one available route. A branch performs one bounded unit of work, then control returns here.",
           "Do not assume that a failed or timed-out mutation did or did not finish. Inspect durable state before you retry it or move forward.",
           "Do not skip plan, workspace, documentation, verification, publication, review, comment, CI, authority, or delivery checks.",

@@ -123,7 +123,7 @@ describe("host workflow display reducer", () => {
 
   it("distinguishes unconfirmed delivery, active work, required results, and pause", () => {
     expect(display({ requestDeliveryConfirmed: false }).reason).toBe(
-      "Workflow step delivery is not confirmed.",
+      "A step is pending delivery. It starts a new model turn after this turn ends.",
     );
     expect(display({ originTurnActive: true }).reason).toBe(
       "The agent is working on the workflow step.",

@@ -195,6 +195,9 @@ describe("WorkflowEngine", () => {
     expect(prompt).toContain("Base prompt");
     expect(prompt).toContain("Workflow step contract");
     expect(prompt).toContain(
+      "This step is your work now. Nothing else will start it, so do not sleep or poll for another step.",
+    );
+    expect(prompt).toContain(
       `{"action": "submit", "requestId": "${requestId}", "output": <your result>}`,
     );
     expect(prompt).toContain(`Expected output: { "x": 1 }`);

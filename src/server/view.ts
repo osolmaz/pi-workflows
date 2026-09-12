@@ -992,7 +992,8 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
               ? "The workflow needs its assigned visible response."
               : "The workflow is waiting.";
     if (facts.pendingRequestKind === "agent" || facts.pendingRequestKind === "assistant") {
-      if (!facts.requestDeliveryConfirmed) reason = "Workflow step delivery is not confirmed.";
+      if (!facts.requestDeliveryConfirmed)
+        reason = "A step is pending delivery. It starts a new model turn after this turn ends.";
     }
   } else if (facts.queueStatus === "parked" || facts.queueStatus === "queued") {
     status = "queued";
