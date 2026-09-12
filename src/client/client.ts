@@ -668,9 +668,11 @@ export class WorkflowClient {
           throw new Error("Workflow server hello timed out");
         }),
       ]);
-      // A successful hello starts a fresh reconnect budget.
-      this.reconnectAttempts = 0;
+      // A successful hello starts a fresh reconnect budget only together with a
+      // restored subscription set. A subscription the server keeps refusing must
+      // not reset the budget, or the client would reconnect forever.
       await this.restoreSubscriptions();
+      this.reconnectAttempts = 0;
       return hello;
     } catch (error) {
       socket.destroy();

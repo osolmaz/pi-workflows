@@ -679,6 +679,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               if (event.event === "unavailable") {
                 subscriptionDropped = true;
                 staleSessionIds.add(sessionId);
+                // A snapshot the server no longer confirms must not start a Pi
+                // turn or answer a request. A fresh snapshot clears the fence.
+                workflowMessages.fence();
                 const failure = subscriptionFailure(event.payload);
                 sessionView.markStale(failure.message, ctx);
                 if (failure.reasonCode === "projection_failed") {

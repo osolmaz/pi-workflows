@@ -170,6 +170,40 @@ describe("WorkflowMessageCoordinator", () => {
     },
   );
 
+  it("sends nothing from a snapshot whose subscription failed", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    const branch: Record<string, unknown>[] = [];
+    let idle = true;
+    const ctx = {
+      isIdle: () => idle,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "step-entry", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+    });
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
+    coordinator.updateView(view(message));
+    // A subscription failure keeps the snapshot for display only, so nothing may
+    // start a turn or report an epoch the server no longer confirms.
+    coordinator.fence();
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+    // A fresh snapshot restores the coordinator epoch and delivers the message.
+    coordinator.updateView(view(message));
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
+  });
+
   it("does not resend an unconfirmed delivery while ordinary events arrive", async () => {
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(followUpMessage()));
