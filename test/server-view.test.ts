@@ -28,6 +28,9 @@ import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 import { claimTestRun } from "./queue-helpers.js";
 
+/** Free-form session text one compact projection carries, in bytes. */
+const SESSION_TEXT_LIMIT = 4 * 1024;
+
 const base: WorkflowDisplayFacts = {
   queueStatus: "parked",
   durableStatus: "waiting",
@@ -1280,6 +1283,99 @@ describe("current session state", () => {
       completed: updateCount - 1,
       total: updateCount,
     });
+    state.close();
+  }, 60_000);
+
+  it("bounds every free-form session field so one frame still fits", async () => {
+    const projectPath = await makeTempDir("bounded-fields-project");
+    const databasePath = path.join(await makeTempDir("bounded-fields-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // Values far larger than one client frame, from the workflow name and run
+    // title, a node output, and the failure the run reports.
+    const longText = "x".repeat(64 * 1024);
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: `bounded${longText}`,
+        title: longText,
+        startAt: "estimate",
+        nodes: {
+          estimate: compute({
+            run: () => ({ schema: "pi-workflows.test-output.v1", value: longText }),
+          }),
+          fail: compute({
+            run: () => {
+              throw new Error(longText);
+            },
+          }),
+        },
+        edges: [{ from: "estimate", to: "fail" }],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-bounded-fields";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:bounded-fields",
+      workflowSource: {
+        root: { kind: "builtin", id: "bounded-fields", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "bounded-fields",
+      claimToken: "claim-bounded-fields",
+      leaseMs: 60_000,
+      originSessionId: "session-bounded-fields",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-bounded-fields"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session("session-bounded-fields", null);
+    const run = view.run;
+    if (run === null) throw new Error("session run missing");
+    const complete = runs.readRunState(runId);
+    if (complete === null) throw new Error("run state missing");
+    // Every free-form field is bounded, and each bound keeps the beginning of
+    // the complete value the detailed view still carries.
+    expect(run.workflowName).toHaveLength(SESSION_TEXT_LIMIT);
+    expect(run.workflowName).toBe(workflow.name.slice(0, SESSION_TEXT_LIMIT));
+    expect(run.runTitle).toBe(longText.slice(0, SESSION_TEXT_LIMIT));
+    expect(run.error).not.toBeNull();
+    expect(run.error?.length).toBeLessThanOrEqual(SESSION_TEXT_LIMIT);
+    expect(complete.error?.startsWith(run.error ?? "")).toBe(true);
+    // A detail too large for the compact view is absent, never a cut value.
+    expect(run.monitorEstimate).toBeNull();
+    expect(complete.outputs.estimate).toMatchObject({ value: longText });
+    // The whole projection still travels in one client frame with room to spare.
+    const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
+    expect(encoded).toBeGreaterThan(0);
+    expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
     state.close();
   }, 60_000);
 

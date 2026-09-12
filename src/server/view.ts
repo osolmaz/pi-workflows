@@ -81,12 +81,20 @@ const TERMINAL_VIEW_RETENTION_MS = 60_000;
  */
 const SESSION_NODE_LEAD = 4;
 /**
- * Text one session node row may carry. The widget renders one line per node and
- * truncates it to the terminal width, and the 1 MiB client frame budget is the
- * external limit that requires this bound. Complete node text stays available
+ * Text one session field may carry: one node row, the workflow name, the run
+ * title, the run error, or one decision choice label. The widget renders each on
+ * one line it truncates to the terminal width, and the 1 MiB client frame budget
+ * is the external limit that requires this bound. Complete text stays available
  * through the detailed run view and its node history.
  */
-const SESSION_NODE_TEXT_BYTES = 4 * 1024;
+const SESSION_TEXT_BYTES = 4 * 1024;
+/**
+ * JSON one session detail may carry, such as a monitor estimate, one progress
+ * payload, or the choice labels of one decision. A larger value is reported as
+ * null, left out, or cut at a choice boundary so the single session frame stays
+ * bounded; the detailed run view carries the complete value.
+ */
+const SESSION_DETAIL_JSON_BYTES = 8 * 1024;
 
 export class ServerViewStore {
   private readonly contentRecords = new Map<string, ContentRecord>();
@@ -554,17 +562,17 @@ export class ServerViewStore {
       runRevision: this.runs.runRevision(runId),
       queue: projectQueue(queue),
       display,
-      workflowName: state.workflowName,
-      runTitle: state.runTitle ?? null,
+      workflowName: boundSessionText(state.workflowName),
+      runTitle: state.runTitle === undefined ? null : boundSessionText(state.runTitle),
       paused: state.paused === true,
       currentNode: state.currentNode ?? null,
       waitingOn: state.waitingOn ?? null,
-      error: state.error ?? null,
+      error: state.error === undefined ? null : boundSessionText(state.error),
       nodes: window.items,
       nodeStart: window.start,
       nodeTotal: window.total,
       progressUpdates: sessionProgressUpdates(state.updates ?? []),
-      monitorEstimate: toJson(state.outputs.estimate ?? null),
+      monitorEstimate: boundedSessionJson(toJson(state.outputs.estimate ?? null)),
       monitorSchedule: sessionMonitorSchedule(state.updates ?? []),
       live: display.status === "running" || display.status === "waiting",
       possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
@@ -1453,10 +1461,12 @@ function sessionHumanDecision(
   const audience =
     current?.audience ?? (typeof human.audience === "string" ? human.audience : "human");
   const choices = isJsonObject(human.choices)
-    ? Object.entries(human.choices).flatMap(([value, choice]) =>
-        isJsonObject(choice) && typeof choice.label === "string"
-          ? [{ value, label: choice.label }]
-          : [],
+    ? sessionDecisionChoices(
+        Object.entries(human.choices).flatMap(([value, choice]) =>
+          isJsonObject(choice) && typeof choice.label === "string"
+            ? [{ value, label: choice.label }]
+            : [],
+        ),
       )
     : [];
   const choiceValue =
@@ -1470,6 +1480,28 @@ function sessionHumanDecision(
     choiceValue,
     presentationDigest: current?.presentationDigest ?? null,
   };
+}
+
+/**
+ * Decision choices one session node row may carry. The widget joins the labels
+ * into one line it truncates to the terminal width, and the 1 MiB frame budget
+ * requires the bound. The complete decision stays available through the detailed
+ * run view and its decision record.
+ */
+function sessionDecisionChoices(
+  entries: readonly { value: string; label: string }[],
+): { value: string; label: string }[] {
+  const choices: { value: string; label: string }[] = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    const label = boundSessionText(entry.label);
+    const size = Buffer.byteLength(label, "utf8") + Buffer.byteLength(entry.value, "utf8");
+    // Keep at least one choice so the row still names a choice the human sees.
+    if (choices.length > 0 && bytes + size > SESSION_DETAIL_JSON_BYTES) break;
+    bytes += size;
+    choices.push({ value: entry.value, label });
+  }
+  return choices;
 }
 
 function humanDecisionRequest(
@@ -1496,7 +1528,11 @@ function sessionProgressUpdates(
   const progress: WorkflowSessionProgressUpdate[] = [];
   for (const update of updates) {
     if (update.type !== "progress") continue;
-    progress.push({ key: update.key, at: update.at, data: toJson(update.data) });
+    const data = boundedSessionJson(toJson(update.data));
+    // A payload larger than one session detail is left out rather than cut, so
+    // the compact view never carries a value that looks complete but is not.
+    if (data === null) continue;
+    progress.push({ key: update.key, at: update.at, data });
   }
   // Updates arrive in run revision order, so a bounded set keeps the newest keys
   // instead of the oldest ones.
@@ -1519,7 +1555,7 @@ function projectQueue(
 ): WorkflowRunQueueView {
   return {
     runId: run.runId,
-    workflowName: run.workflowName,
+    workflowName: boundSessionText(run.workflowName),
     workflowSourceRef: run.workflowSourceRef,
     initialized: run.initialized,
     definitionDigest: run.definitionDigest,
@@ -1716,9 +1752,20 @@ function clampCursor(cursor: number, total: number): number {
 
 /** Text one session node row may carry, bounded by the client frame budget. */
 function boundNodeText(value: string | null): string | null {
-  if (value === null) return null;
-  if (Buffer.byteLength(value, "utf8") <= SESSION_NODE_TEXT_BYTES) return value;
-  return Buffer.from(value, "utf8").subarray(0, SESSION_NODE_TEXT_BYTES).toString("utf8");
+  return value === null ? null : boundSessionText(value);
+}
+
+/** Free-form session text, bounded for the single frame budget. */
+function boundSessionText(value: string): string {
+  if (Buffer.byteLength(value, "utf8") <= SESSION_TEXT_BYTES) return value;
+  return Buffer.from(value, "utf8").subarray(0, SESSION_TEXT_BYTES).toString("utf8");
+}
+
+/** One JSON detail, or null when the detail is too large for the session frame. */
+function boundedSessionJson(value: JsonValue): JsonValue {
+  return Buffer.byteLength(canonicalJson(value), "utf8") <= SESSION_DETAIL_JSON_BYTES
+    ? value
+    : null;
 }
 
 /**
