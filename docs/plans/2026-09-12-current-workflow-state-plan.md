@@ -572,7 +572,7 @@ up to 1,024 current updates and the oldest keys are the least useful ones for th
 current-updates read already keeps the newest record per type and key, so one busy key cannot hide
 another track; the bound removes the least recent keys only. Complete update history stays on the
 run's update page. `test/server-view.test.ts` "keeps one progress record per key however often one
-key publishes" proves it with five tracks and twenty updates for one key.
+key publishes" proves it with five tracks and twenty updates for one key, and asserts that a second monitor cycle replaces the first `next-check` record instead of adding a stale one.
 
 ### Acceptance evidence
 
