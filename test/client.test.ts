@@ -7,11 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkflowClient, WorkflowClientVersionError } from "../src/client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
-  MAX_SOCKET_PATH_BYTES,
   NdjsonFrameDecoder,
   assertSocketPathSupported,
   clientSocketPath,
   encodeProtocolLine,
+  maxSocketPathBytes,
   parseClientMessage,
   type ClientRequest,
 } from "../src/client/protocol.js";
@@ -21,20 +21,26 @@ import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("WorkflowClient", () => {
   it("reports a socket path above the operating system limit as a blocker", async () => {
-    const longSegment = "p".repeat(MAX_SOCKET_PATH_BYTES);
-    const databasePath = path.join("/tmp", longSegment, "state.sqlite");
+    const linuxLimit = maxSocketPathBytes("linux");
+    const databasePath = path.join("/tmp", "p".repeat(linuxLimit), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);
-    expect(Buffer.byteLength(socketPath, "utf8")).toBeGreaterThan(MAX_SOCKET_PATH_BYTES);
-    expect(() => assertSocketPathSupported(socketPath)).toThrow(/operating system limit/);
+    expect(Buffer.byteLength(socketPath, "utf8")).toBeGreaterThan(linuxLimit);
+    expect(() => assertSocketPathSupported(socketPath, "linux")).toThrow(/operating system limit/);
+    // macOS and the BSDs have a shorter `sun_path`, so one byte less is already
+    // a blocker there, and a Windows named pipe has no such limit.
+    const darwinLimit = maxSocketPathBytes("darwin");
+    expect(darwinLimit).toBeLessThan(linuxLimit);
+    expect(() => assertSocketPathSupported("p".repeat(darwinLimit), "darwin")).not.toThrow();
+    expect(() => assertSocketPathSupported("p".repeat(darwinLimit + 1), "darwin")).toThrow(
+      /operating system limit/,
+    );
+    expect(() => assertSocketPathSupported("p".repeat(400), "win32")).not.toThrow();
     // The client refuses to spawn or connect instead of waiting for a socket
     // the operating system cannot bind.
     const client = new WorkflowClient({ databasePath });
     const start = vi.spyOn(client as unknown as { startDetached: () => void }, "startDetached");
     await expect(client.ensureAvailable()).rejects.toThrow(/operating system limit/);
     expect(start).not.toHaveBeenCalled();
-    expect(() =>
-      assertSocketPathSupported(clientSocketPath(databasePath.slice(0, 10))),
-    ).not.toThrow();
   });
 
   it("keeps the cold-start retry wait referenced", async () => {

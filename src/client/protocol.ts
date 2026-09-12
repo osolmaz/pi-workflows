@@ -203,18 +203,25 @@ export function clientSocketPath(databasePath: string): string {
 }
 
 /**
- * Operating systems limit one local socket path to 107 bytes on Linux, macOS,
- * and the BSDs. Linux binds a longer path in the abstract namespace, where no
- * path-based client can reach it, so a long path is a blocker rather than a
- * slow connection failure.
+ * Operating systems limit one local socket path. Linux allows 107 bytes. macOS
+ * and the BSDs use a 104-byte `sun_path`, so 103 bytes are usable there. Linux
+ * binds a longer path in the abstract namespace, where no path-based client can
+ * reach it, so a long path is a blocker rather than a slow connection failure.
  */
-export const MAX_SOCKET_PATH_BYTES = 107;
+export function maxSocketPathBytes(platform: NodeJS.Platform = process.platform): number {
+  return platform === "linux" ? 107 : 103;
+}
 
-export function assertSocketPathSupported(socketPath: string): void {
+export function assertSocketPathSupported(
+  socketPath: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === "win32") return;
+  const limit = maxSocketPathBytes(platform);
   const bytes = Buffer.byteLength(socketPath, "utf8");
-  if (bytes <= MAX_SOCKET_PATH_BYTES) return;
+  if (bytes <= limit) return;
   throw new Error(
-    `Workflow server socket path is ${bytes} bytes, above the ${MAX_SOCKET_PATH_BYTES}-byte operating system limit: ${socketPath}`,
+    `Workflow server socket path is ${bytes} bytes, above the ${limit}-byte operating system limit: ${socketPath}`,
   );
 }
 

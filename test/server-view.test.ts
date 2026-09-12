@@ -9,6 +9,7 @@ import {
   encodeProtocolLine,
 } from "../src/client/protocol.js";
 import { WORKFLOW_DISPLAY_CONTROLS, type WorkflowDisplay } from "../src/client/view.js";
+import { widgetRunInput } from "../src/extension/session-run-adapter.js";
 import { ServerStateStore } from "../src/server/state.js";
 import {
   ServerViewStore,
@@ -683,6 +684,114 @@ describe("workflow server display reducer", () => {
 });
 
 describe("current session state", () => {
+  it("sends the start time of the node the widget shows as running", async () => {
+    const projectPath = await makeTempDir("pw-session-row-project");
+    const databasePath = path.join(await makeTempDir("pw-session-row-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const originSessionId = "session-node-row";
+    claimTestRun(queue, {
+      runId: "row-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "rows" },
+      runnerId: "pw-session-row",
+      claimToken: "claim-row",
+      leaseMs: 60_000,
+      originSessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("row-run", "claim-row"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "rows" } }),
+    }).run(workflow, { task: "rows" }, { runId: "row-run" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    const startedAt = Date.now() - 30_000;
+    // Park the run for an interaction while the origin Pi turn is open. This is
+    // the normal interactive case: no current node, one waiting attempt. A
+    // parked attempt has no completed step row yet.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("row-run");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("row-run");
+    state.connection
+      .prepare(
+        `UPDATE node_attempts SET status = 'waiting', started_at = ?, finished_at = NULL
+         WHERE run_id = ?`,
+      )
+      .run(startedAt, "row-run");
+    state.connection.prepare("DELETE FROM run_steps WHERE run_id = ?").run("row-run");
+    serverState.createInteractiveRequest({
+      requestId: "row-request",
+      runId: "row-run",
+      attemptId,
+      targetSessionId: originSessionId,
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId: "row-request",
+          runId: "row-run",
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    const message = serverState.workflowMessages.listSession(originSessionId)[0];
+    if (message === undefined) throw new Error("workflow message missing");
+    serverState.workflowMessages.adoptBranch(
+      originSessionId,
+      [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "row-entry" }],
+      new Set([message.workflowMessageId]),
+    );
+    serverState.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "row-turn",
+      runId: "row-run",
+      targetSessionId: originSessionId,
+      now: startedAt,
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => true,
+    );
+    const session = views.session(originSessionId, null);
+    const run = session.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.display.status).toBe("running");
+    expect(run.currentNode).toBeNull();
+    expect(run.waitingOn).toBe("reply");
+    const waiting = run.nodes.find((row) => row.nodeId === "reply");
+    expect(waiting?.state).toBe("waiting");
+    expect(waiting?.startedAt).toBe(new Date(startedAt).toISOString());
+    expect(run.nodes.find((row) => row.nodeId === "missing")?.startedAt).toBeUndefined();
+    // The widget uses this value for the elapsed segment of the shown node.
+    expect(widgetRunInput(run).state.currentNodeStartedAt).toBe(new Date(startedAt).toISOString());
+    state.close();
+  }, 60_000);
+
   it("keeps the session snapshot bounded while stored message history grows", async () => {
     const projectPath = await makeTempDir("current-state-project");
     const databasePath = path.join(await makeTempDir("current-state-state"), "state.sqlite");
