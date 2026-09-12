@@ -1980,6 +1980,119 @@ setInterval(() => {}, 1000);
     }
   }, 60_000);
 
+  it("scopes a missing step-message recovery to its own branch report", async () => {
+    const cwd = await makeTempDir("branch-report-source-project");
+    const databasePath = path.join(await makeTempDir("branch-report-source-state"), "state.sqlite");
+    const sessionId = "server-test-session";
+    const workflowPath = path.join(cwd, "branch-report.workflow.ts");
+    await fs.writeFile(
+      workflowPath,
+      `
+import { agent, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "branch-report-source", startAt: "work", nodes: {
+  work: agent({ prompt: () => "Return a result." })
+}, edges: [] });`,
+    );
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath, clientId: "branch-report-source-client" });
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    await server.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "branch-report-source",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => observed.listPendingInteractions(sessionId).length === 1, 30_000);
+      const interaction = observed.listPendingInteractions(sessionId)[0];
+      if (interaction === undefined) throw new Error("interaction missing");
+      const step = observed.workflowMessages
+        .listRun(interaction.runId)
+        .find((message) => message.sourceId === interaction.requestId);
+      if (step === undefined) throw new Error("step message missing");
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "branch-report-source", sessionId, coordinator: true },
+      });
+      const authority = {
+        targetSessionId: sessionId,
+        coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
+      };
+      // Pi confirms the step message it holds.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: step.workflowMessageId,
+          piSessionEntryId: "step-entry",
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "present" } });
+      expect(observed.workflowMessages.require(step.workflowMessageId).status).toBe("sent");
+
+      // Pi next reports a message that belongs to a different source.
+      const writer = new ServerStateStore(databasePath);
+      let other: WorkflowMessage;
+      try {
+        other = writer.workflowMessages.create({
+          runId: interaction.runId,
+          targetSessionId: sessionId,
+          kind: "step",
+          sourceId: "other-interaction",
+          idempotencyKey: "other-interaction-key",
+          content: step.content,
+        });
+      } finally {
+        writer.close();
+      }
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: other.workflowMessageId,
+          piSessionEntryId: "other-entry",
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "present" } });
+      // One report carries one message, so it says nothing about this
+      // interaction, and its sent step message stays as it is.
+      expect(
+        observed.workflowMessages
+          .listSession(sessionId)
+          .filter((message) => message.sourceId === interaction.requestId)
+          .map((message) => message.status),
+      ).toEqual(["sent"]);
+
+      // A report that the step message left the branch re-issues it once.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: step.workflowMessageId,
+          piSessionEntryId: null,
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "absent" } });
+      await waitUntil(
+        () =>
+          observed.workflowMessages
+            .listSession(sessionId)
+            .some(
+              (message) =>
+                message.sourceId === interaction.requestId && message.status === "pending",
+            ),
+        30_000,
+      );
+      const recovered = observed.workflowMessages
+        .listSession(sessionId)
+        .filter((message) => message.sourceId === interaction.requestId);
+      expect(recovered.map((message) => message.status).sort()).toEqual(["pending", "sent"]);
+      expect(await currentWorkflowMessageId(client, sessionId)).toBe(
+        recovered.find((message) => message.status === "pending")?.workflowMessageId,
+      );
+    } finally {
+      observed.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 60_000);
+
   it("closes active time atomically when pausing a validating interaction", async () => {
     const cwd = await makeTempDir("pause-validation-project");
     const databasePath = path.join(await makeTempDir("pause-validation-state"), "state.sqlite");
