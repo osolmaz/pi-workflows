@@ -8,10 +8,11 @@ import type { ClientResponse } from "../client/protocol.js";
 import type {
   ClientInteractiveRequest,
   WorkflowRunQueueView,
+  WorkflowSessionMessage,
   WorkflowSessionView,
 } from "../client/view.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import type { WorkflowMessage } from "../state/workflow-messages.js";
+import type { WorkflowMessageContent } from "../state/workflow-messages.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId } from "../workflows/store.js";
@@ -188,7 +189,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let activeRecorderMessageId: string | null = null;
 
   const ensureRecorder = async (
-    message: WorkflowMessage,
+    message: WorkflowSessionMessage,
     ctx: ExtensionContext,
   ): Promise<SessionRecorder> => {
     let recorder = sessionRecorders.get(message.runId);
@@ -209,7 +210,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     if (!agentRunning) return;
     const message = workflowMessages.activeTurnMessage();
     if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
-    const contract = agentContractForWorkflowMessage(message);
+    const contract = agentContractForWorkflowMessage(message, workflowMessages.verifiedContent(message));
     if (contract === undefined && message.kind !== "followUp" && message.kind !== "terminal") {
       return;
     }
@@ -240,7 +241,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
-      const finishRecording = async (message: WorkflowMessage): Promise<void> => {
+      const finishRecording = async (message: WorkflowSessionMessage): Promise<void> => {
         const recorder = sessionRecorders.get(message.runId);
         if (recorder === undefined) return;
         await recorder.record(ctx).catch((error) => {
@@ -256,7 +257,13 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       await workflowMessages.synchronize(pi, client, ctx, {
         beforeTurnEnd: async (message, end) => {
           if (end.stopReason === "completed") {
-            await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
+            await submitVisibleAssistantResponse(
+              client,
+              ctx,
+              message,
+              workflowMessages.verifiedContent(message),
+              end.responseSessionEntryId,
+            );
           }
           if (message.kind === "followUp" || message.kind === "terminal")
             await finishRecording(message);
@@ -275,7 +282,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     requestedPlacement?: ViewerPlacement,
   ): Promise<void> => {
     const run = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.run;
-    if (run === null || run === undefined || !isRecord(run.state)) {
+    if (run === null || run === undefined) {
       ctx.ui.notify("No active workflow is available for piw.", "warning");
       return;
     }
@@ -290,8 +297,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         | ViewerPlacement
         | undefined);
     if (placement === undefined) return;
-    const workflowName =
-      typeof run.state.workflowName === "string" ? run.state.workflowName : run.runId;
+    const workflowName = run.workflowName.length > 0 ? run.workflowName : run.runId;
     const opened = await herdrViewer.open(
       { runId: run.runId, workflowName },
       placement as ViewerPlacement,
@@ -647,12 +653,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               sessionSnapshots.set(sessionId, session);
               workflowMessages.updateView(session);
               sessionView.update(session, ctx);
-              const ownedMessageId = session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
-              const ownedMessage = session.workflowMessages.find(
-                (message) => message.workflowMessageId === ownedMessageId,
-              );
+              const ownedMessage = session.workflowMessage;
               const prepare =
-                ownedMessage !== undefined &&
+                ownedMessage !== null &&
                 (ownedMessage.kind === "step" ||
                   ownedMessage.kind === "terminal" ||
                   ownedMessage.kind === "followUp")
@@ -1043,11 +1046,12 @@ async function executeCommand(
           details: { action: "answer", response: response.receipt ?? null },
         };
       }
-      const interaction = sessionSnapshots
-        .get(ctx.sessionManager.getSessionId())
-        ?.pendingInteractions.map(parseInteractiveRequest)
-        .find((request) => request?.requestId === command.requestId);
-      if (interaction === undefined)
+      const pending = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.interaction;
+      const interaction =
+        pending === null || pending === undefined ? undefined : parseInteractiveRequest(pending);
+      // The session view carries the one request Pi must answer. A command that
+      // names another request is refused here and reported instead of guessed.
+      if (interaction === undefined || interaction.requestId !== command.requestId)
         throw new Error("No matching checkpoint request is waiting in this session");
       if (interaction.kind === "decision") {
         const response = await requestAccepted(client, {
@@ -1168,10 +1172,11 @@ async function executeResourceManagerCommand(
 async function submitVisibleAssistantResponse(
   client: WorkflowClient,
   ctx: ExtensionContext,
-  message: WorkflowMessage,
+  message: WorkflowSessionMessage,
+  content: WorkflowMessageContent | undefined,
   settledResponseEntryId: string | null,
 ): Promise<void> {
-  const contract = agentContractForWorkflowMessage(message);
+  const contract = agentContractForWorkflowMessage(message, content);
   if (contract?.completion !== "assistant" || workflowRunPaused(message.runId)) return;
   if (settledResponseEntryId === null) return;
   const branch = ctx.sessionManager.getBranch();
@@ -1335,9 +1340,13 @@ async function requestAccepted(
   return response;
 }
 
-function agentContractForWorkflowMessage(message: WorkflowMessage): AgentStepContract | undefined {
-  if (message.kind !== "step" || !isRecord(message.content.details)) return undefined;
-  const value = message.content.details.contract;
+function agentContractForWorkflowMessage(
+  message: WorkflowSessionMessage,
+  content: WorkflowMessageContent | undefined,
+): AgentStepContract | undefined {
+  if (message.kind !== "step" || content === undefined) return undefined;
+  if (!isRecord(content.details)) return undefined;
+  const value = content.details.contract;
   if (
     !isRecord(value) ||
     value.requestId !== message.sourceId ||

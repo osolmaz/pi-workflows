@@ -469,6 +469,27 @@ export function isWorkflowMessageContent(value: unknown): value is WorkflowMessa
   );
 }
 
+/**
+ * Accept message content only when it matches its declared digest. Pi reads large
+ * content through bounded chunks, so an incomplete or substituted value must not
+ * reach delivery.
+ */
+export function verifyWorkflowMessageContent(
+  value: unknown,
+  contentDigest: string,
+): WorkflowMessageContent | undefined {
+  if (!isWorkflowMessageContent(value)) return undefined;
+  let digest: string;
+  try {
+    digest = createHash("sha256")
+      .update(canonicalJson(value as unknown as JsonValue))
+      .digest("hex");
+  } catch {
+    return undefined;
+  }
+  return digest === contentDigest ? value : undefined;
+}
+
 function validateContent(content: WorkflowMessageContent, kind: WorkflowMessageKind): void {
   if (!isWorkflowMessageContent(content)) throw new Error("Workflow message content is invalid");
   const shouldTrigger = kind === "step" || kind === "followUp";

@@ -1,10 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowSessionView } from "../client/view.js";
-import type {
-  WorkflowDefinitionSnapshot,
-  WorkflowRunState,
-  WorkflowUpdateRecord,
-} from "../workflows/types.js";
+import { widgetRunInput } from "./session-run-adapter.js";
 import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
@@ -16,7 +12,7 @@ export class SessionWorkflowView {
   private scroll: number | null = null;
   private shownScroll = 0;
   private maxScroll = 0;
-  private stepCount = 0;
+  private focus: string | undefined;
   private visible = false;
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
@@ -26,19 +22,16 @@ export class SessionWorkflowView {
 
   update(session: WorkflowSessionView, ctx: ExtensionContext): void {
     const run = session.run;
-    if (
-      run === null ||
-      !isWorkflowRunState(run.state) ||
-      !isWorkflowDefinitionSnapshot(run.workflow)
-    ) {
+    if (run === null) {
       this.session = session;
       this.clearWidget(ctx);
       return;
     }
     const previousRun = this.session?.run;
-    if (previousRun?.runId !== run.runId || this.stepCount !== run.state.steps.length) {
+    const focus = run.currentNode ?? run.waitingOn ?? undefined;
+    if (previousRun?.runId !== run.runId || this.focus !== focus) {
       this.scroll = null;
-      this.stepCount = run.state.steps.length;
+      this.focus = focus;
     }
     this.session = session;
     this.notifyTransition(previousRun, session, ctx);
@@ -71,7 +64,7 @@ export class SessionWorkflowView {
     this.scroll = null;
     this.shownScroll = 0;
     this.maxScroll = 0;
-    this.stepCount = 0;
+    this.focus = undefined;
     this.lastNoticeKey = null;
     this.clearWidget(ctx);
   }
@@ -95,22 +88,20 @@ export class SessionWorkflowView {
   private render(ctx: ExtensionContext): void {
     const run = this.session?.run;
     if (run === null || run === undefined) return;
-    if (!isWorkflowRunState(run.state) || !isWorkflowDefinitionSnapshot(run.workflow)) return;
-    const state = run.state;
-    const snapshot = run.workflow;
+    const input = widgetRunInput(run);
     const render = (
       width = Number.POSITIVE_INFINITY,
       theme?: Parameters<typeof buildWidgetView>[6],
     ) => {
       const view = buildWidgetView(
-        state,
-        snapshot,
+        input.state,
+        input.snapshot,
         new Date(),
         this.scroll,
         run.display.status === "paused",
         width,
         theme,
-        workflowUpdates(run.updates),
+        input.updates,
         this.actionHint,
         run.display.status,
         run.display.reason,
@@ -131,10 +122,10 @@ export class SessionWorkflowView {
       } else {
         ctx.ui.setWidget(WIDGET_KEY, render());
       }
-      const focus = state.currentNode ?? state.waitingOn;
+      const focus = run.currentNode ?? run.waitingOn;
       ctx.ui.setStatus(
         WIDGET_KEY,
-        `${state.workflowName} [${run.display.status}]${focus === undefined ? "" : ` ${focus}`}`,
+        `${run.workflowName} [${run.display.status}]${focus === null ? "" : ` ${focus}`}`,
       );
       this.visible = true;
     });
@@ -146,11 +137,9 @@ export class SessionWorkflowView {
     ctx: ExtensionContext,
   ): void {
     const run = session.run;
-    if (run === null || !isWorkflowRunState(run.state)) return;
+    if (run === null) return;
     const status = run.display.status;
-    const decision = session.pendingInteractions.some(
-      (value) => isRecord(value) && value.kind === "decision" && value.status === "pending",
-    );
+    const decision = session.interaction?.kind === "decision";
     const shouldNotify =
       isTerminalStatus(status) ||
       (status === "waiting" && (decision || previousRun?.display.status !== "waiting")) ||
@@ -161,10 +150,10 @@ export class SessionWorkflowView {
     this.lastNoticeKey = key;
     const reason = run.display.reason?.trim();
     const message = decision
-      ? `Workflow ${run.state.workflowName} needs a human decision.`
+      ? `Workflow ${run.workflowName} needs a human decision.`
       : reason && reason.length > 0
         ? reason
-        : `Workflow ${run.state.workflowName} ${status.replace("_", " ")}.`;
+        : `Workflow ${run.workflowName} ${status.replace("_", " ")}.`;
     safelyUpdateUi(ctx, () => {
       ctx.ui.notify(
         message,
@@ -176,46 +165,6 @@ export class SessionWorkflowView {
       );
     });
   }
-}
-
-function isWorkflowRunState(value: unknown): value is WorkflowRunState {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { schema?: unknown }).schema === "pi-workflows.run-state.v1" &&
-    typeof (value as { workflowName?: unknown }).workflowName === "string" &&
-    Array.isArray((value as { steps?: unknown }).steps)
-  );
-}
-
-function workflowUpdates(values: readonly unknown[]): WorkflowUpdateRecord[] {
-  return values.filter(isWorkflowUpdateRecord);
-}
-
-function isWorkflowUpdateRecord(value: unknown): value is WorkflowUpdateRecord {
-  return (
-    isRecord(value) &&
-    typeof value.updateId === "string" &&
-    typeof value.seq === "number" &&
-    typeof value.at === "string" &&
-    typeof value.runId === "string" &&
-    typeof value.nodeId === "string" &&
-    typeof value.attemptId === "string" &&
-    typeof value.type === "string" &&
-    typeof value.key === "string" &&
-    isRecord(value.data)
-  );
-}
-
-function isWorkflowDefinitionSnapshot(value: unknown): value is WorkflowDefinitionSnapshot {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { schema?: unknown }).schema === "pi-workflows.definition-snapshot.v1" &&
-    typeof (value as { nodes?: unknown }).nodes === "object"
-  );
 }
 
 function isTerminalStatus(status: string): boolean {
