@@ -730,7 +730,21 @@ describe("buildWidgetLines", () => {
     expect(followed.scroll).toBeGreaterThan(0);
     expect(stripAnsi(followed.lines.join("\n"))).toContain("◐ ƒ n10");
 
-    const top = buildWidgetView(state, tall, undefined, 0);
+    const top = buildWidgetView(
+      state,
+      tall,
+      undefined,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "shift+↑/↓ scroll",
+    );
     expect(top.scroll).toBe(0);
     expect(stripAnsi(top.lines.join("\n"))).toContain("· ƒ n0");
     expect(stripAnsi(top.lines.join("\n"))).toMatch(/↓ \d+ more · shift\+↑\/↓ scroll/);
@@ -767,6 +781,10 @@ describe("buildWidgetLines", () => {
       undefined,
       undefined,
       "Ctrl+Shift+R piw",
+      undefined,
+      undefined,
+      undefined,
+      "shift+↑/↓ scroll",
     );
 
     const controls = stripAnsi(view.lines.at(-1) ?? "");
@@ -798,11 +816,77 @@ describe("buildWidgetLines", () => {
       undefined,
       undefined,
       "Ctrl+Shift+R piw",
+      undefined,
+      undefined,
+      undefined,
+      "shift+↑/↓ scroll",
     );
     expect(stripAnsi(exactView.lines.at(-1) ?? "")).toContain(
       "shift+↑/↓ scroll · Ctrl+Shift+R piw",
     );
     expect(exactView.lines.length).toBe(10);
+  });
+
+  it("renders the configured scroll keys and drops the segment when scrolling is off", () => {
+    const nodes = Object.fromEntries(
+      Array.from({ length: 20 }, (_value, index) => [`n${index}`, compute({ run: () => index })]),
+    );
+    const tall = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "tall",
+        startAt: "n0",
+        nodes,
+        edges: Array.from({ length: 19 }, (_value, index) => ({
+          from: `n${index}`,
+          to: `n${index + 1}`,
+        })),
+      }),
+    );
+    const state = makeState({ workflowName: "tall", currentNode: "n10" });
+    const controlsFor = (scrollHint?: string): string =>
+      stripAnsi(
+        buildWidgetView(
+          state,
+          tall,
+          undefined,
+          null,
+          false,
+          80,
+          undefined,
+          undefined,
+          "Ctrl+Shift+R piw",
+          undefined,
+          undefined,
+          undefined,
+          scrollHint,
+        ).lines.at(-1) ?? "",
+      );
+
+    expect(controlsFor("shift+↑/↓ scroll")).toContain("shift+↑/↓ scroll · Ctrl+Shift+R piw");
+    expect(controlsFor("ctrl+alt+↑/↓ scroll")).toContain("ctrl+alt+↑/↓ scroll · Ctrl+Shift+R piw");
+    expect(controlsFor("ctrl+alt+up")).toContain("ctrl+alt+up · Ctrl+Shift+R piw");
+
+    const disabled = controlsFor(undefined);
+    expect(disabled).toContain("Ctrl+Shift+R piw");
+    expect(disabled).not.toContain("scroll");
+
+    const remapped = buildWidgetView(
+      state,
+      tall,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      "Ctrl+Shift+R piw",
+      undefined,
+      undefined,
+      undefined,
+      "ctrl+alt+↑/↓ scroll",
+    );
+    expect(remapped.lines.length).toBeLessThanOrEqual(10);
+    expect(remapped.lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
   });
 
   it("reports no scroll range when the node list fits", () => {

@@ -30,6 +30,7 @@ import {
   type ParsedResourceManagerArgs,
 } from "./resource-manager-command.js";
 import { SessionWorkflowView } from "./session-view.js";
+import { loadScrollShortcuts, scrollShortcutHint } from "./shortcuts.js";
 import { recoverAssistantStep, registerWorkflowAgentStepMessageRenderer } from "./step-message.js";
 import { registerTerminalMessageRenderer } from "./terminal-message.js";
 import { responseEntryId, WorkflowMessageCoordinator } from "./workflow-message-coordinator.js";
@@ -59,6 +60,8 @@ const INTERACTION_POLL_MS = 1_000;
 const MAX_WORKFLOW_LIST_ITEMS = 50;
 const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const sessionSnapshots = new Map<string, WorkflowSessionView>();
+// Shortcut configuration problems wait for the first session so the user sees them once.
+let pendingShortcutNotices: string[] = [];
 
 export type ParsedWorkflowArgs =
   | { kind: "list"; offset?: number }
@@ -175,7 +178,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
   const workflowMessages = new WorkflowMessageCoordinator();
-  const sessionView = new SessionWorkflowView();
+  const shortcutConfiguration = loadScrollShortcuts();
+  pendingShortcutNotices = [...shortcutConfiguration.notices];
+  const sessionView = new SessionWorkflowView(scrollShortcutHint(shortcutConfiguration.shortcuts));
   const sessionRecorders = new Map<string, SessionRecorder>();
   let agentRunning = false;
   let lastStopReason: ReturnType<typeof workflowTurnStopReason> = "completed";
@@ -578,19 +583,40 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerShortcut("shift+up", {
-    description: "Scroll the workflow widget up",
-    handler: (ctx) => sessionView.scrollUp(ctx),
-  });
+  // The configured scroll keys are the only scroll registrations. Pi keys
+  // extension shortcuts by literal key string, so a second registration of the
+  // same key would silently replace the first one.
+  const registerScrollShortcut = (
+    key: string,
+    description: string,
+    handler: (ctx: ExtensionContext) => void,
+  ): void => {
+    // Pi requires a `modifier+key` literal, which the resolver already validated.
+    pi.registerShortcut(key as Parameters<ExtensionAPI["registerShortcut"]>[0], {
+      description,
+      handler,
+    });
+  };
+  if (shortcutConfiguration.shortcuts.scrollUp !== null) {
+    registerScrollShortcut(
+      shortcutConfiguration.shortcuts.scrollUp,
+      "Scroll the workflow widget up",
+      (ctx) => sessionView.scrollUp(ctx),
+    );
+  }
 
-  pi.registerShortcut("shift+down", {
-    description: "Scroll the workflow widget down",
-    handler: (ctx) => sessionView.scrollDown(ctx),
-  });
+  if (shortcutConfiguration.shortcuts.scrollDown !== null) {
+    registerScrollShortcut(
+      shortcutConfiguration.shortcuts.scrollDown,
+      "Scroll the workflow widget down",
+      (ctx) => sessionView.scrollDown(ctx),
+    );
+  }
 
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
     serverUnavailableNotified = false;
+    for (const notice of pendingShortcutNotices.splice(0)) ctx.ui.notify(notice, "warning");
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     const sessionClient = client;

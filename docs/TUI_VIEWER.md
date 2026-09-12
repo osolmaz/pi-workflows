@@ -57,7 +57,8 @@ Local and remote modes use the same semantic run view and the same protocol. `pi
 The npm package contains a native Herdr plugin. Link the installed package with
 `pi-workflows herdr setup`. A workflow running in Pi inside Herdr then shows
 `Ctrl+Shift+R piw` in its widget. When rows are hidden, the call to action shares
-the scroll-controls line. The shortcut and `/piw` command open
+the scroll-controls line, which names the scroll keys in effect, such as
+`shift+↑/↓ scroll` by default. The shortcut and `/piw` command open
 the current run directly in a managed Herdr pane. The placement menu supports
 right, below, left, above, a new tab, and a new workspace.
 

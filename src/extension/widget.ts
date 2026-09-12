@@ -96,6 +96,7 @@ export function buildWidgetView(
   displayStatus?: WorkflowDisplayStatus,
   displayReason?: string | null,
   controls?: readonly string[],
+  scrollHint?: string,
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
@@ -156,6 +157,7 @@ export function buildWidgetView(
     scroll !== null,
     theme,
     combineHintWithWindow ? hint : undefined,
+    scrollHint,
   );
   const indentation = availableWidth >= 3 ? "  " : "";
   return {
@@ -472,6 +474,7 @@ function windowLines(
   anchorIsStart: boolean,
   theme?: WidgetTheme,
   actionHint?: string,
+  scrollHint?: string,
 ): { lines: string[]; scroll: number; maxScroll: number } {
   if (lines.length <= budget && actionHint === undefined) {
     return { lines, scroll: 0, maxScroll: 0 };
@@ -485,7 +488,7 @@ function windowLines(
   const directions = [above > 0 ? `↑ ${above}` : "", below > 0 ? `↓ ${below}` : ""]
     .filter(Boolean)
     .join(" · ");
-  const controls = [`${directions} more`, "shift+↑/↓ scroll", actionHint]
+  const controls = [`${directions} more`, scrollHint, actionHint]
     .filter((item): item is string => Boolean(item))
     .join(" · ");
   out.push(paint(theme, "dim", controls));
