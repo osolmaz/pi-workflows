@@ -680,6 +680,148 @@ describe("workflow server display reducer", () => {
       }).status,
     ).toBe("completed");
   });
+});
+
+describe("current session state", () => {
+  it("keeps the session snapshot bounded while stored message history grows", async () => {
+    const projectPath = await makeTempDir("current-state-project");
+    const databasePath = path.join(await makeTempDir("current-state-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "current-state-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "bounded" },
+      runnerId: "current-state",
+      claimToken: "claim-current-state",
+      leaseMs: 60_000,
+      originSessionId: "session-current-state",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () =>
+        queue.workflowRunAuthority("current-state-run", "claim-current-state"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "bounded" } }),
+    }).run(workflow, { task: "bounded" }, { runId: "current-state-run" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("current-state-run");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("current-state-run");
+    serverState.createInteractiveRequest({
+      requestId: "current-state-pending-source",
+      runId: "current-state-run",
+      attemptId,
+      targetSessionId: "session-current-state",
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId: "current-state-pending-source",
+          runId: "current-state-run",
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    // Twenty-four stored messages of about 300 KiB each keep the complete history
+    // far above one frame while the current session view stays small.
+    const largeText = "stored workflow message ".repeat(13_000);
+    const ids: string[] = [];
+    for (let index = 1; index <= 24; index += 1) {
+      const message = serverState.workflowMessages.create({
+        workflowMessageId: `current-state-message-${index}`,
+        runId: "current-state-run",
+        targetSessionId: "session-current-state",
+        kind: "step",
+        sourceId: `current-state-source-${index}`,
+        idempotencyKey: `current-state-message-${index}`,
+        content: {
+          schema: "pi-workflows.workflow-message-content.v1",
+          customType: "test-step",
+          content: largeText,
+          display: false,
+          details: { note: `${index}` },
+          triggerTurn: true,
+        },
+        now: 1_700_000_000_000 + index,
+      });
+      ids.push(message.workflowMessageId);
+      serverState.workflowMessages.adoptBranch(
+        "session-current-state",
+        [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: `entry-${index}` }],
+        new Set([message.workflowMessageId]),
+      );
+    }
+    const stored = serverState.workflowMessages.listSession("session-current-state");
+    const pending = stored.find(
+      (message) => message.status === "pending" && message.kind === "step",
+    );
+    if (pending === undefined) throw new Error("pending step message missing");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const session = views.session("session-current-state", null);
+    expect(session.workflowMessage?.workflowMessageId).toBe(pending.workflowMessageId);
+    expect(session.workflowMessage?.kind).toBe("step");
+    expect(session.openWorkflowTurn).toBeNull();
+    expect(ids).toHaveLength(24);
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "current-state",
+      event: "session_snapshot",
+      revision: 1,
+      payload: session as unknown as never,
+    });
+    const stored2 = serverState.workflowMessages.listSession("session-current-state");
+    expect(stored2).toHaveLength(25);
+    let storedBytes = 0;
+    for (const message of stored2) {
+      storedBytes += Buffer.byteLength(canonicalJson(message.content), "utf8");
+    }
+    expect(storedBytes).toBeGreaterThan(4 * MAX_PROTOCOL_MESSAGE_BYTES);
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    // Complete history stays reachable outside the session snapshot.
+    const detail = runs.readRunView("current-state-run", {
+      steps: { start: 0, limit: 10 },
+      trace: { start: 0, limit: 10 },
+      sessionEntries: { start: 0, limit: 10 },
+      sessionEvents: { start: 0, limit: 10 },
+      settings: { start: 0, limit: 10 },
+      followUps: { start: 0, limit: 10 },
+      updates: { start: 0, limit: 10 },
+      graphCursor: 0,
+    });
+    expect(detail?.graphSteps.length).toBeGreaterThan(0);
+    // Every stored message keeps its complete content outside the snapshot.
+    expect(stored2.filter((message) => message.content.content === largeText)).toHaveLength(24);
+    state.close();
+  }, 60_000);
 
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
     const projectPath = await makeTempDir("server-view-project");
