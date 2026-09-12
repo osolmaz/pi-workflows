@@ -1421,6 +1421,19 @@ describe("current session state", () => {
                   },
                 });
               }
+              // A monitor schedules its next check once per cycle under one key.
+              for (const everyMinutes of [5, 60]) {
+                await publishUpdate({
+                  type: "monitor.schedule",
+                  key: "next-check",
+                  data: {
+                    schema: "pi-workflows.monitor-schedule.v1",
+                    lastCheckAt: "2026-01-01T00:00:00.000Z",
+                    nextCheckAt: `2026-01-01T0${everyMinutes === 5 ? 1 : 2}:00:00.000Z`,
+                    everyMinutes,
+                  },
+                });
+              }
               return "done";
             },
           }),
@@ -1480,6 +1493,9 @@ describe("current session state", () => {
       completed: hotCount - 1,
       total: hotCount,
     });
+    // A later monitor cycle replaces its own next-check record, so the projection
+    // carries the newest schedule and never an earlier one.
+    expect(run.monitorSchedule?.nextCheckAt).toBe("2026-01-01T02:00:00.000Z");
     state.close();
   }, 60_000);
 
