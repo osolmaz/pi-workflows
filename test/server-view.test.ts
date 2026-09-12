@@ -20,7 +20,7 @@ import {
 import { StateDatabase } from "../src/state/database.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { action, compute, defineWorkflow, idempotentEffect } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
@@ -1103,6 +1103,107 @@ describe("current session state", () => {
     expect(reachable).toHaveLength(nodeCount);
     expect(new Set(reachable).size).toBe(nodeCount);
     expect(reachable).toContain(failedNodeId);
+    state.close();
+  }, 60_000);
+
+  it("keeps the newest progress updates in the bounded session view", async () => {
+    const projectPath = await makeTempDir("progress-window-project");
+    const databasePath = path.join(await makeTempDir("progress-window-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const updateCount = 20;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "progress-window",
+        startAt: "work",
+        nodes: {
+          work: action({
+            effect: idempotentEffect("test.progress-window"),
+            run: async ({ publishUpdate }) => {
+              for (let index = 0; index < updateCount; index += 1) {
+                await publishUpdate({
+                  type: "progress",
+                  key: `key-${String(index).padStart(2, "0")}`,
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: index,
+                    total: updateCount,
+                    unit: "items",
+                  },
+                });
+              }
+              return "done";
+            },
+          }),
+        },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-progress-window",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:progress-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "progress-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "progress-window",
+      claimToken: "claim-progress-window",
+      leaseMs: 60_000,
+      originSessionId: "session-progress-window",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () =>
+        queue.workflowRunAuthority("run-progress-window", "claim-progress-window"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId: "run-progress-window" },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("run-progress-window");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("run-progress-window");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    expect({
+      error: runs.readRunState("run-progress-window")?.error ?? null,
+      updates: state.connection
+        .prepare(
+          "SELECT COUNT(*) AS value FROM workflow_updates u JOIN node_attempts a ON a.attempt_id = u.attempt_id WHERE a.run_id = ?",
+        )
+        .get("run-progress-window"),
+    }).toEqual({ error: null, updates: { value: updateCount } });
+    const run = views.session("session-progress-window", null).run;
+    if (run === null) throw new Error("session run missing");
+    // A run keeps up to 1,024 current updates, so the bounded widget set must
+    // hold the newest keys instead of the oldest ones.
+    const keys = run.progressUpdates.map((update) => update.key);
+    expect(keys).toHaveLength(16);
+    expect(keys[0]).toBe("key-04");
+    expect(keys.at(-1)).toBe("key-19");
+    expect(run.progressUpdates.at(-1)?.data).toMatchObject({
+      completed: updateCount - 1,
+      total: updateCount,
+    });
     state.close();
   }, 60_000);
 

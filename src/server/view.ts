@@ -1353,6 +1353,8 @@ function manifest(
   };
 }
 
+// The widget shows a bounded set of progress rows. A run keeps up to 1,024
+// current updates, so the newest keys are the ones that matter.
 const MAX_SESSION_PROGRESS_UPDATES = 16;
 
 type NodeRecord = {
@@ -1488,9 +1490,10 @@ function sessionProgressUpdates(
   for (const update of updates) {
     if (update.type !== "progress") continue;
     progress.push({ key: update.key, at: update.at, data: toJson(update.data) });
-    if (progress.length >= MAX_SESSION_PROGRESS_UPDATES) break;
   }
-  return progress;
+  // Updates arrive in run revision order, so a bounded set keeps the newest keys
+  // instead of the oldest ones.
+  return progress.slice(-MAX_SESSION_PROGRESS_UPDATES);
 }
 
 function sessionMonitorSchedule(

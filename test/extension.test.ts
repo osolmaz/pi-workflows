@@ -1,7 +1,16 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
+import {
+  CLIENT_PROTOCOL_SCHEMA,
+  NdjsonFrameDecoder,
+  clientSocketPath,
+  encodeProtocolLine,
+  parseClientMessage,
+} from "../src/client/protocol.js";
 import type { ClientEvent } from "../src/client/protocol.js";
 import type { WorkflowDisplayStatus, WorkflowSessionView } from "../src/client/view.js";
 import piWorkflows from "../src/extension/index.js";
@@ -1606,16 +1615,107 @@ export default defineResourceManager({
     // The first window cannot hold the complete topology.
     expect(rendered()).not.toContain("ƒ n299");
 
-    const deadline = Date.now() + 30_000;
-    while (!/ƒ n2\d\d/.test(rendered())) {
-      if (Date.now() > deadline) throw new Error("the widget never reached the next window");
-      fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    const requested = vi.spyOn(WorkflowClient.prototype, "setSessionNodeWindow");
+    requested.mockRejectedValueOnce(new Error("session window request failed"));
+    const scrollDownUntil = async (predicate: () => boolean, message: string): Promise<void> => {
+      const deadline = Date.now() + 30_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(message);
+        fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    await scrollDownUntil(
+      () => requested.mock.calls.length >= 1,
+      "the widget never asked for the next window",
+    );
+    // A failed request keeps the loaded window and stays retryable.
+    expect(rendered()).toContain("ƒ n000");
+    await scrollDownUntil(
+      () => requested.mock.calls.length >= 2,
+      "the widget never retried its window request",
+    );
+    await scrollDownUntil(
+      () => /ƒ n2\d\d/.test(rendered()),
+      "the widget never reached the next window",
+    );
     // The paged window replaced the first one instead of appending to it.
     expect(rendered()).not.toContain("ƒ n000");
     await fake.emit("session_shutdown");
   }, 120_000);
+
+  it("re-arms the session subscription after a failure during the first publish", async () => {
+    const { cwd } = await setupProject();
+    if (testHome === undefined) throw new Error("the test home directory is not configured");
+    const socketPath = clientSocketPath(workflowStatePath(testHome));
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const watches: Array<{ subscriptionId: string; sessionId: string }> = [];
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const server = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: "projection-failure",
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true, coordinatorEpoch: "projection-epoch" },
+            }),
+          );
+          if (message.operation !== "view.session.watch") continue;
+          const payload = message.payload as { subscriptionId: string; sessionId: string };
+          watches.push(payload);
+          // The server publishes the first snapshot immediately, so its failure
+          // arrives while the extension is still waiting for this response.
+          if (watches.length === 1) {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "event",
+                subscriptionId: payload.subscriptionId,
+                event: "unavailable",
+                payload: {
+                  schema: "pi-workflows.subscription-failure.v1",
+                  reasonCode: "projection_failed",
+                  message: "session view exceeds one frame",
+                },
+              }),
+            );
+          }
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const fake = makePi({ cwd });
+    try {
+      await fake.emit("session_start");
+      // The failed first subscription must not strand the session view.
+      await waitUntil(() => watches.length > 1, 30_000);
+      expect(fake.notifications.map((notice) => notice.message)).toEqual([]);
+      expect(watches[0]?.sessionId).toBe("session-one");
+      expect(watches[1]?.sessionId).toBe("session-one");
+      expect(watches[1]?.subscriptionId).not.toBe(watches[0]?.subscriptionId);
+      await fake.emit("session_shutdown");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
 
   it("stays quiet for a usable shortcuts file", async () => {
     const { cwd } = await setupProject();

@@ -17,7 +17,7 @@ export class SessionWorkflowView {
   private visible = false;
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
-  private pageNodes: ((cursor: number | null) => void) | undefined;
+  private pageNodes: ((cursor: number | null) => Promise<void> | void) | undefined;
   /** Window the widget already asked for, so repeated key presses ask once. */
   private requestedNodeCursor: number | null = null;
 
@@ -29,7 +29,7 @@ export class SessionWorkflowView {
    * bounded window, so scrolling past an edge asks the server for the adjacent
    * window instead of keeping the complete node history.
    */
-  setNodePager(pageNodes: (cursor: number | null) => void): void {
+  setNodePager(pageNodes: (cursor: number | null) => Promise<void> | void): void {
     this.pageNodes = pageNodes;
   }
 
@@ -93,7 +93,21 @@ export class SessionWorkflowView {
     this.focus = undefined;
     this.staleReason = null;
     this.lastNoticeKey = null;
+    this.requestedNodeCursor = null;
     this.clearWidget(ctx);
+  }
+
+  /**
+   * Ask for one node window. A failed request stays retryable, so the same edge
+   * can ask again instead of leaving the loaded window stuck.
+   */
+  private requestWindow(cursor: number): void {
+    this.requestedNodeCursor = cursor;
+    const asked = this.pageNodes?.(cursor) as Promise<void> | void;
+    if (asked === undefined || typeof asked.then !== "function") return;
+    void asked.catch(() => {
+      if (this.requestedNodeCursor === cursor) this.requestedNodeCursor = null;
+    });
   }
 
   private scrollBy(ctx: ExtensionContext, delta: number): void {
@@ -107,18 +121,16 @@ export class SessionWorkflowView {
     const end = run.nodeStart + run.nodes.length;
     if (delta > 0 && next >= this.maxScroll && end < run.nodeTotal) {
       if (this.requestedNodeCursor !== end) {
-        this.requestedNodeCursor = end;
         this.scroll = 0;
-        this.pageNodes?.(end);
+        this.requestWindow(end);
       }
       return;
     }
     if (delta < 0 && next <= 0 && run.nodeStart > 0) {
       const start = Math.max(0, run.nodeStart - run.nodes.length);
       if (this.requestedNodeCursor !== start) {
-        this.requestedNodeCursor = start;
         this.scroll = Number.MAX_SAFE_INTEGER;
-        this.pageNodes?.(start);
+        this.requestWindow(start);
       }
       return;
     }

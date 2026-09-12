@@ -1005,10 +1005,15 @@ export class WorkflowServer {
     // Pi reports its one current message, or null when it holds none yet. A
     // present report without an entry means the message stays pending.
     const workflowMessageId = report.workflowMessageId;
+    // A report proves the branch facts of one known message. An unknown ID is a
+    // stale or wrong-session report, and it must not authorize idle recovery.
+    if (workflowMessageId !== null && !allowed.has(workflowMessageId)) {
+      throw new Error(
+        `Workflow branch report names an unknown workflow message: ${workflowMessageId}`,
+      );
+    }
     const piSessionEntryId =
-      workflowMessageId !== null &&
-      report.piSessionEntryId !== null &&
-      allowed.has(workflowMessageId)
+      workflowMessageId !== null && report.piSessionEntryId !== null
         ? report.piSessionEntryId
         : null;
     const entries =
