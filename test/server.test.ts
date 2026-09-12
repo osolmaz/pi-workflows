@@ -447,6 +447,35 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeWideWindowWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "window.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "server-node-window",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: () => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+        return { started: true };
+      },
+    }),
+    "after-1": compute({ run: () => 1 }),
+    "after-2": compute({ run: () => 2 }),
+  },
+  edges: [
+    { from: "work", to: "after-1" },
+    { from: "after-1", to: "after-2" },
+  ],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeBlockingWorkflow(
   cwd: string,
   waitMs = 900,
@@ -651,6 +680,61 @@ describe("global workflow server", () => {
     const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await expect(server.start()).rejects.toThrow(/operating system limit/);
   });
+
+  it("moves the session node window through its subscription", async () => {
+    const cwd = await makeTempDir("node-window-project");
+    const databasePath = path.join(await makeTempDir("node-window-state"), "state.sqlite");
+    const workflowPath = await writeWideWindowWorkflow(cwd);
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath });
+    await server.start();
+    type RunWindow = {
+      nodeStart?: number;
+      nodeTotal?: number;
+      nodes?: Array<{ nodeId?: string }>;
+    };
+    const windows: RunWindow[] = [];
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "node-window-run",
+        executionMode: "interactive",
+      });
+      const unsubscribe = await client.watchSession(
+        "server-test-session",
+        (event) => {
+          if (event.event !== "session_snapshot") return;
+          const run = (event.payload as { run?: RunWindow | null }).run;
+          if (run !== undefined && run !== null) windows.push(run);
+        },
+        { subscriptionId: "node-window" },
+      );
+      try {
+        await waitUntil(() => windows.length > 0, 15_000);
+        expect(windows.at(-1)).toMatchObject({ nodeStart: 0, nodeTotal: 3 });
+        expect(windows.at(-1)?.nodes?.map((row) => row.nodeId)).toEqual([
+          "after-1",
+          "after-2",
+          "work",
+        ]);
+        // The widget gets the window it scrolls to, and returns to the window
+        // that follows the node it shows as working.
+        await expect(client.setSessionNodeWindow("server-test-session", 1)).resolves.toBe(true);
+        await waitUntil(() => windows.at(-1)?.nodeStart === 1, 15_000);
+        expect(windows.at(-1)?.nodes?.map((row) => row.nodeId)).toEqual(["after-2", "work"]);
+        await expect(client.setSessionNodeWindow("server-test-session", null)).resolves.toBe(true);
+        await waitUntil(() => windows.at(-1)?.nodeStart === 0, 15_000);
+        expect(windows.at(-1)?.nodes?.length).toBe(3);
+      } finally {
+        await unsubscribe();
+      }
+    } finally {
+      await client.close();
+      await server.stop();
+    }
+  }, 60_000);
 
   it("rejects a watch for a missing run", async () => {
     const databasePath = path.join(await makeTempDir("server-missing-watch"), "state.sqlite");

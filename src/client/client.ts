@@ -194,7 +194,7 @@ export class WorkflowClient {
   async watchSession(
     sessionId: string,
     listener: (event: ClientEvent) => void,
-    options: { subscriptionId?: string; coordinator?: boolean } = {},
+    options: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number } = {},
   ): Promise<() => Promise<void>> {
     return await this.subscribe(
       "view.session.watch",
@@ -203,9 +203,37 @@ export class WorkflowClient {
         subscriptionId: options.subscriptionId ?? randomUUID(),
         sessionId,
         ...(options.coordinator === undefined ? {} : { coordinator: options.coordinator }),
+        ...(options.nodeCursor === undefined ? {} : { nodeCursor: options.nodeCursor }),
       },
       listener,
     );
+  }
+
+  /**
+   * Move the node window of the active session subscription. `null` returns to
+   * the window that follows the node the widget shows as working. The stored
+   * subscription keeps the window, so a reconnect restores it.
+   */
+  async setSessionNodeWindow(sessionId: string, nodeCursor: number | null): Promise<boolean> {
+    const entry = [...this.subscriptions.entries()].find(
+      ([, subscription]) =>
+        subscription.operation === "view.session.watch" &&
+        (subscription.payload as { sessionId?: unknown }).sessionId === sessionId,
+    );
+    if (entry === undefined) return false;
+    const [subscriptionId, subscription] = entry;
+    const payload = { ...(subscription.payload as Record<string, JsonValue>) };
+    if (nodeCursor === null) delete payload.nodeCursor;
+    else payload.nodeCursor = nodeCursor;
+    const response = await this.request({
+      operation: "view.session.window",
+      payload: { subscriptionId, nodeCursor },
+    });
+    if (response.outcome !== "accepted" && response.outcome !== "adopted") {
+      throw new Error(response.error ?? `Workflow session window was ${response.outcome}`);
+    }
+    subscription.payload = payload;
+    return true;
   }
 
   async ensureAvailable(): Promise<ClientHello> {

@@ -245,6 +245,40 @@ ${edgeLines}
   return workflowPath;
 }
 
+/** A topology far wider than one widget node window. */
+async function writeWideWorkflow(cwd: string, nodeCount: number): Promise<string> {
+  const workflowPath = path.join(cwd, "wide.workflow.ts");
+  const names = Array.from(
+    { length: nodeCount },
+    (_, index) => `n${String(index).padStart(3, "0")}`,
+  );
+  const nodeLines = names
+    .map((name, index) => `    ${name}: compute({ run: () => ${index} }),`)
+    .join("\n");
+  const edgeLines = [
+    `    { from: "ask", to: "${names[0]}" },`,
+    ...names.slice(1).map((name, index) => `    { from: "${names[index]}", to: "${name}" },`),
+  ].join("\n");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "server-wide",
+  startAt: "ask",
+  nodes: {
+    ask: agent({ prompt: () => "Return a result." }),
+${nodeLines}
+  },
+  edges: [
+${edgeLines}
+  ],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeValidatedWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "validated.workflow.ts");
   await fs.writeFile(
@@ -1557,6 +1591,31 @@ export default defineResourceManager({
     ).toHaveLength(1);
     await fake.emit("session_shutdown");
   }, 60_000);
+
+  it("asks for the next node window when the widget scrolls past its edge", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const workflowPath = await writeWideWorkflow(cwd, 300);
+    const fake = makePi({ cwd });
+
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    const rendered = (): string =>
+      fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
+    await waitUntil(() => rendered().includes("ƒ n000"), 30_000);
+    // The first window cannot hold the complete topology.
+    expect(rendered()).not.toContain("ƒ n299");
+
+    const deadline = Date.now() + 30_000;
+    while (!/ƒ n2\d\d/.test(rendered())) {
+      if (Date.now() > deadline) throw new Error("the widget never reached the next window");
+      fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The paged window replaced the first one instead of appending to it.
+    expect(rendered()).not.toContain("ƒ n000");
+    await fake.emit("session_shutdown");
+  }, 120_000);
 
   it("stays quiet for a usable shortcuts file", async () => {
     const { cwd } = await setupProject();

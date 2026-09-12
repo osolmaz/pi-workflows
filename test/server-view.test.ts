@@ -979,6 +979,133 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("bounds the node window and its row text for a wide workflow", async () => {
+    const projectPath = await makeTempDir("node-window-project");
+    const databasePath = path.join(await makeTempDir("node-window-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const nodeCount = 300;
+    const failedNodeId = "node-299";
+    const nodes = Object.fromEntries([
+      ...Array.from(
+        { length: nodeCount - 1 },
+        (_, index) => [`node-${index}`, compute({ run: () => index })] as const,
+      ),
+      // The last node fails with an error far above one session frame.
+      [
+        failedNodeId,
+        compute({
+          run: () => {
+            throw new Error(`wide failure ${"x".repeat(200_000)}`);
+          },
+        }),
+      ] as const,
+    ]);
+    const workflow = defineWorkflow({
+      name: "wide-node-window",
+      startAt: "node-0",
+      maxSteps: nodeCount + 2,
+      nodes,
+      edges: Array.from({ length: nodeCount - 1 }, (_, index) => ({
+        from: `node-${index}`,
+        to: `node-${index + 1}`,
+      })),
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-node-window",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:wide-node-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "wide-node-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-window",
+      claimToken: "claim-node-window",
+      leaseMs: 60_000,
+      originSessionId: "session-node-window",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-node-window", "claim-node-window"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      compiled,
+      {},
+      { runId: "run-node-window" },
+    );
+    // Keep the failed run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("run-node-window");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("run-node-window");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const session = views.session("session-node-window", null);
+    const run = session.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.nodeTotal).toBe(nodeCount);
+    // The default window follows the node the widget shows as working, so the
+    // failed node and its bounded error are already in view.
+    const failed = run.nodes.find((row) => row.nodeId === failedNodeId);
+    expect(failed?.outcome).toBe("failed");
+    // One row cannot exceed the frame budget, and the complete text stays in the
+    // detailed run view.
+    expect(Buffer.byteLength(failed?.error ?? "", "utf8")).toBeLessThanOrEqual(4 * 1024);
+    expect(Buffer.byteLength(runs.readRunState("run-node-window")?.error ?? "", "utf8")).toBe(
+      200_000 + "wide failure ".length,
+    );
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "node-window",
+      event: "session_snapshot",
+      revision: 1,
+      payload: session as unknown as never,
+    });
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    // A scrolled widget asks for the window it needs, and paging reaches every
+    // node. Each window starts where the caller asks and stops at the byte
+    // budget or the item limit.
+    const first = views.session("session-node-window", null, 0).run;
+    expect(first?.nodeStart).toBe(0);
+    expect(first?.nodeTotal).toBe(nodeCount);
+    expect(first?.nodes.length).toBeLessThan(nodeCount);
+    expect(first?.nodes.length).toBeLessThanOrEqual(256);
+    expect(Buffer.byteLength(canonicalJson(first?.nodes as never), "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    const reachable: string[] = [];
+    let cursor = 0;
+    for (;;) {
+      const page = views.session("session-node-window", null, cursor).run;
+      if (page === null || page.nodes.length === 0) break;
+      expect(page.nodeStart).toBe(cursor);
+      reachable.push(...page.nodes.map((row) => row.nodeId));
+      const nextCursor = page.nodeStart + page.nodes.length;
+      if (nextCursor >= page.nodeTotal) break;
+      cursor = nextCursor;
+    }
+    expect(reachable).toHaveLength(nodeCount);
+    expect(new Set(reachable).size).toBe(nodeCount);
+    expect(reachable).toContain(failedNodeId);
+    state.close();
+  }, 60_000);
+
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
     const projectPath = await makeTempDir("server-view-project");
     const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");
