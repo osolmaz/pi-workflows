@@ -83,6 +83,8 @@ export class WorkflowClient {
   private closed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  /** Set only after a connection holds every subscription it asked to restore. */
+  private subscriptionsRestored = false;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly subscriptions = new Map<string, Subscription>();
 
@@ -672,6 +674,7 @@ export class WorkflowClient {
       // restored subscription set. A subscription the server keeps refusing must
       // not reset the budget, or the client would reconnect forever.
       await this.restoreSubscriptions();
+      this.subscriptionsRestored = true;
       this.reconnectAttempts = 0;
       return hello;
     } catch (error) {
@@ -687,8 +690,10 @@ export class WorkflowClient {
     event: ClientEvent,
   ): Promise<void> {
     // One accepted view proves the connection works again, so the reconnect
-    // budget resets here as well as after hello.
-    if (event.event !== "unavailable") this.reconnectAttempts = 0;
+    // budget resets here as well as after hello. A view from a subscription the
+    // server restored before it refused a later one is not that proof, because
+    // the client still owes work on this connection.
+    if (event.event !== "unavailable" && this.subscriptionsRestored) this.reconnectAttempts = 0;
     if (subscription.operation !== "view.runs.watch" || event.event !== "runs") {
       subscription.listener(event);
       return;
@@ -759,6 +764,7 @@ export class WorkflowClient {
     this.socket = null;
     this.hello = null;
     this.connectTask = null;
+    this.subscriptionsRestored = false;
     if (socket !== null && !socket.destroyed) socket.destroy();
     for (const pending of this.pending.values()) pending.reject(reason);
     this.pending.clear();
