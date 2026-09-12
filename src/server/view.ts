@@ -554,7 +554,9 @@ export class ServerViewStore {
       sessionEvents: empty,
       settings: empty,
       followUps: empty,
-      updates: viewRange(counts.updates),
+      // Progress and monitor facts come from their own bounded tail reads, so the
+      // compact run never loads the head of a long update set.
+      updates: empty,
       graphCursor: 0,
     });
     if (loaded === null) return null;
@@ -582,9 +584,20 @@ export class ServerViewStore {
       nodes: window.items,
       nodeStart: window.start,
       nodeTotal: window.total,
-      progressUpdates: sessionProgressUpdates(state.updates ?? []),
+      progressUpdates: sessionProgressUpdates(
+        this.runs.readCurrentUpdateTail(runId, {
+          type: "progress",
+          limit: MAX_SESSION_PROGRESS_UPDATES,
+        }),
+      ),
       monitorEstimate: boundedSessionJson(toJson(state.outputs.estimate ?? null)),
-      monitorSchedule: sessionMonitorSchedule(state.updates ?? []),
+      monitorSchedule: sessionMonitorSchedule(
+        this.runs.readCurrentUpdateTail(runId, {
+          type: "monitor.schedule",
+          key: "next-check",
+          limit: 1,
+        }),
+      ),
       live: display.status === "running" || display.status === "waiting",
       possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
     };
