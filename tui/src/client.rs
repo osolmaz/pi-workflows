@@ -430,7 +430,6 @@ fn referenced_content(
     }
 }
 
-
 #[derive(Debug, Clone)]
 enum ArtifactEntry {
     Loading(Vec<u8>),
