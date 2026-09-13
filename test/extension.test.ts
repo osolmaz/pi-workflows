@@ -1293,6 +1293,42 @@ describe("pi-workflows workflow server extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("answers only the pending request the session view carries", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeCheckpointWorkflow(cwd, true);
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+        ),
+      30_000,
+    );
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
+    const decisionEntry = fake.sent.find(
+      (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+    );
+    if (decisionEntry === undefined) throw new Error("Decision message is missing");
+    const requestId = (decisionEntry.details as { requestId: string }).requestId;
+    // The session view carries one pending request, because the whole view travels
+    // as one client frame. A command that names another request is refused with the
+    // true state, because the extension must not guess that request's kind.
+    await fake.runCommand('answer some-other-request {"choice":"approve"}');
+    expect(fake.notifications.at(-1)).toMatchObject({
+      message: expect.stringContaining("carries one pending request at a time"),
+      level: "error",
+    });
+    // The request the view carries is answered normally.
+    await fake.runCommand(`answer ${requestId} {"choice":"approve"}`);
+    expect(fake.notifications).toContainEqual(
+      expect.objectContaining({ message: "Human decision answer accepted." }),
+    );
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
   it("submits an assistant response only after the final settled boundary", async () => {
     const { cwd } = await setupProject();
     const workflowPath = path.join(cwd, "assistant.workflow.ts");
