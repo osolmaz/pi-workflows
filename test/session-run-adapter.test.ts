@@ -9,7 +9,7 @@ import { widgetRunInput } from "../src/extension/session-run-adapter.js";
 function nodeRow(overrides: Partial<WorkflowSessionNodeRow> & { nodeId: string }) {
   return {
     nodeType: "compute",
-    actionExecution: false,
+    actionExecution: null,
     state: "pending",
     attempts: 0,
     settingsChangeNumber: null,
@@ -135,6 +135,44 @@ describe("widget run input adapter", () => {
     );
     expect(input.state.currentNodeStartedAt).toBeUndefined();
     expect(input.state.currentNode).toBeUndefined();
+  });
+
+  it("carries the action subtype the widget renders", () => {
+    const input = widgetRunInput(
+      sessionRun({
+        nodes: [
+          nodeRow({
+            nodeId: "build",
+            nodeType: "action",
+            actionExecution: "shell",
+            state: "ok",
+            attempts: 1,
+            outcome: "ok",
+          }),
+          nodeRow({ nodeId: "work", nodeType: "action", actionExecution: "function" }),
+        ],
+      }),
+    );
+    expect(input.snapshot.nodes.build?.actionExecution).toBe("shell");
+    expect(input.snapshot.nodes.work?.actionExecution).toBe("function");
+  });
+
+  it("keeps the current node while its attempt is still pending", () => {
+    const input = widgetRunInput(
+      sessionRun({
+        currentNode: "handoff",
+        nodes: [
+          nodeRow({
+            nodeId: "handoff",
+            state: "pending",
+            attempts: 1,
+            startedAt: "2026-09-12T12:00:00.000Z",
+          }),
+        ],
+      }),
+    );
+    expect(input.state.currentNode).toBe("handoff");
+    expect(input.state.currentNodeStartedAt).toBe("2026-09-12T12:00:00.000Z");
   });
 
   it("restores the progress and monitor facts the widget reads", () => {

@@ -671,7 +671,7 @@ export class ServerViewStore {
       rows.push({
         nodeId,
         nodeType: typeof node.nodeType === "string" ? node.nodeType : "unknown",
-        actionExecution: node.actionExecution !== undefined,
+        actionExecution: sessionActionExecution(node),
         state: nodeRowState(state, nodeId, facts),
         attempts: facts?.attempts ?? 0,
         settingsChangeNumber:
@@ -1473,6 +1473,12 @@ function nodeRowState(
   if (facts?.lastStatus === "completed") return "ok";
   if (facts !== undefined && facts.lastStatus !== null) return "failed";
   return "pending";
+}
+
+function sessionActionExecution(node: NodeRecord): "function" | "shell" | null {
+  return node.actionExecution === "shell" || node.actionExecution === "function"
+    ? node.actionExecution
+    : null;
 }
 
 function isAssistantResponseNode(node: NodeRecord): boolean {
