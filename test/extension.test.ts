@@ -1667,6 +1667,65 @@ export default defineResourceManager({
     await fake.emit("session_shutdown");
   }, 120_000);
 
+  it("re-arms a paged session window with its cursor", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const workflowPath = await writeWideWorkflow(cwd, 300);
+    const watchSession = WorkflowClient.prototype.watchSession;
+    const cursors: Array<number | undefined> = [];
+    const drop = { run: null as (() => void) | null };
+    vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(async function (
+      this: WorkflowClient,
+      sessionId: string,
+      listener: (event: ClientEvent) => void,
+      options?: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number },
+    ) {
+      cursors.push(options?.nodeCursor);
+      drop.run = () =>
+        listener({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "event",
+          subscriptionId: options?.subscriptionId ?? "session-window-cursor",
+          event: "unavailable",
+          payload: {
+            schema: "pi-workflows.subscription-failure.v1",
+            reasonCode: "connection_lost",
+            message: "Workflow server connection is unavailable.",
+          },
+        });
+      return await watchSession.call(this, sessionId, listener, options);
+    });
+    const fake = makePi({ cwd });
+    const rendered = (): string =>
+      fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
+    const requested = vi.spyOn(WorkflowClient.prototype, "setSessionNodeWindow");
+    try {
+      await fake.emit("session_start");
+      await fake.runCommand(workflowPath);
+      await waitUntil(() => rendered().includes("ƒ n000"), 30_000);
+      // The user pages the widget down until it asks for the next window.
+      const askedCursors = (): Array<number | null> => requested.mock.calls.map((call) => call[1]);
+      const deadline = Date.now() + 30_000;
+      while (!askedCursors().some((value) => typeof value === "number")) {
+        if (Date.now() > deadline) throw new Error("the widget never asked for the next window");
+        fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const cursor = askedCursors()
+        .filter((value): value is number => typeof value === "number")
+        .at(-1);
+      expect(cursor).toBeGreaterThan(0);
+      // The connection is lost, so the extension drops the subscription and arms
+      // a new one. The window the user scrolled to must come back with it.
+      drop.run?.();
+      await waitUntil(() => cursors.length >= 2, 30_000);
+      expect(cursors.at(-1)).toBe(cursor);
+      await fake.emit("session_shutdown");
+    } finally {
+      requested.mockRestore();
+    }
+  }, 120_000);
+
   it("fences workflow delivery when the session subscription is lost", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeValidatedWorkflow(cwd);

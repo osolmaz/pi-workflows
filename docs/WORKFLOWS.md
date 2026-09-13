@@ -594,7 +594,9 @@ carries a bounded window of node rows. Scrolling past an edge of that window
 moves the live session subscription with `view.session.window`, so the widget
 shows the adjacent window instead of the complete topology. A window request
 that fails stays retryable, and the widget keeps the loaded window until the
-next one arrives. `Shift+Up` and
+next one arrives. The extension remembers the window the user scrolled to, so a
+subscription it has to arm again after a connection loss returns that window
+instead of the default one. `Shift+Up` and
 `Shift+Down` scroll the widget by default; see
 [Widget scroll shortcuts](#widget-scroll-shortcuts) to remap or remove them. A
 sent step message is open only while its
