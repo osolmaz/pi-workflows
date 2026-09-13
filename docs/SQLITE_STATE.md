@@ -1,6 +1,6 @@
 # SQLite state
 
-Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior. The [automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract.
+Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored the earlier in-process run behavior. The [automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract.
 
 Pi Workflows stores all live durable state in one database:
 
