@@ -44,6 +44,7 @@ export const CLIENT_OPERATIONS = [
   "view.page",
   "view.content",
   "view.session.watch",
+  "view.session.window",
   "state.status",
   "state.verify",
   "state.backup",
@@ -63,7 +64,6 @@ export const CLIENT_OUTCOMES = [
 export const CLIENT_EVENTS = [
   "runs",
   "run_snapshot",
-  "run_patch",
   "run_page",
   "session_snapshot",
   "unavailable",
@@ -169,7 +169,7 @@ export function parseClientResponse(line: string | Buffer): ClientResponse {
 }
 
 export function clientRequestFingerprint(request: ClientRequest): Buffer {
-  // The host verifies current session authority before reading these receipts.
+  // The workflow server verifies current session authority before reading these receipts.
   // Reconnecting changes authority evidence, not the logical response.
   const sessionResponse = [
     "interaction.submit",
@@ -199,7 +199,31 @@ export function clientSocketPath(databasePath: string): string {
     const suffix = createHash("sha256").update(stateDirectory).digest("hex").slice(0, 24);
     return `\\\\.\\pipe\\pi-workflows-${suffix}`;
   }
-  return path.join(stateDirectory, "host", "host.sock");
+  const socketPath = path.join(stateDirectory, "server", "server.sock");
+  return socketPath;
+}
+
+/**
+ * Operating systems limit one local socket path. Linux allows 107 bytes. macOS
+ * and the BSDs use a 104-byte `sun_path`, so 103 bytes are usable there. Linux
+ * binds a longer path in the abstract namespace, where no path-based client can
+ * reach it, so a long path is a blocker rather than a slow connection failure.
+ */
+export function maxSocketPathBytes(platform: NodeJS.Platform = process.platform): number {
+  return platform === "linux" ? 107 : 103;
+}
+
+export function assertSocketPathSupported(
+  socketPath: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === "win32") return;
+  const limit = maxSocketPathBytes(platform);
+  const bytes = Buffer.byteLength(socketPath, "utf8");
+  if (bytes <= limit) return;
+  throw new Error(
+    `Workflow server socket path is ${bytes} bytes, above the ${limit}-byte operating system limit: ${socketPath}`,
+  );
 }
 
 export class NdjsonFrameDecoder {

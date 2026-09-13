@@ -156,7 +156,7 @@ describe("state prune", () => {
       .get(result.runId) as { resourceId: string };
     store.state.connection
       .prepare(
-        `UPDATE leases SET owner_type = 'host', owner_id = 'host-1', token_hash = ?,
+        `UPDATE leases SET owner_type = 'server', owner_id = 'server-1', token_hash = ?,
            acquired_at = ?, heartbeat_at = ?, expires_at = ? WHERE resource_id = ?`,
       )
       .run(Buffer.alloc(32, 1), Date.now(), Date.now(), Date.now() + 60_000, resource.resourceId);
@@ -383,16 +383,16 @@ describe("state prune", () => {
         .prepare(
           `INSERT INTO workflow_messages(
              workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
-             order_number, status, created_at, updated_at
-           ) VALUES ('pending-message', ?, 'protected-session', 'step', 'pending-source', ?, 1, 'pending', ?, ?)`,
+             trigger_turn, order_number, status, created_at, updated_at
+           ) VALUES ('pending-message', ?, 'protected-session', 'step', 'pending-source', ?, 1, 1, 'pending', ?, ?)`,
         )
         .run(results[0]?.runId, contentHash, now, now);
       state.connection
         .prepare(
           `INSERT INTO workflow_messages(
              workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
-             order_number, status, pi_session_entry_id, created_at, updated_at
-           ) VALUES ('open-turn-message', ?, 'protected-session', 'step', 'turn-source', ?, 2, 'sent', 'pi-entry', ?, ?)`,
+             trigger_turn, order_number, status, pi_session_entry_id, created_at, updated_at
+           ) VALUES ('open-turn-message', ?, 'protected-session', 'step', 'turn-source', ?, 1, 2, 'sent', 'pi-entry', ?, ?)`,
         )
         .run(results[1]?.runId, contentHash, now, now);
       state.connection
@@ -415,10 +415,10 @@ describe("state prune", () => {
         .run(attemptIds[3]);
       state.connection
         .prepare(
-          `INSERT INTO run_workers(
-             worker_epoch, run_id, generation, host_epoch, launch_envelope_hash,
+          `INSERT INTO run_runners(
+             runner_epoch, run_id, generation, server_epoch, launch_envelope_hash,
              status, started_at, ready_at
-           ) VALUES ('active-worker', ?, 1, 1, ?, 'running', ?, ?)`,
+           ) VALUES ('active-runner', ?, 1, 1, ?, 'running', ?, ?)`,
         )
         .run(results[4]?.runId, launchHash, now, now);
 
@@ -498,13 +498,13 @@ describe("state prune", () => {
           now,
         );
 
-      const controllerId = "retention-controller";
-      const controllerResourceId = resourceIdFor("controller", controllerId);
+      const controllerId = "retention-resource-manager";
+      const controllerResourceId = resourceIdFor("managed_resource", controllerId);
       state.connection
         .prepare(
           `INSERT INTO resources(
              resource_id, resource_type, aggregate_key, revision, created_at, updated_at
-           ) VALUES (?, 'controller', ?, 1, ?, ?)`,
+           ) VALUES (?, 'managed_resource', ?, 1, ?, ?)`,
         )
         .run(controllerResourceId, controllerId, now, now);
       state.connection
@@ -512,19 +512,19 @@ describe("state prune", () => {
         .run(controllerResourceId);
       state.connection
         .prepare(
-          `INSERT INTO controller_resources(
-             controller_resource_id, resource_id, controller_name, resource_key, uid,
+          `INSERT INTO managed_resources(
+             managed_resource_id, resource_id, resource_manager_name, resource_key, uid,
              generation, spec_hash, status_hash, created_at, updated_at
            ) VALUES (?, ?, 'retention', 'protected', 'retention-protected', 1, ?, ?, ?, ?)`,
         )
         .run(controllerId, controllerResourceId, contractHash, contractHash, now, now);
       state.connection
         .prepare(
-          `INSERT INTO controller_workflows(
-             request_id, controller_resource_id, request_key, workflow_name,
+          `INSERT INTO managed_resource_workflows(
+             request_id, managed_resource_id, request_key, workflow_name,
              input_fingerprint, run_id, status, created_at, updated_at
            ) VALUES (
-             'retention-controller-request', ?, 'protected', 'retention', ?, ?, 'succeeded', ?, ?
+             'retention-resource-manager-request', ?, 'protected', 'retention', ?, ?, 'succeeded', ?, ?
            )`,
         )
         .run(controllerId, Buffer.alloc(32, 9), results[8]?.runId, now, now);

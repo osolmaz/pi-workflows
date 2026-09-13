@@ -9,6 +9,7 @@ import {
   encodeProtocolLine,
 } from "../src/client/protocol.js";
 import { WORKFLOW_DISPLAY_CONTROLS, type WorkflowDisplay } from "../src/client/view.js";
+import { widgetRunInput } from "../src/extension/session-run-adapter.js";
 import { ServerStateStore } from "../src/server/state.js";
 import {
   ServerViewStore,
@@ -19,13 +20,16 @@ import {
 import { StateDatabase } from "../src/state/database.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { action, compute, defineWorkflow, idempotentEffect } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 import { claimTestRun } from "./queue-helpers.js";
+
+/** Free-form session text one compact projection carries, in bytes. */
+const SESSION_TEXT_LIMIT = 4 * 1024;
 
 const base: WorkflowDisplayFacts = {
   queueStatus: "parked",
@@ -54,7 +58,93 @@ const controlFixture = JSON.parse(
   agentSnapshot: { display: WorkflowDisplay };
 };
 
-describe("host workflow display reducer", () => {
+/**
+ * A parked run that waits on one step message for its origin session. The run
+ * keeps its reservation unless the test cancels it.
+ */
+async function pendingStepFixture(label: string, delivered = false) {
+  const projectPath = await makeTempDir(`${label}-project`);
+  const databasePath = path.join(await makeTempDir(`${label}-state`), "state.sqlite");
+  const state = new StateDatabase({ filePath: databasePath });
+  const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+  const serverState = new ServerStateStore(databasePath, { state });
+  const workflow = compileWorkflowDefinition(rawWorkflow);
+  const snapshot = createDefinitionSnapshot(workflow);
+  const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+  const runId = `run-${label}`;
+  const sessionId = `session-${label}`;
+  claimTestRun(queue, {
+    runId,
+    workflowName: workflow.name,
+    workflowSourceRef: "builtin:echo",
+    workflowSource: {
+      root: { kind: "builtin", id: "echo", revision: "test" },
+      mounted: [],
+    },
+    definitionDigest,
+    definitionSnapshot: snapshot,
+    input: { task: label },
+    runnerId: label,
+    claimToken: `claim-${label}`,
+    leaseMs: 60_000,
+    originSessionId: sessionId,
+  });
+  const runs = new WorkflowRunStore(databasePath, {
+    state,
+    authorityProvider: () => queue.workflowRunAuthority(runId, `claim-${label}`),
+  });
+  const result = await new WorkflowEngine({
+    store: runs,
+    executor: new ScriptedExecutor().respond("reply", { output: { reply: label } }),
+  }).run(workflow, { task: label }, { runId });
+  const attemptId = result.state.steps[0]?.attemptId;
+  if (attemptId === undefined) throw new Error("attempt missing");
+  state.connection
+    .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+    .run(runId);
+  state.connection
+    .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+    .run(runId);
+  const requestId = `${label}-source`;
+  serverState.createInteractiveRequest({
+    requestId,
+    runId,
+    attemptId,
+    targetSessionId: sessionId,
+    kind: "agent",
+    contract: {
+      prompt: "Continue",
+      contract: {
+        requestId,
+        runId,
+        workflowName: workflow.name,
+        nodeId: "reply",
+        attemptId,
+        completion: "submit",
+      },
+    },
+  });
+  const pending = serverState.workflowMessages.latestForSource("step", requestId);
+  if (pending === undefined) throw new Error("step message missing");
+  if (delivered) {
+    serverState.workflowMessages.adoptBranch(
+      sessionId,
+      [{ workflowMessageId: pending.workflowMessageId, piSessionEntryId: `${label}-entry` }],
+      new Set([pending.workflowMessageId]),
+    );
+  }
+  const views = new ServerViewStore(
+    state,
+    queue,
+    serverState,
+    runs,
+    () => false,
+    () => false,
+  );
+  return { state, views, runId, sessionId, requestId, pending };
+}
+
+describe("workflow server display reducer", () => {
   it("keeps the server-owned control fixture aligned with the reducer", () => {
     expect(WORKFLOW_DISPLAY_CONTROLS).toEqual(controlFixture.controls);
     expect(controlFixture.agentSnapshot.display).toEqual(display({ pendingRequestKind: "agent" }));
@@ -200,9 +290,9 @@ describe("host workflow display reducer", () => {
     expect(workflowPageStart(300, 299)).toBe(44);
   });
 
-  it("keeps large content and replay history reachable through bounded host views", async () => {
-    const projectPath = await makeTempDir("host-view-large-project");
-    const databasePath = path.join(await makeTempDir("host-view-large-state"), "state.sqlite");
+  it("keeps large content and replay history reachable through bounded server views", async () => {
+    const projectPath = await makeTempDir("server-view-large-project");
+    const databasePath = path.join(await makeTempDir("server-view-large-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -221,7 +311,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: largeInput,
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-view",
       leaseMs: 60_000,
       originSessionId: "session-large-view",
@@ -250,7 +340,7 @@ describe("host workflow display reducer", () => {
     expect(runs.readContentBlob("run-large-view", "invalid", "application/json")).toBeUndefined();
     const largeOutput = {
       text: "x".repeat(2 * 1024 * 1024),
-      userArtifact: { $artifact: { path: "user-data", note: "not a host reference" } },
+      userArtifact: { $artifact: { path: "user-data", note: "not a server reference" } },
     };
     const result = await new WorkflowEngine({
       store: runs,
@@ -505,8 +595,8 @@ describe("host workflow display reducer", () => {
   }, 60_000);
 
   it("keeps complete graph history reachable outside the bounded snapshot", async () => {
-    const projectPath = await makeTempDir("host-view-graph-project");
-    const databasePath = path.join(await makeTempDir("host-view-graph-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-graph-project");
+    const databasePath = path.join(await makeTempDir("server-view-graph-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -540,7 +630,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-graph",
       leaseMs: 60_000,
       originSessionId: "session-large-graph",
@@ -585,8 +675,8 @@ describe("host workflow display reducer", () => {
   }, 60_000);
 
   it("bounds large workflow topology and keeps the full definition reachable", async () => {
-    const projectPath = await makeTempDir("host-view-topology-project");
-    const databasePath = path.join(await makeTempDir("host-view-topology-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-topology-project");
+    const databasePath = path.join(await makeTempDir("server-view-topology-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -607,7 +697,7 @@ describe("host workflow display reducer", () => {
       startAt: "node-0",
       nodes,
       edges,
-      operatorData: { $artifact: { path: "operator-owned", note: "not a host reference" } },
+      operatorData: { $artifact: { path: "operator-owned", note: "not a server reference" } },
     };
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
     claimTestRun(queue, {
@@ -621,7 +711,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-large-topology",
       leaseMs: 60_000,
       originSessionId: "session-large-topology",
@@ -680,10 +770,1422 @@ describe("host workflow display reducer", () => {
       }).status,
     ).toBe("completed");
   });
+});
+
+describe("current session state", () => {
+  it("sends the start time of the node the widget shows as running", async () => {
+    const projectPath = await makeTempDir("pw-session-row-project");
+    const databasePath = path.join(await makeTempDir("pw-session-row-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const originSessionId = "session-node-row";
+    claimTestRun(queue, {
+      runId: "row-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "rows" },
+      runnerId: "pw-session-row",
+      claimToken: "claim-row",
+      leaseMs: 60_000,
+      originSessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("row-run", "claim-row"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "rows" } }),
+    }).run(workflow, { task: "rows" }, { runId: "row-run" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    const startedAt = Date.now() - 30_000;
+    // Park the run for an interaction while the origin Pi turn is open. This is
+    // the normal interactive case: no current node, one waiting attempt. A
+    // parked attempt has no completed step row yet.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("row-run");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("row-run");
+    state.connection
+      .prepare(
+        `UPDATE node_attempts SET status = 'waiting', started_at = ?, finished_at = NULL
+         WHERE run_id = ?`,
+      )
+      .run(startedAt, "row-run");
+    state.connection.prepare("DELETE FROM run_steps WHERE run_id = ?").run("row-run");
+    serverState.createInteractiveRequest({
+      requestId: "row-request",
+      runId: "row-run",
+      attemptId,
+      targetSessionId: originSessionId,
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId: "row-request",
+          runId: "row-run",
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    const message = serverState.workflowMessages.listSession(originSessionId)[0];
+    if (message === undefined) throw new Error("workflow message missing");
+    serverState.workflowMessages.adoptBranch(
+      originSessionId,
+      [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "row-entry" }],
+      new Set([message.workflowMessageId]),
+    );
+    serverState.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "row-turn",
+      runId: "row-run",
+      targetSessionId: originSessionId,
+      now: startedAt,
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => true,
+    );
+    const session = views.session(originSessionId, null);
+    const run = session.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.display.status).toBe("running");
+    expect(run.currentNode).toBeNull();
+    expect(run.waitingOn).toBe("reply");
+    const waiting = run.nodes.find((row) => row.nodeId === "reply");
+    expect(waiting?.state).toBe("waiting");
+    expect(waiting?.startedAt).toBe(new Date(startedAt).toISOString());
+    expect(run.nodes.find((row) => row.nodeId === "missing")?.startedAt).toBeUndefined();
+    // The widget uses this value for the elapsed segment of the shown node.
+    expect(widgetRunInput(run).state.currentNodeStartedAt).toBe(new Date(startedAt).toISOString());
+    state.close();
+  }, 60_000);
+
+  it("keeps the session snapshot bounded while stored message history grows", async () => {
+    const projectPath = await makeTempDir("current-state-project");
+    const databasePath = path.join(await makeTempDir("current-state-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "current-state-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "bounded" },
+      runnerId: "current-state",
+      claimToken: "claim-current-state",
+      leaseMs: 60_000,
+      originSessionId: "session-current-state",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () =>
+        queue.workflowRunAuthority("current-state-run", "claim-current-state"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "bounded" } }),
+    }).run(workflow, { task: "bounded" }, { runId: "current-state-run" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("current-state-run");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("current-state-run");
+    serverState.createInteractiveRequest({
+      requestId: "current-state-pending-source",
+      runId: "current-state-run",
+      attemptId,
+      targetSessionId: "session-current-state",
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId: "current-state-pending-source",
+          runId: "current-state-run",
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    // Twenty-four stored messages of about 300 KiB each keep the complete history
+    // far above one frame while the current session view stays small.
+    const largeText = "stored workflow message ".repeat(13_000);
+    const ids: string[] = [];
+    for (let index = 1; index <= 24; index += 1) {
+      const message = serverState.workflowMessages.create({
+        workflowMessageId: `current-state-message-${index}`,
+        runId: "current-state-run",
+        targetSessionId: "session-current-state",
+        kind: "step",
+        sourceId: `current-state-source-${index}`,
+        idempotencyKey: `current-state-message-${index}`,
+        content: {
+          schema: "pi-workflows.workflow-message-content.v1",
+          customType: "test-step",
+          content: largeText,
+          display: false,
+          details: { note: `${index}` },
+          triggerTurn: true,
+        },
+        now: 1_700_000_000_000 + index,
+      });
+      ids.push(message.workflowMessageId);
+      serverState.workflowMessages.adoptBranch(
+        "session-current-state",
+        [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: `entry-${index}` }],
+        new Set([message.workflowMessageId]),
+      );
+    }
+    const stored = serverState.workflowMessages.listSession("session-current-state");
+    const pending = stored.find(
+      (message) => message.status === "pending" && message.kind === "step",
+    );
+    if (pending === undefined) throw new Error("pending step message missing");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const session = (() => {
+      const reads = vi.spyOn(state, "readJson");
+      const selected = views.currentWorkflowMessage("session-current-state");
+      // Selection reads message metadata only, so a 25-message history costs one
+      // content read for the one message Pi must act on.
+      expect(reads.mock.calls.length).toBe(1);
+      expect(selected?.workflowMessageId).toBe(pending.workflowMessageId);
+      const view = views.session("session-current-state", null);
+      expect(view.workflowMessage).not.toBeNull();
+      reads.mockRestore();
+      return view;
+    })();
+    expect(session.workflowMessage?.workflowMessageId).toBe(pending.workflowMessageId);
+    expect(session.workflowMessage?.kind).toBe("step");
+    expect(session.openWorkflowTurn).toBeNull();
+    expect(ids).toHaveLength(24);
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "current-state",
+      event: "session_snapshot",
+      revision: 1,
+      payload: session as unknown as never,
+    });
+    const stored2 = serverState.workflowMessages.listSession("session-current-state");
+    expect(stored2).toHaveLength(25);
+    let storedBytes = 0;
+    for (const message of stored2) {
+      storedBytes += Buffer.byteLength(canonicalJson(message.content), "utf8");
+    }
+    expect(storedBytes).toBeGreaterThan(4 * MAX_PROTOCOL_MESSAGE_BYTES);
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    // Complete history stays reachable outside the session snapshot.
+    const detail = runs.readRunView("current-state-run", {
+      steps: { start: 0, limit: 10 },
+      trace: { start: 0, limit: 10 },
+      sessionEntries: { start: 0, limit: 10 },
+      sessionEvents: { start: 0, limit: 10 },
+      settings: { start: 0, limit: 10 },
+      followUps: { start: 0, limit: 10 },
+      updates: { start: 0, limit: 10 },
+      graphCursor: 0,
+    });
+    expect(detail?.graphSteps.length).toBeGreaterThan(0);
+    // Every stored message keeps its complete content outside the snapshot.
+    expect(stored2.filter((message) => message.content.content === largeText)).toHaveLength(24);
+    // The message history stays reachable as a bounded run page whose content is
+    // served by the content operation, not by one oversized frame.
+    const messagePages: Array<{ workflowMessageId?: string }> = [];
+    let cursor = 0;
+    for (;;) {
+      const page = views.page("current-state-run", { kind: "workflow_messages", cursor });
+      if (page === null) throw new Error("run page missing");
+      expect(page.workflowMessageTotal).toBe(25);
+      const items = page.workflowMessages as Array<{
+        workflowMessageId?: string;
+        content?: unknown;
+      }>;
+      expect(items.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(canonicalJson(page.workflowMessages), "utf8")).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      messagePages.push(...items);
+      const next = page.workflowMessageStart + items.length;
+      if (next >= page.workflowMessageTotal || items.length === 0) break;
+      cursor = next;
+    }
+    expect(messagePages.map((item) => item.workflowMessageId)).toEqual(
+      stored2.map((message) => message.workflowMessageId),
+    );
+    // Large message content stays outside the page and arrives through the
+    // content operation.
+    const externalized = messagePages.find(
+      (item) =>
+        (item as { content?: { $artifact?: { path?: string } } }).content?.$artifact?.path !==
+        undefined,
+    ) as { content?: { $artifact?: { path?: string } } } | undefined;
+    const pagedPath = externalized?.content?.$artifact?.path;
+    if (pagedPath === undefined) throw new Error("stored message content was not externalized");
+    expect(views.content("current-state-run", pagedPath, 0)).toMatchObject({
+      mediaType: "application/json",
+    });
+    state.close();
+  }, 60_000);
+
+  it("bounds the node window and its row text for a wide workflow", async () => {
+    const projectPath = await makeTempDir("node-window-project");
+    const databasePath = path.join(await makeTempDir("node-window-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const nodeCount = 300;
+    const failedNodeId = "node-299";
+    const nodes = Object.fromEntries([
+      ...Array.from(
+        { length: nodeCount - 1 },
+        (_, index) => [`node-${index}`, compute({ run: () => index })] as const,
+      ),
+      // The last node fails with an error far above one session frame.
+      [
+        failedNodeId,
+        compute({
+          run: () => {
+            throw new Error(`wide failure ${"x".repeat(200_000)}`);
+          },
+        }),
+      ] as const,
+    ]);
+    const workflow = defineWorkflow({
+      name: "wide-node-window",
+      startAt: "node-0",
+      maxSteps: nodeCount + 2,
+      nodes,
+      edges: Array.from({ length: nodeCount - 1 }, (_, index) => ({
+        from: `node-${index}`,
+        to: `node-${index + 1}`,
+      })),
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-node-window",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:wide-node-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "wide-node-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-window",
+      claimToken: "claim-node-window",
+      leaseMs: 60_000,
+      originSessionId: "session-node-window",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-node-window", "claim-node-window"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      compiled,
+      {},
+      { runId: "run-node-window" },
+    );
+    // Keep the failed run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("run-node-window");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("run-node-window");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const session = views.session("session-node-window", null);
+    const run = session.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.nodeTotal).toBe(nodeCount);
+    // The default window follows the node the widget shows as working, so the
+    // failed node and its bounded error are already in view.
+    const failed = run.nodes.find((row) => row.nodeId === failedNodeId);
+    expect(failed?.outcome).toBe("failed");
+    // One row cannot exceed the frame budget, and the complete text stays in the
+    // detailed run view.
+    expect(Buffer.byteLength(failed?.error ?? "", "utf8")).toBeLessThanOrEqual(4 * 1024);
+    expect(Buffer.byteLength(runs.readRunState("run-node-window")?.error ?? "", "utf8")).toBe(
+      200_000 + "wide failure ".length,
+    );
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "node-window",
+      event: "session_snapshot",
+      revision: 1,
+      payload: session as unknown as never,
+    });
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    // A scrolled widget asks for the window it needs, and paging reaches every
+    // node. Each window starts where the caller asks and stops at the byte
+    // budget or the item limit.
+    const first = views.session("session-node-window", null, 0).run;
+    expect(first?.nodeStart).toBe(0);
+    expect(first?.nodeTotal).toBe(nodeCount);
+    expect(first?.nodes.length).toBeLessThan(nodeCount);
+    expect(first?.nodes.length).toBeLessThanOrEqual(256);
+    expect(Buffer.byteLength(canonicalJson(first?.nodes as never), "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    const reachable: string[] = [];
+    let cursor = 0;
+    for (;;) {
+      const page = views.session("session-node-window", null, cursor).run;
+      if (page === null || page.nodes.length === 0) break;
+      expect(page.nodeStart).toBe(cursor);
+      reachable.push(...page.nodes.map((row) => row.nodeId));
+      const nextCursor = page.nodeStart + page.nodes.length;
+      if (nextCursor >= page.nodeTotal) break;
+      cursor = nextCursor;
+    }
+    expect(reachable).toHaveLength(nodeCount);
+    expect(new Set(reachable).size).toBe(nodeCount);
+    expect(reachable).toContain(failedNodeId);
+    // A run stops at its first failure, so this run holds one bad result.
+    const results = runs.readRunState("run-node-window")?.results ?? {};
+    expect(Object.values(results).filter((result) => result.outcome !== "ok")).toHaveLength(1);
+    state.close();
+  }, 60_000);
+
+  it("opens a node window on the end of a run that has no working node", async () => {
+    const projectPath = await makeTempDir("node-tail-project");
+    const databasePath = path.join(await makeTempDir("node-tail-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const nodeCount = 300;
+    const nodeIds = Array.from(
+      { length: nodeCount },
+      (_value, index) => `node-${String(index).padStart(3, "0")}`,
+    );
+    const workflow = defineWorkflow({
+      name: "node-tail-window",
+      startAt: nodeIds[0] ?? "node-000",
+      maxSteps: nodeCount + 2,
+      nodes: Object.fromEntries(
+        nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+      ),
+      edges: nodeIds.slice(1).map((nodeId, index) => ({
+        from: nodeIds[index] ?? "node-000",
+        to: nodeId,
+      })),
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-node-tail",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:node-tail-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-tail-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-tail",
+      claimToken: "claim-node-tail",
+      leaseMs: 60_000,
+      originSessionId: "session-node-tail",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-node-tail", "claim-node-tail"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      compiled,
+      {},
+      { runId: "run-node-tail" },
+    );
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session("session-node-tail", null).run;
+    if (run === null) throw new Error("session run missing");
+    // This run has no working node, and the widget focuses its last row, so the
+    // first window holds the end of the topology instead of its start.
+    expect(run.nodeTotal).toBe(nodeCount);
+    expect(run.nodeStart).toBe(nodeCount - 5);
+    expect(run.nodes.map((row) => row.nodeId)).toEqual(nodeIds.slice(-5));
+    state.close();
+    expect(run.nodeStart).toBe(nodeCount - 5);
+    expect(run.nodes.at(-1)?.nodeId).toBe(`node-${nodeCount - 1}`);
+    expect(run.nodes.length).toBeLessThan(10);
+    state.close();
+  }, 60_000);
+
+  it("keeps the newest progress updates in the bounded session view", async () => {
+    const projectPath = await makeTempDir("progress-window-project");
+    const databasePath = path.join(await makeTempDir("progress-window-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const updateCount = 20;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "progress-window",
+        startAt: "work",
+        nodes: {
+          work: action({
+            effect: idempotentEffect("test.progress-window"),
+            run: async ({ publishUpdate }) => {
+              for (let index = 0; index < updateCount; index += 1) {
+                await publishUpdate({
+                  type: "progress",
+                  key: `key-${String(index).padStart(2, "0")}`,
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: index,
+                    total: updateCount,
+                    unit: "items",
+                  },
+                });
+              }
+              return "done";
+            },
+          }),
+        },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "run-progress-window",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:progress-window",
+      workflowSource: {
+        root: { kind: "builtin", id: "progress-window", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "progress-window",
+      claimToken: "claim-progress-window",
+      leaseMs: 60_000,
+      originSessionId: "session-progress-window",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () =>
+        queue.workflowRunAuthority("run-progress-window", "claim-progress-window"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId: "run-progress-window" },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("run-progress-window");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("run-progress-window");
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    expect({
+      error: runs.readRunState("run-progress-window")?.error ?? null,
+      updates: state.connection
+        .prepare(
+          "SELECT COUNT(*) AS value FROM workflow_updates u JOIN node_attempts a ON a.attempt_id = u.attempt_id WHERE a.run_id = ?",
+        )
+        .get("run-progress-window"),
+    }).toEqual({ error: null, updates: { value: updateCount } });
+    const run = views.session("session-progress-window", null).run;
+    if (run === null) throw new Error("session run missing");
+    // A run keeps up to 1,024 current updates, so the bounded widget set must
+    // hold the newest keys instead of the oldest ones.
+    const keys = run.progressUpdates.map((update) => update.key);
+    expect(keys).toHaveLength(16);
+    expect(keys[0]).toBe("key-04");
+    expect(keys.at(-1)).toBe("key-19");
+    expect(run.progressUpdates.at(-1)?.data).toMatchObject({
+      completed: updateCount - 1,
+      total: updateCount,
+    });
+    state.close();
+  }, 60_000);
+
+  it("bounds every free-form session field so one frame still fits", async () => {
+    const projectPath = await makeTempDir("bounded-fields-project");
+    const databasePath = path.join(await makeTempDir("bounded-fields-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // Values far larger than one client frame, from the workflow name and run
+    // title, a node output, and the failure the run reports.
+    const longText = "x".repeat(64 * 1024);
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: `bounded${longText}`,
+        title: longText,
+        startAt: "estimate",
+        nodes: {
+          estimate: compute({
+            run: () => ({ schema: "pi-workflows.test-output.v1", value: longText }),
+          }),
+          fail: compute({
+            run: () => {
+              throw new Error(longText);
+            },
+          }),
+        },
+        edges: [{ from: "estimate", to: "fail" }],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-bounded-fields";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:bounded-fields",
+      workflowSource: {
+        root: { kind: "builtin", id: "bounded-fields", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "bounded-fields",
+      claimToken: "claim-bounded-fields",
+      leaseMs: 60_000,
+      originSessionId: "session-bounded-fields",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-bounded-fields"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session("session-bounded-fields", null);
+    const run = view.run;
+    if (run === null) throw new Error("session run missing");
+    const complete = runs.readRunState(runId);
+    if (complete === null) throw new Error("run state missing");
+    // Every free-form field is bounded, and each bound keeps the beginning of
+    // the complete value the detailed view still carries.
+    expect(run.workflowName).toHaveLength(SESSION_TEXT_LIMIT);
+    expect(run.workflowName).toBe(workflow.name.slice(0, SESSION_TEXT_LIMIT));
+    expect(run.runTitle).toBe(longText.slice(0, SESSION_TEXT_LIMIT));
+    expect(run.error).not.toBeNull();
+    expect(run.error?.length).toBeLessThanOrEqual(SESSION_TEXT_LIMIT);
+    expect(complete.error?.startsWith(run.error ?? "")).toBe(true);
+    // A detail too large for the compact view is absent, never a cut value.
+    expect(run.monitorEstimate).toBeNull();
+    expect(complete.outputs.estimate).toMatchObject({ value: longText });
+    // The whole projection still travels in one client frame with room to spare.
+    const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
+    expect(encoded).toBeGreaterThan(0);
+    expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    state.close();
+  }, 60_000);
+
+  it("keeps one progress record per key however often one key publishes", async () => {
+    const projectPath = await makeTempDir("progress-keys-project");
+    const databasePath = path.join(await makeTempDir("progress-keys-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const hotCount = 20;
+    const otherKeys = ["a", "b", "c", "d", "e"];
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "progress-keys",
+        startAt: "work",
+        nodes: {
+          work: action({
+            effect: idempotentEffect("test.progress-keys"),
+            run: async ({ publishUpdate }) => {
+              for (const key of otherKeys) {
+                await publishUpdate({
+                  type: "progress",
+                  key,
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: 1,
+                    total: 2,
+                    unit: "items",
+                  },
+                });
+              }
+              for (let index = 0; index < hotCount; index += 1) {
+                await publishUpdate({
+                  type: "progress",
+                  key: "hot",
+                  data: {
+                    schema: "pi-workflows.progress.v1",
+                    status: "running",
+                    completed: index,
+                    total: hotCount,
+                    unit: "items",
+                  },
+                });
+              }
+              // A monitor schedules its next check once per cycle under one key.
+              for (const everyMinutes of [5, 60]) {
+                await publishUpdate({
+                  type: "monitor.schedule",
+                  key: "next-check",
+                  data: {
+                    schema: "pi-workflows.monitor-schedule.v1",
+                    lastCheckAt: "2026-01-01T00:00:00.000Z",
+                    nextCheckAt: `2026-01-01T0${everyMinutes === 5 ? 1 : 2}:00:00.000Z`,
+                    everyMinutes,
+                  },
+                });
+              }
+              return "done";
+            },
+          }),
+        },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-progress-keys";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:progress-keys",
+      workflowSource: {
+        root: { kind: "builtin", id: "progress-keys", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "progress-keys",
+      claimToken: "claim-progress-keys",
+      leaseMs: 60_000,
+      originSessionId: "session-progress-keys",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-progress-keys"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId },
+    );
+    // Keep the finished run visible to its origin session.
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session("session-progress-keys", null).run;
+    if (run === null) throw new Error("session run missing");
+    // A hot key cannot hide the other tracks: the projection carries the latest
+    // record of every key, so one key's many updates replace only its own.
+    expect(run.progressUpdates.map((update) => update.key)).toEqual([...otherKeys, "hot"]);
+    expect(run.progressUpdates.at(-1)?.data).toMatchObject({
+      completed: hotCount - 1,
+      total: hotCount,
+    });
+    // A later monitor cycle replaces its own next-check record, so the projection
+    // carries the newest schedule and never an earlier one.
+    expect(run.monitorSchedule?.nextCheckAt).toBe("2026-01-01T02:00:00.000Z");
+    state.close();
+  }, 60_000);
+
+  it("reads the newest progress keys when a run publishes many tracks", async () => {
+    const projectPath = await makeTempDir("many-tracks-project");
+    const databasePath = path.join(await makeTempDir("many-tracks-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // More tracks than one view page holds, so the head of the update set is far
+    // behind the newest keys.
+    const trackCount = 300;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "many-tracks",
+        startAt: "work",
+        nodes: { work: compute({ run: () => "done" }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-many-tracks";
+    const sessionId = "session-many-tracks";
+    const attemptId = "many-tracks-attempt";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:many-tracks",
+      workflowSource: {
+        root: { kind: "builtin", id: "many-tracks", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "many-tracks",
+      claimToken: "claim-many-tracks",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, created_at, updated_at) VALUES (?, ?, 'work', 1, 'compute', 'running', 1000, 1000, 1000)`,
+      )
+      .run(attemptId, runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-many-tracks"),
+    });
+    // The schedule arrives before every track, so a page of the update head would
+    // miss it as well.
+    runs.publishUpdateSynchronous(runId, "work", attemptId, {
+      type: "monitor.schedule",
+      key: "next-check",
+      data: {
+        schema: "pi-workflows.monitor-schedule.v1",
+        lastCheckAt: "2026-01-01T00:00:00.000Z",
+        nextCheckAt: "2026-01-01T01:00:00.000Z",
+        everyMinutes: 60,
+      },
+    });
+    for (let index = 0; index < trackCount; index += 1) {
+      runs.publishUpdateSynchronous(runId, "work", attemptId, {
+        type: "progress",
+        key: `track-${String(index).padStart(3, "0")}`,
+        data: {
+          schema: "pi-workflows.progress.v1",
+          status: "running",
+          completed: index,
+          total: trackCount,
+          unit: "items",
+        },
+      });
+    }
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    // The compact run carries the newest tracks, not the oldest page of them.
+    const newest = Array.from(
+      { length: 16 },
+      (_, index) => `track-${String(trackCount - 16 + index).padStart(3, "0")}`,
+    );
+    expect(run.progressUpdates.map((update) => update.key)).toEqual(newest);
+    // A schedule published before every track stays visible.
+    expect(run.monitorSchedule?.nextCheckAt).toBe("2026-01-01T01:00:00.000Z");
+    state.close();
+  }, 60_000);
+
+  it.each([
+    {
+      placement: "first",
+      expectStart: 1,
+      expectIds: ["node-000", "node-001", "node-002"],
+      expectLast: "node-002",
+    },
+    // A row in the middle stops the window before it, so the rows that arrived
+    // stay contiguous and the next cursor is exact.
+    { placement: "middle", expectStart: 0, expectIds: ["aaa"], expectLast: "zzz" },
+  ])(
+    "leaves out a node row that cannot fit the frame by itself: $placement",
+    async ({ placement, expectStart, expectIds, expectLast }) => {
+      const projectPath = await makeTempDir(`node-huge-project-${placement}`);
+      const databasePath = path.join(
+        await makeTempDir(`node-huge-state-${placement}`),
+        "state.sqlite",
+      );
+      const state = new StateDatabase({ filePath: databasePath });
+      const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+      const serverState = new ServerStateStore(databasePath, { state });
+      // A valid node id has no length limit.
+      const hugeId = `m${"x".repeat(200 * 1024)}`;
+      const nodeIds =
+        placement === "first"
+          ? [hugeId, "node-000", "node-001", "node-002"]
+          : ["aaa", hugeId, "zzz"];
+      const startAt = placement === "first" ? hugeId : "aaa";
+      const workflow = compileWorkflowDefinition(
+        defineWorkflow({
+          name: "node-huge-row",
+          startAt,
+          nodes: Object.fromEntries(
+            nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+          ),
+          edges: nodeIds.slice(1).map((nodeId, index) => ({
+            from: nodeIds[index] ?? startAt,
+            to: nodeId,
+          })),
+        }),
+      );
+      const snapshot = createDefinitionSnapshot(workflow);
+      const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+      const runId = `run-node-huge-row-${placement}`;
+      const sessionId = `session-node-huge-row-${placement}`;
+      claimTestRun(queue, {
+        runId,
+        workflowName: workflow.name,
+        workflowSourceRef: "builtin:node-huge-row",
+        workflowSource: {
+          root: { kind: "builtin", id: "node-huge-row", revision: "test" },
+          mounted: [],
+        },
+        definitionDigest,
+        definitionSnapshot: snapshot,
+        input: {},
+        runnerId: "node-huge-row",
+        claimToken: `claim-node-huge-row-${placement}`,
+        leaseMs: 60_000,
+        originSessionId: sessionId,
+      });
+      const runs = new WorkflowRunStore(databasePath, {
+        state,
+        authorityProvider: () =>
+          queue.workflowRunAuthority(runId, `claim-node-huge-row-${placement}`),
+      });
+      // The run is claimed but never started, so the default window follows the
+      // last row with a lead, which keeps the huge row inside the window.
+      const views = new ServerViewStore(
+        state,
+        queue,
+        serverState,
+        runs,
+        () => false,
+        () => false,
+      );
+      const view = views.session(sessionId, null);
+      const run = view.run;
+      if (run === null) throw new Error("session run missing");
+      expect(run.nodeTotal).toBe(nodeIds.length);
+      // The window starts after a row it cannot carry, or stops before it.
+      expect(run.nodeStart).toBe(expectStart);
+      expect(run.nodes.map((row) => row.nodeId)).toEqual(expectIds);
+      expect(Buffer.byteLength(canonicalJson(run.nodes), "utf8")).toBeLessThan(64 * 1024);
+      const encoded = Buffer.byteLength(canonicalJson(view), "utf8");
+      expect(encoded).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+      // A later window skips the row it cannot carry and reaches the rest.
+      const next = views.session(sessionId, null, expectStart + expectIds.length).run;
+      expect(next?.nodes.some((row) => row.nodeId === hugeId)).toBe(false);
+      expect(next?.nodes.at(-1)?.nodeId).toBe(expectLast);
+      state.close();
+    },
+    60_000,
+  );
+
+  it("leaves out a node identity that cannot fit the frame", async () => {
+    const projectPath = await makeTempDir("node-huge-scalar-project");
+    const databasePath = path.join(await makeTempDir("node-huge-scalar-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A valid node id has no length limit, so it can exceed one frame on its own.
+    // The window leaves such a row out, and the run facts leave the identity out
+    // for the same reason, so no unbounded scalar reaches the client.
+    const hugeId = `m${"x".repeat(200 * 1024)}`;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "node-huge-scalar",
+        startAt: hugeId,
+        nodes: { [hugeId]: compute({ run: () => 0 }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-node-huge-scalar";
+    const sessionId = "session-node-huge-scalar";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:node-huge-scalar",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-huge-scalar", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-huge-scalar",
+      claimToken: "claim-node-huge-scalar",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-node-huge-scalar"),
+    });
+    // A pending attempt makes the run report the node as the one it works on.
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts
+           (attempt_id, run_id, node_id, attempt_number, node_type, status, started_at, created_at, updated_at)
+         VALUES (?, ?, ?, 1, 'compute', 'pending', NULL, 1000, 1000)`,
+      )
+      .run(`attempt-${runId}`, runId, hugeId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session(sessionId, null);
+    const run = view.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.currentNode).toBeNull();
+    expect(run.waitingOn).toBeNull();
+    // The complete row count stays correct, and the identity is reachable in the
+    // detailed run view.
+    expect(run.nodeTotal).toBe(1);
+    expect(run.nodes).toEqual([]);
+    expect(Buffer.byteLength(canonicalJson(view), "utf8")).toBeLessThan(
+      MAX_PROTOCOL_MESSAGE_BYTES / 4,
+    );
+    state.close();
+  });
+
+  it("cuts bounded session text at a complete character", async () => {
+    const projectPath = await makeTempDir("session-text-project");
+    const databasePath = path.join(await makeTempDir("session-text-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A workflow name has no length limit, and the cut falls inside the last
+    // character, so the bound must not leave a replacement character behind.
+    const workflowName = `${"x".repeat(4 * 1024 - 1)}\u{1f642}more`;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: workflowName,
+        startAt: "only",
+        nodes: { only: compute({ run: () => 0 }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-session-text";
+    const sessionId = "session-session-text";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:session-text",
+      workflowSource: {
+        root: { kind: "builtin", id: "session-text", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-text",
+      claimToken: "claim-session-text",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-session-text"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.workflowName).toBe("x".repeat(4 * 1024 - 1));
+    expect(run.workflowName).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(run.workflowName, "utf8")).toBeLessThanOrEqual(4 * 1024);
+    state.close();
+  });
+
+  it("reports a node whose leftover unfinished attempt was superseded", async () => {
+    const projectPath = await makeTempDir("superseded-project");
+    const databasePath = path.join(await makeTempDir("superseded-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-superseded-attempt";
+    const sessionId = "session-superseded-attempt";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "superseded" },
+      runnerId: "superseded",
+      claimToken: "claim-superseded",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    // A crash can leave an unfinished attempt row behind while a later attempt of
+    // the same node succeeds. The node then reports its newest attempt.
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, finished_at, created_at, updated_at) VALUES
+         ('superseded-stale', ?, 'reply', 1, 'agent', 'running', 1000, NULL, 1000, 1000),
+         ('superseded-done', ?, 'reply', 2, 'agent', 'completed', 2000, 2100, 2000, 2100)`,
+      )
+      .run(runId, runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-superseded"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    const reply = run.nodes.find((row) => row.nodeId === "reply");
+    expect(reply?.attempts).toBe(2);
+    expect(reply?.state).toBe("ok");
+    expect(reply?.startedAt).toBeNull();
+    state.close();
+  }, 60_000);
+
+  it("keeps a cancelled step current until Pi confirms its delivery", async () => {
+    const projectPath = await makeTempDir("cancelled-delivery-project");
+    const databasePath = path.join(await makeTempDir("cancelled-delivery-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-cancelled-delivery";
+    const sessionId = "session-cancelled-delivery";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "cancelled" },
+      runnerId: "cancelled-delivery",
+      claimToken: "claim-cancelled-delivery",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-cancelled-delivery"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "cancelled" } }),
+    }).run(workflow, { task: "cancelled" }, { runId });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const requestId = "cancelled-delivery-source";
+    serverState.createInteractiveRequest({
+      requestId,
+      runId,
+      attemptId,
+      targetSessionId: sessionId,
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId,
+          runId,
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    const pending = serverState.workflowMessages.latestForSource("step", requestId);
+    if (pending === undefined) throw new Error("step message missing");
+    // Pi delivered the message, which the branch report records without a turn.
+    serverState.workflowMessages.adoptBranch(
+      sessionId,
+      [{ workflowMessageId: pending.workflowMessageId, piSessionEntryId: "entry-cancelled" }],
+      new Set([pending.workflowMessageId]),
+    );
+    // The run is cancelled while Pi has not reported the turn yet.
+    state.connection
+      .prepare(
+        "UPDATE interactive_requests SET status = 'cancelled', revision = revision + 1 WHERE request_id = ?",
+      )
+      .run(requestId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    // The cancelled step stays current, because the extension must still learn
+    // that its delivered turn is cancelled and stop it.
+    const cancelled = views.session(sessionId, null).workflowMessage;
+    expect(cancelled?.workflowMessageId).toBe(pending.workflowMessageId);
+    expect(cancelled?.deliveryCancelled).toBe(true);
+    // Once Pi reports the turn, the delivery is reconciled.
+    const turn = serverState.workflowMessages.startTurn({
+      workflowMessageId: pending.workflowMessageId,
+      runId,
+      targetSessionId: sessionId,
+    });
+    expect(views.session(sessionId, null).workflowMessage?.workflowMessageId).toBe(
+      pending.workflowMessageId,
+    );
+    serverState.workflowMessages.endTurn({
+      workflowMessageId: pending.workflowMessageId,
+      workflowTurnId: turn.workflowTurnId,
+      runId,
+      targetSessionId: sessionId,
+      stopReason: "completed",
+      responseSessionEntryId: "entry-cancelled-reply",
+    });
+    expect(views.session(sessionId, null).workflowMessage).toBeNull();
+    state.close();
+  }, 60_000);
+
+  it("drops a cancelled step that Pi never received", async () => {
+    const fixture = await pendingStepFixture("cancelled-unreceived");
+    // The run is cancelled before Pi has the step message on its branch.
+    fixture.state.connection
+      .prepare(
+        "UPDATE interactive_requests SET status = 'cancelled', revision = revision + 1 WHERE request_id = ?",
+      )
+      .run(fixture.requestId);
+    // A message Pi never received cannot need stopping, and it must not become
+    // deliverable again, so it stays out of the current message.
+    expect(fixture.pending.status).toBe("pending");
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage).toBeNull();
+    fixture.state.close();
+  }, 60_000);
+
+  it("re-reads the session view when only the selected message changes", async () => {
+    const fixture = await pendingStepFixture("selected-message-cache");
+    // This session holds no live or retained run, so the run is not part of the
+    // cache key and the selected message alone must invalidate the view.
+    fixture.state.connection
+      .prepare("UPDATE run_queue SET status = 'cancelled' WHERE run_id = ?")
+      .run(fixture.runId);
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage?.status).toBe("pending");
+    // The status changes in the same millisecond, so the aggregate facts of the
+    // session stay equal while the selected message changes.
+    fixture.state.connection
+      .prepare("UPDATE workflow_messages SET status = 'cancelled' WHERE workflow_message_id = ?")
+      .run(fixture.pending.workflowMessageId);
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage).toBeNull();
+    fixture.state.close();
+  }, 60_000);
+
+  it("carries the action subtype and the current node for a pending attempt", async () => {
+    const projectPath = await makeTempDir("action-subtype-project");
+    const databasePath = path.join(await makeTempDir("action-subtype-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = defineWorkflow({
+      name: "actions",
+      startAt: "build",
+      edges: [],
+      nodes: {
+        build: action({
+          effect: idempotentEffect("test.action-subtype"),
+          exec: () => ({ command: "true" }),
+        }),
+        check: action({
+          effect: idempotentEffect("test.action-subtype-function"),
+          run: () => ({ ok: true }),
+        }),
+      },
+    });
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-action-subtype";
+    const sessionId = "session-action-subtype";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:actions",
+      workflowSource: {
+        root: { kind: "builtin", id: "actions", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "action-subtype",
+      claimToken: "claim-action-subtype",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    // The runner handoff: the run is running while its attempt is still pending.
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, created_at, updated_at) VALUES (?, ?, 'build', 1, 'action', 'pending', NULL, 1000, 1000)`,
+      )
+      .run("action-subtype-attempt", runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-action-subtype"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    // The compact row keeps the subtype, because the widget renders a shell with
+    // its own glyph, and the run fact names the node that a pending attempt owns.
+    expect(run?.currentNode).toBe("build");
+    const rows = new Map((run?.nodes ?? []).map((row) => [row.nodeId, row]));
+    expect(rows.get("build")).toMatchObject({ actionExecution: "shell", state: "pending" });
+    expect(rows.get("check")?.actionExecution).toBe("function");
+    state.close();
+  }, 60_000);
 
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
-    const projectPath = await makeTempDir("host-view-project");
-    const databasePath = path.join(await makeTempDir("host-view-state"), "state.sqlite");
+    const projectPath = await makeTempDir("server-view-project");
+    const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
@@ -701,7 +2203,7 @@ describe("host workflow display reducer", () => {
       definitionDigest,
       definitionSnapshot: snapshot,
       input: {},
-      runnerId: "host-view",
+      runnerId: "server-view",
       claimToken: "claim-view",
       leaseMs: 60_000,
       originSessionId: "session-view",

@@ -450,6 +450,7 @@ export type WorkflowRunViewCounts = {
   settings: number;
   followUps: number;
   updates: number;
+  workflowMessages: number;
 };
 
 export type WorkflowRunViewRange = {
@@ -921,7 +922,7 @@ export class WorkflowRunStore {
         }
         const definitionHash = this.state.putJson(snapshot, now);
         if (state.parentRunId !== undefined) {
-          throw new Error("A restart must have an explicit host reservation");
+          throw new Error("A restart must have an explicit workflow server reservation");
         }
         this.state.connection
           .prepare(
@@ -2415,6 +2416,7 @@ export class WorkflowRunStore {
          )`,
         runId,
       ),
+      workflowMessages: this.workflowMessages.countForRun(runId),
     };
   }
 
@@ -3144,7 +3146,7 @@ export class WorkflowRunStore {
   ): void {
     if (actor.type === "human") return;
     if (
-      (actor.type === "session" || actor.type === "controller") &&
+      (actor.type === "session" || actor.type === "resource_manager") &&
       row.actorType === actor.type &&
       row.actorId === (actor.id ?? null) &&
       row.sourceType === source
@@ -3888,6 +3890,50 @@ export class WorkflowRunStore {
     return updates === undefined ? {} : { updates };
   }
 
+  /**
+   * The newest current update rows of one kind, in run revision order. A run can
+   * publish many update keys, so a caller that needs the newest keys reads a
+   * bounded tail of that kind instead of the head of the complete set.
+   */
+  readCurrentUpdateTail(
+    runId: string,
+    options: { type: string; key?: string; limit: number },
+  ): WorkflowUpdateRecord[] {
+    if (options.limit <= 0) return [];
+    const keyClause = options.key === undefined ? "" : " AND u.update_key = ?";
+    const params = [runId, options.type, ...(options.key === undefined ? [] : [options.key])];
+    const rows = this.state.connection
+      .prepare(
+        `WITH ranked AS (
+           SELECT u.update_id AS updateId, u.run_revision AS runRevision,
+                  a.node_id AS nodeId, u.attempt_id AS attemptId,
+                  u.update_type AS updateType, u.update_key AS updateKey,
+                  u.data_hash AS dataHash, u.recorded_at AS recordedAt,
+                  row_number() OVER (
+                    PARTITION BY u.update_type, u.update_key ORDER BY u.run_revision DESC
+                  ) AS rank
+           FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ? AND u.update_type = ?${keyClause}
+         )
+         SELECT updateId, runRevision, nodeId, attemptId, updateType, updateKey, dataHash, recordedAt
+         FROM ranked WHERE rank = 1 ORDER BY runRevision DESC LIMIT ?`,
+      )
+      .all(...params, options.limit)
+      .filter(isUpdateRow);
+    return rows.reverse().map((row) => ({
+      updateId: row.updateId,
+      seq: row.runRevision,
+      at: new Date(row.recordedAt).toISOString(),
+      runId,
+      nodeId: row.nodeId,
+      attemptId: row.attemptId,
+      type: row.updateType,
+      key: row.updateKey,
+      data: this.readJsonAs<Record<string, unknown>>(row.dataHash),
+    }));
+  }
+
   private readCurrentUpdates(runId: string, range?: WorkflowRunViewRange): WorkflowUpdateRecord[] {
     const rangeClause = range === undefined ? "" : " LIMIT ? OFFSET ?";
     const params = range === undefined ? [runId] : [runId, range.limit, range.start];
@@ -4119,7 +4165,7 @@ export class WorkflowRunStore {
         lastEventSeq: segment.eventCount,
         failure: {
           failedAt: new Date().toISOString(),
-          code: "host_interrupted",
+          code: "server_interrupted",
           message: reason,
         },
       };
@@ -4664,8 +4710,8 @@ function assertSourceType(source: string): void {
 function assertActorType(value: string): ActorType {
   if (
     value !== "session" &&
-    value !== "host" &&
-    value !== "controller" &&
+    value !== "server" &&
+    value !== "resource_manager" &&
     value !== "channel" &&
     value !== "human" &&
     value !== "policy" &&

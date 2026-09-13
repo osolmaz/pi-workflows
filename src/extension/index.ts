@@ -8,10 +8,11 @@ import type { ClientResponse } from "../client/protocol.js";
 import type {
   ClientInteractiveRequest,
   WorkflowRunQueueView,
+  WorkflowSessionMessage,
   WorkflowSessionView,
 } from "../client/view.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import type { WorkflowMessage } from "../state/workflow-messages.js";
+import type { WorkflowMessageContent } from "../state/workflow-messages.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId } from "../workflows/store.js";
@@ -55,11 +56,22 @@ export {
 export { renderDecisionText, renderTelegramParts } from "../channels/telegram.js";
 
 const INTERACTION_POLL_MS = 1_000;
+/** Retry schedule for one session subscription whose view failed to build. */
+const SESSION_PROJECTION_BASE_RETRY_MS = 1_000;
+const SESSION_PROJECTION_MAX_RETRY_MS = 30_000;
 // Keep one model-facing tool result comfortably below Pi provider message limits.
 // The offset keeps every discovered workflow available across pages.
 const MAX_WORKFLOW_LIST_ITEMS = 50;
 const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const sessionSnapshots = new Map<string, WorkflowSessionView>();
+/** Sessions whose last view is display-only until a fresh snapshot arrives. */
+const staleSessionIds = new Set<string>();
+/** Whether the widget holds a node window the user scrolled to. */
+let sessionPagedWindow = false;
+/** The node window the user scrolled to, so a re-armed subscription keeps it. */
+let sessionNodeCursor: number | null = null;
+/** Run the current node window belongs to, so a new run follows its focus again. */
+let sessionWindowRunId: string | null = null;
 // Shortcut configuration problems wait for the first session so the user sees them once.
 let pendingShortcutNotices: string[] = [];
 
@@ -173,6 +185,12 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
   let sessionConnectTask: Promise<void> | null = null;
+  // A connection loss keeps the last view for display but removes authority.
+  let sessionConnectionId: string | null = null;
+  // A failed session projection retries with its own capped backoff, so one
+  // broken view cannot become a fast retry loop.
+  let sessionSubscriptionFailures = 0;
+  let sessionSubscriptionRetryAt = 0;
   let serverUnavailableNotified = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
@@ -188,7 +206,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let activeRecorderMessageId: string | null = null;
 
   const ensureRecorder = async (
-    message: WorkflowMessage,
+    message: WorkflowSessionMessage,
     ctx: ExtensionContext,
   ): Promise<SessionRecorder> => {
     let recorder = sessionRecorders.get(message.runId);
@@ -209,7 +227,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     if (!agentRunning) return;
     const message = workflowMessages.activeTurnMessage();
     if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
-    const contract = agentContractForWorkflowMessage(message);
+    const contract = agentContractForWorkflowMessage(
+      message,
+      workflowMessages.verifiedContent(message),
+    );
     if (contract === undefined && message.kind !== "followUp" && message.kind !== "terminal") {
       return;
     }
@@ -240,7 +261,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
-      const finishRecording = async (message: WorkflowMessage): Promise<void> => {
+      const finishRecording = async (message: WorkflowSessionMessage): Promise<void> => {
         const recorder = sessionRecorders.get(message.runId);
         if (recorder === undefined) return;
         await recorder.record(ctx).catch((error) => {
@@ -256,7 +277,13 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       await workflowMessages.synchronize(pi, client, ctx, {
         beforeTurnEnd: async (message, end) => {
           if (end.stopReason === "completed") {
-            await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
+            await submitVisibleAssistantResponse(
+              client,
+              ctx,
+              message,
+              workflowMessages.verifiedContent(message),
+              end.responseSessionEntryId,
+            );
           }
           if (message.kind === "followUp" || message.kind === "terminal")
             await finishRecording(message);
@@ -275,7 +302,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     requestedPlacement?: ViewerPlacement,
   ): Promise<void> => {
     const run = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.run;
-    if (run === null || run === undefined || !isRecord(run.state)) {
+    if (run === null || run === undefined) {
       ctx.ui.notify("No active workflow is available for piw.", "warning");
       return;
     }
@@ -290,8 +317,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         | ViewerPlacement
         | undefined);
     if (placement === undefined) return;
-    const workflowName =
-      typeof run.state.workflowName === "string" ? run.state.workflowName : run.runId;
+    const workflowName = run.workflowName.length > 0 ? run.workflowName : run.runId;
     const opened = await herdrViewer.open(
       { runId: run.runId, workflowName },
       placement as ViewerPlacement,
@@ -323,7 +349,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.registerCommand("workflow", {
     description:
-      "Start or control a hosted workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, clear, restart, answer, change-settings, queue-follow-up, remove-follow-up",
+      "Start or control a workflow server run: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, clear, restart, answer, change-settings, queue-follow-up, remove-follow-up",
     getArgumentCompletions: async (prefix: string) => {
       const workflows = await listWorkflowMetadata(process.cwd());
       const items = [
@@ -483,7 +509,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("resource-manager", {
-    description: "Manage hosted managed resources: list, get, apply, reconcile, or delete",
+    description: "Manage managed resources: list, get, apply, reconcile, or delete",
     getArgumentCompletions: (prefix: string) => {
       const items = ["list", "get", "apply", "reconcile", "delete"]
         .filter((value) => value.startsWith(prefix))
@@ -508,7 +534,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     name: "workflow",
     label: "Workflow",
     description: [
-      "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete hosted workflow runs.",
+      "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete workflow runs.",
       "A pending step starts a new model turn after your current turn ends. After you start a run, end your turn so the step can be delivered. Do not sleep, poll, or wait for a step inside your turn.",
       "Protected human decisions cannot be answered with this model-facing tool.",
       "When the user asks to continue or resume the active workflow, call workflow resume immediately.",
@@ -616,16 +642,36 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
     serverUnavailableNotified = false;
+    // A new session starts with a fresh projection retry budget, so backoff from
+    // a previous session cannot delay this one, and its widget starts at the
+    // default window instead of the window the last session scrolled to.
+    sessionSubscriptionFailures = 0;
+    sessionSubscriptionRetryAt = 0;
+    sessionNodeCursor = null;
     for (const notice of pendingShortcutNotices.splice(0)) ctx.ui.notify(notice, "warning");
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     const sessionClient = client;
+    sessionView.setNodePager(async (cursor) => {
+      if (generation !== sessionGeneration || staleSessionIds.has(sessionId)) {
+        // A stale view has no authority, so the window stays where it is and the
+        // request stays retryable.
+        throw new Error("Workflow session view is stale");
+      }
+      const moved = await sessionClient.setSessionNodeWindow(sessionId, cursor);
+      if (!moved) throw new Error("Workflow session subscription is not active");
+      // A re-armed subscription must keep the window the user scrolled to, and the
+      // server subscription that holds it is dropped when the connection is lost.
+      sessionNodeCursor = cursor;
+      sessionPagedWindow = true;
+    });
 
     const connectSession = (): void => {
       if (
         generation !== sessionGeneration ||
         sessionContext !== ctx ||
-        sessionUnsubscribe !== null ||
+        Date.now() < sessionSubscriptionRetryAt ||
+        (sessionUnsubscribe !== null && sessionConnectionId === sessionClient.connectionId) ||
         sessionConnectTask !== null
       ) {
         return;
@@ -633,26 +679,62 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       const task = (async () => {
         try {
           await sessionClient.ensureAvailable();
+          // The server publishes the first snapshot while this call is still in
+          // flight, so a failed subscription can arrive before it returns. Keep
+          // that fact, because a later unsubscribe callback is then worthless.
+          let subscriptionDropped = false;
           const unsubscribe = await sessionClient.watchSession(
             sessionId,
             (event) => {
               if (generation !== sessionGeneration || sessionContext !== ctx) return;
               if (event.event === "unavailable") {
-                sessionSnapshots.delete(sessionId);
-                sessionView.clear(ctx);
+                subscriptionDropped = true;
+                staleSessionIds.add(sessionId);
+                // A snapshot the server no longer confirms must not start a Pi
+                // turn or answer a request. A fresh snapshot clears the fence.
+                workflowMessages.fence();
+                const failure = subscriptionFailure(event.payload);
+                sessionView.markStale(failure.message, ctx);
+                if (failure.reasonCode === "projection_failed") {
+                  sessionSubscriptionFailures += 1;
+                  sessionSubscriptionRetryAt =
+                    Date.now() +
+                    Math.min(
+                      SESSION_PROJECTION_MAX_RETRY_MS,
+                      SESSION_PROJECTION_BASE_RETRY_MS * 2 ** (sessionSubscriptionFailures - 1),
+                    );
+                } else {
+                  sessionSubscriptionFailures = 0;
+                  sessionSubscriptionRetryAt = 0;
+                }
+                // A non-null callback is no proof of health after a connection
+                // loss: drop it so the next poll re-arms the subscription.
+                const unsubscribe = sessionUnsubscribe;
+                sessionUnsubscribe = null;
+                sessionConnectionId = null;
+                if (unsubscribe !== null) void unsubscribe().catch(() => undefined);
                 return;
               }
               if (!isWorkflowSessionView(event.payload)) return;
               const session = event.payload;
+              staleSessionIds.delete(sessionId);
+              sessionSubscriptionFailures = 0;
+              sessionSubscriptionRetryAt = 0;
               sessionSnapshots.set(sessionId, session);
+              // A paged node window belongs to one run. A different run follows
+              // the node the widget shows as working again.
+              const runId = session.run?.runId ?? null;
+              if (sessionPagedWindow && runId !== sessionWindowRunId) {
+                sessionPagedWindow = false;
+                sessionNodeCursor = null;
+                void sessionClient.setSessionNodeWindow(sessionId, null).catch(() => undefined);
+              }
+              sessionWindowRunId = runId;
               workflowMessages.updateView(session);
               sessionView.update(session, ctx);
-              const ownedMessageId = session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
-              const ownedMessage = session.workflowMessages.find(
-                (message) => message.workflowMessageId === ownedMessageId,
-              );
+              const ownedMessage = session.workflowMessage;
               const prepare =
-                ownedMessage !== undefined &&
+                ownedMessage !== null &&
                 (ownedMessage.kind === "step" ||
                   ownedMessage.kind === "terminal" ||
                   ownedMessage.kind === "followUp")
@@ -660,13 +742,19 @@ export default function piWorkflows(pi: ExtensionAPI): void {
                   : Promise.resolve();
               void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
             },
-            { coordinator: true },
+            {
+              coordinator: true,
+              // Re-arm the window the user scrolled to. The server subscription
+              // that held it is gone, so the extension keeps the cursor.
+              ...(sessionNodeCursor === null ? {} : { nodeCursor: sessionNodeCursor }),
+            },
           );
-          if (generation !== sessionGeneration || sessionContext !== ctx) {
-            await unsubscribe();
+          if (generation !== sessionGeneration || sessionContext !== ctx || subscriptionDropped) {
+            await unsubscribe().catch(() => undefined);
             return;
           }
           sessionUnsubscribe = unsubscribe;
+          sessionConnectionId = sessionClient.connectionId ?? null;
           serverUnavailableNotified = false;
           const capability = await herdrViewer.probe();
           if (generation !== sessionGeneration || sessionContext !== ctx) return;
@@ -776,11 +864,15 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     workflowMessages.clear();
     sessionView.clear(ctx);
     sessionSnapshots.delete(ctx.sessionManager.getSessionId());
+    staleSessionIds.delete(ctx.sessionManager.getSessionId());
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
     if (sessionUnsubscribe !== null) await sessionUnsubscribe().catch(() => undefined);
     sessionUnsubscribe = null;
+    sessionConnectionId = null;
     sessionConnectTask = null;
+    sessionSubscriptionFailures = 0;
+    sessionSubscriptionRetryAt = 0;
     serverUnavailableNotified = false;
     await client.close();
     client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
@@ -872,7 +964,7 @@ async function executeCommand(
         },
       });
       return {
-        message: `Created hosted workflow ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract. The first step arrives as a new model turn. End this turn now so it can be delivered, and do not wait for it inside this turn.`,
+        message: `Created workflow run ${resolved.workflowName} as ${runId}. This confirms the run, not worktree creation or implementation. Complete the next delivered step using its exact contract. The first step arrives as a new model turn. End this turn now so it can be delivered, and do not wait for it inside this turn.`,
         details: { action: "start", runId, response: response.receipt ?? null },
       };
     }
@@ -1043,12 +1135,20 @@ async function executeCommand(
           details: { action: "answer", response: response.receipt ?? null },
         };
       }
-      const interaction = sessionSnapshots
-        .get(ctx.sessionManager.getSessionId())
-        ?.pendingInteractions.map(parseInteractiveRequest)
-        .find((request) => request?.requestId === command.requestId);
+      const pending = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.interaction;
+      const interaction =
+        pending === null || pending === undefined ? undefined : parseInteractiveRequest(pending);
+      // The session view carries the one request Pi must answer, because the whole
+      // view travels as one client frame. The extension answers that request only:
+      // it needs the request's run and revision to answer a decision safely, and it
+      // must not guess the kind of a request it cannot see. A later pending request
+      // becomes current as soon as this one is answered.
       if (interaction === undefined)
-        throw new Error("No matching checkpoint request is waiting in this session");
+        throw new Error("No checkpoint request is waiting in this session");
+      if (interaction.requestId !== command.requestId)
+        throw new Error(
+          `The session view carries one pending request at a time. Answer ${interaction.requestId} first, then ${command.requestId} becomes current.`,
+        );
       if (interaction.kind === "decision") {
         const response = await requestAccepted(client, {
           operation: "decision.answer",
@@ -1168,10 +1268,11 @@ async function executeResourceManagerCommand(
 async function submitVisibleAssistantResponse(
   client: WorkflowClient,
   ctx: ExtensionContext,
-  message: WorkflowMessage,
+  message: WorkflowSessionMessage,
+  content: WorkflowMessageContent | undefined,
   settledResponseEntryId: string | null,
 ): Promise<void> {
-  const contract = agentContractForWorkflowMessage(message);
+  const contract = agentContractForWorkflowMessage(message, content);
   if (contract?.completion !== "assistant" || workflowRunPaused(message.runId)) return;
   if (settledResponseEntryId === null) return;
   const branch = ctx.sessionManager.getBranch();
@@ -1216,6 +1317,7 @@ function sessionCommandPayload(ctx: ExtensionContext): {
   const session = sessionSnapshots.get(targetSessionId);
   if (
     session === undefined ||
+    staleSessionIds.has(targetSessionId) ||
     !session.coordinatorActive ||
     session.coordinatorEpoch === null ||
     session.branchReportRequired
@@ -1226,7 +1328,9 @@ function sessionCommandPayload(ctx: ExtensionContext): {
 }
 
 function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueView | undefined {
-  const session = sessionSnapshots.get(ctx.sessionManager.getSessionId());
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (staleSessionIds.has(sessionId)) return undefined;
+  const session = sessionSnapshots.get(sessionId);
   if (session?.run === null || session?.run === undefined || !isRecord(session.run.queue)) {
     return undefined;
   }
@@ -1335,9 +1439,13 @@ async function requestAccepted(
   return response;
 }
 
-function agentContractForWorkflowMessage(message: WorkflowMessage): AgentStepContract | undefined {
-  if (message.kind !== "step" || !isRecord(message.content.details)) return undefined;
-  const value = message.content.details.contract;
+function agentContractForWorkflowMessage(
+  message: WorkflowSessionMessage,
+  content: WorkflowMessageContent | undefined,
+): AgentStepContract | undefined {
+  if (message.kind !== "step" || content === undefined) return undefined;
+  if (!isRecord(content.details)) return undefined;
+  const value = content.details.contract;
   if (
     !isRecord(value) ||
     value.requestId !== message.sourceId ||
@@ -1432,19 +1540,38 @@ function validRunId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value);
 }
 
+/** Bounded reason code and safe text for one failed subscription. */
+function subscriptionFailure(payload: unknown): { reasonCode: string | null; message: string } {
+  if (!isRecord(payload))
+    return { reasonCode: null, message: "Workflow server connection is unavailable." };
+  const reasonCode = payload.reasonCode;
+  const message = typeof payload.message === "string" ? payload.message : undefined;
+  const reason =
+    reasonCode === "connection_lost"
+      ? "Connection lost"
+      : reasonCode === "reconnect_exhausted"
+        ? "Reconnect attempts exhausted"
+        : reasonCode === "projection_failed"
+          ? "Workflow server could not build this session view"
+          : "Workflow server connection is unavailable";
+  return {
+    reasonCode: typeof reasonCode === "string" ? reasonCode : null,
+    message: message === undefined ? `${reason}.` : `${reason}: ${message.slice(0, 300)}`,
+  };
+}
+
 function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {
   return (
     isRecord(value) &&
     value.schema === "pi-workflows.session-view.v1" &&
     typeof value.sessionId === "string" &&
-    Array.isArray(value.pendingInteractions) &&
-    Array.isArray(value.workflowMessages) &&
-    Array.isArray(value.cancelledWorkflowMessageIds) &&
-    value.cancelledWorkflowMessageIds.every((id) => typeof id === "string") &&
-    typeof value.coordinatorEpoch === "string" &&
+    (value.interaction === null || isRecord(value.interaction)) &&
+    (value.workflowMessage === null || isRecord(value.workflowMessage)) &&
+    (value.openWorkflowTurn === null || isRecord(value.openWorkflowTurn)) &&
+    (value.run === null || isRecord(value.run)) &&
+    (value.coordinatorEpoch === null || typeof value.coordinatorEpoch === "string") &&
     typeof value.coordinatorActive === "boolean" &&
-    typeof value.branchReportRequired === "boolean" &&
-    (value.run === null || isRecord(value.run))
+    typeof value.branchReportRequired === "boolean"
   );
 }
 

@@ -1,10 +1,21 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
+import {
+  CLIENT_PROTOCOL_SCHEMA,
+  NdjsonFrameDecoder,
+  clientSocketPath,
+  encodeProtocolLine,
+  parseClientMessage,
+} from "../src/client/protocol.js";
 import type { ClientEvent } from "../src/client/protocol.js";
 import type { WorkflowDisplayStatus, WorkflowSessionView } from "../src/client/view.js";
 import piWorkflows from "../src/extension/index.js";
+import { SessionWorkflowView } from "../src/extension/session-view.js";
+import { WorkflowMessageCoordinator } from "../src/extension/workflow-message-coordinator.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
@@ -20,7 +31,7 @@ afterEach(async () => {
     try {
       await client.request({ operation: "server.stop" });
     } catch {
-      // The test did not start a host or already stopped it.
+      // The test did not start a workflow server or already stopped it.
     }
   }
   testHome = undefined;
@@ -161,10 +172,10 @@ function makePi(options: {
 }
 
 async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
-  testHome = await makeTempDir("pi-workflows-hosted-extension-home");
+  testHome = await makeTempDir("pw-ext-home");
   vi.stubEnv("HOME", testHome);
   vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", shortcutsConfigDir());
-  const cwd = await makeTempDir("pi-workflows-hosted-extension-project");
+  const cwd = await makeTempDir("pw-ext-project");
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
     workflowPath,
@@ -172,7 +183,7 @@ async function setupProject(): Promise<{ cwd: string; workflowPath: string }> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-interactive",
+  name: "server-interactive",
   startAt: "ask",
   nodes: {
     ask: agent({ prompt: () => "Return a result." }),
@@ -231,7 +242,41 @@ async function writeTallWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-tall",
+  name: "server-tall",
+  startAt: "ask",
+  nodes: {
+    ask: agent({ prompt: () => "Return a result." }),
+${nodeLines}
+  },
+  edges: [
+${edgeLines}
+  ],
+});\n`,
+  );
+  return workflowPath;
+}
+
+/** A topology far wider than one widget node window. */
+async function writeWideWorkflow(cwd: string, nodeCount: number): Promise<string> {
+  const workflowPath = path.join(cwd, "wide.workflow.ts");
+  const names = Array.from(
+    { length: nodeCount },
+    (_, index) => `n${String(index).padStart(3, "0")}`,
+  );
+  const nodeLines = names
+    .map((name, index) => `    ${name}: compute({ run: () => ${index} }),`)
+    .join("\n");
+  const edgeLines = [
+    `    { from: "ask", to: "${names[0]}" },`,
+    ...names.slice(1).map((name, index) => `    { from: "${names[index]}", to: "${name}" },`),
+  ].join("\n");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "server-wide",
   startAt: "ask",
   nodes: {
     ask: agent({ prompt: () => "Return a result." }),
@@ -253,7 +298,7 @@ async function writeValidatedWorkflow(cwd: string): Promise<string> {
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-validated",
+  name: "server-validated",
   startAt: "ask",
   nodes: {
     ask: agent({
@@ -313,7 +358,7 @@ const gate = humanDecision({
 } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
 ${gate}
 export default defineWorkflow({
-  name: ${JSON.stringify(protectedDecision ? "protected-hosted" : "checkpoint-hosted")},
+  name: ${JSON.stringify(protectedDecision ? "protected-server" : "checkpoint-server")},
   startAt: "gate",
   nodes: {
     gate,
@@ -344,7 +389,7 @@ export default defineWorkflow({
   startAt: "notify",
   nodes: {
     notify: notify({ message: () => ${JSON.stringify(
-      options.notification ?? "Passive hosted update.",
+      options.notification ?? "Passive server update.",
     )} }),
     done: compute({ run: () => ({ complete: true }) }),
   },
@@ -407,7 +452,7 @@ function widgetSessionSnapshot(
     schema: "pi-workflows.session-view.v1",
     sessionId: "session-one",
     run: {
-      schema: "pi-workflows.run-view.v1",
+      schema: "pi-workflows.session-run-view.v1",
       runId,
       revision,
       runRevision: revision,
@@ -417,32 +462,53 @@ function widgetSessionSnapshot(
         controls: [],
         reason: null,
       },
-      manifest: {},
-      state: {
-        schema: "pi-workflows.run-state.v1",
-        traceSeq: revision,
-        runId,
-        workflowName: "widget-refresh",
-        startedAt: at,
-        updatedAt: at,
-        status: "running",
-        input: null,
-        outputs: {},
-        results: {},
-        steps: [],
-        updates: [],
-        waitingOn,
-      },
-      workflow: {
-        schema: "pi-workflows.definition-snapshot.v1",
-        name: "widget-refresh",
-        startAt: "publish",
-        nodes: {
-          publish: { nodeType: "agent" },
-          runReview: { nodeType: "agent" },
+      workflowName: "widget-refresh",
+      runTitle: null,
+      paused: displayStatus === "paused",
+      currentNode: displayStatus === "running" ? "runReview" : null,
+      waitingOn: displayStatus === "running" ? null : waitingOn,
+      error: null,
+      nodes: [
+        {
+          nodeId: "publish",
+          nodeType: "agent",
+          actionExecution: null,
+          state: displayStatus === "running" ? "ok" : "waiting",
+          attempts: stepTotal,
+          settingsChangeNumber: null,
+          statusDetail: null,
+          startedAt: null,
+          durationMs: null,
+          error: null,
+          humanDecision: null,
+          summary: null,
+          assistantResponse: false,
+          outcome: displayStatus === "running" ? "ok" : null,
         },
-        edges: [{ from: "publish", to: "runReview" }],
-      },
+        {
+          nodeId: "runReview",
+          nodeType: "agent",
+          actionExecution: null,
+          state: displayStatus === "running" ? "running" : "pending",
+          attempts: displayStatus === "running" ? 1 : 0,
+          settingsChangeNumber: null,
+          statusDetail: null,
+          startedAt: null,
+          durationMs: null,
+          error: null,
+          humanDecision: null,
+          summary: null,
+          assistantResponse: false,
+          outcome: null,
+        },
+      ],
+      nodeStart: 0,
+      nodeTotal: 2,
+      progressUpdates: [],
+      monitorEstimate: null,
+      monitorSchedule: null,
+      live: true,
+      possiblyInterrupted: false,
       queue: {
         runId,
         workflowName: "widget-refresh",
@@ -463,41 +529,10 @@ function widgetSessionSnapshot(
         startedAt: at,
         finishedAt: null,
       },
-      updates: [],
-      graphSteps: [],
-      graphStepStart: 0,
-      graphStepTotal: 0,
-      takenTransitions: [],
-      graphHistory: { steps: [], transitions: [] },
-      takenTransitionStart: 0,
-      takenTransitionTotal: 0,
-      graphCursor: 0,
-      stepStart: 0,
-      stepTotal,
-      tracePage: { start: 0, total: 0, items: [] },
-      session: {},
-      settingsScopes: [],
-      settingsStart: 0,
-      settingsTotal: 0,
-      followUpQueue: null,
-      followUpStart: 0,
-      followUpTotal: 0,
-      updateStart: 0,
-      updateTotal: 0,
-      live: true,
-      possiblyInterrupted: false,
     },
-    pendingInteractions: [],
-    pendingInteractionStart: 0,
-    pendingInteractionTotal: 0,
-    workflowMessages: [],
-    workflowMessageStart: 0,
-    workflowMessageTotal: 0,
-    workflowMessageWindowComplete: true,
-    nextWorkflowMessageId: null,
-    openWorkflowMessageId: null,
+    interaction: null,
+    workflowMessage: null,
     openWorkflowTurn: null,
-    cancelledWorkflowMessageIds: [],
     coordinatorEpoch: "test-epoch",
     coordinatorActive: false,
     branchReportRequired: false,
@@ -515,8 +550,8 @@ function sessionSnapshotEvent(revision: number, payload: WorkflowSessionView): C
   };
 }
 
-describe("pi-workflows hosted extension", () => {
-  it("reports channel status through the hosted client", async () => {
+describe("pi-workflows workflow server extension", () => {
+  it("reports channel status through the workflow client", async () => {
     const { cwd } = await setupProject();
     const fake = makePi({ cwd });
     await fake.emit("session_start");
@@ -537,15 +572,15 @@ describe("pi-workflows hosted extension", () => {
 
     const state = new StateDatabase({ filePath: workflowStatePath(), mode: "read-only" });
     try {
-      expect(state.connection.prepare("SELECT count(*) AS count FROM host_commands").get()).toEqual(
-        { count: 0 },
-      );
+      expect(
+        state.connection.prepare("SELECT count(*) AS count FROM server_commands").get(),
+      ).toEqual({ count: 0 });
     } finally {
       state.close();
     }
   }, 30_000);
 
-  it("reconnects the session after initial host startup fails", async () => {
+  it("reconnects the session after initial workflow server startup fails", async () => {
     const { cwd, workflowPath } = await setupProject();
     const originalEnsureAvailable = WorkflowClient.prototype.ensureAvailable;
     const ensureAvailable = vi
@@ -628,7 +663,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 30_000);
 
-  it("starts, presents, updates, and completes an interactive hosted run", async () => {
+  it("starts, presents, updates, and completes an interactive run", async () => {
     const { cwd, workflowPath } = await setupProject();
     const durableRequests = vi.spyOn(WorkflowClient.prototype, "requestDurable");
     const fake = makePi({ cwd });
@@ -765,7 +800,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("shows host state and pauses a waiting step when Escape aborts its turn", async () => {
+  it("shows workflow server state and pauses a waiting step when Escape aborts its turn", async () => {
     const { cwd, workflowPath } = await setupProject();
     const abort = new AbortController();
     abort.abort();
@@ -783,7 +818,7 @@ describe("pi-workflows hosted extension", () => {
       bold: (text) => text,
       fg: (_color, text) => text,
     }).render(80);
-    expect(rendered.join("\n")).toContain("workflow hosted-interactive");
+    expect(rendered.join("\n")).toContain("workflow server-interactive");
     fake.shortcuts.get("shift+down")?.(fake.ctx);
     fake.shortcuts.get("shift+up")?.(fake.ctx);
 
@@ -978,7 +1013,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.runCommand(workflowPath);
     await waitUntil(() => fake.widgets.some((widget) => Array.isArray(widget)), 30_000);
     const widget = fake.widgets.findLast((value) => Array.isArray(value));
-    expect(widget).toEqual(expect.arrayContaining([expect.stringContaining("hosted-interactive")]));
+    expect(widget).toEqual(expect.arrayContaining([expect.stringContaining("server-interactive")]));
     await fake.runCommand("cancel");
     await fake.emit("session_shutdown");
     expect(fake.widgets.at(-1)).toBeUndefined();
@@ -1258,6 +1293,42 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("answers only the pending request the session view carries", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeCheckpointWorkflow(cwd, true);
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+        ),
+      30_000,
+    );
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
+    const decisionEntry = fake.sent.find(
+      (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+    );
+    if (decisionEntry === undefined) throw new Error("Decision message is missing");
+    const requestId = (decisionEntry.details as { requestId: string }).requestId;
+    // The session view carries one pending request, because the whole view travels
+    // as one client frame. A command that names another request is refused with the
+    // true state, because the extension must not guess that request's kind.
+    await fake.runCommand('answer some-other-request {"choice":"approve"}');
+    expect(fake.notifications.at(-1)).toMatchObject({
+      message: expect.stringContaining("carries one pending request at a time"),
+      level: "error",
+    });
+    // The request the view carries is answered normally.
+    await fake.runCommand(`answer ${requestId} {"choice":"approve"}`);
+    expect(fake.notifications).toContainEqual(
+      expect.objectContaining({ message: "Human decision answer accepted." }),
+    );
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
   it("submits an assistant response only after the final settled boundary", async () => {
     const { cwd } = await setupProject();
     const workflowPath = path.join(cwd, "assistant.workflow.ts");
@@ -1365,7 +1436,7 @@ export default defineWorkflow({
     expect(
       fake.sent.find((entry) => entry.customType === "pi-workflows-notification"),
     ).toMatchObject({
-      content: "Passive hosted update.",
+      content: "Passive server update.",
       delivery: { triggerTurn: false },
     });
     expect(fake.sent.find((entry) => entry.customType === "pi-workflows-terminal")).toMatchObject({
@@ -1451,7 +1522,7 @@ export default defineWorkflow({
     await fake.emit("session_shutdown");
   }, 90_000);
 
-  it("applies managed resources through the host and a source resolver child", async () => {
+  it("applies managed resources through the workflow server and a source resolver child", async () => {
     const { cwd } = await setupProject();
     const directory = path.join(cwd, ".pi", "resource-managers");
     await fs.mkdir(directory, { recursive: true });
@@ -1568,6 +1639,323 @@ export default defineResourceManager({
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("pages the widget window at its edge and keeps a failed request loaded", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const workflowPath = await writeWideWorkflow(cwd, 300);
+    const fake = makePi({ cwd });
+
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    const rendered = (): string =>
+      fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
+    await waitUntil(() => rendered().includes("ƒ n000"), 30_000);
+    // The first window cannot hold the complete topology.
+    expect(rendered()).not.toContain("ƒ n299");
+
+    const requested = vi.spyOn(WorkflowClient.prototype, "setSessionNodeWindow");
+    requested.mockRejectedValueOnce(new Error("session window request failed"));
+    const scrollDownUntil = async (predicate: () => boolean, message: string): Promise<void> => {
+      const deadline = Date.now() + 30_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(message);
+        fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    await scrollDownUntil(
+      () => requested.mock.calls.length >= 1,
+      "the widget never asked for the next window",
+    );
+    // The press sequence reached the end of the loaded window, so it shows the
+    // last rows of that window, not the next one.
+    expect(rendered()).toContain("↑ ");
+    // A failed request keeps the loaded window and stays retryable.
+    expect(rendered()).not.toContain("ƒ n000");
+    expect(rendered()).not.toContain("ƒ n299");
+    await scrollDownUntil(
+      () => requested.mock.calls.length >= 2,
+      "the widget never retried its window request",
+    );
+    await scrollDownUntil(
+      () => /ƒ n2\d\d/.test(rendered()),
+      "the widget never reached the next window",
+    );
+    // The paged window replaced the first one instead of appending to it, and it
+    // opens at its top so the rows continue where the failed window ended.
+    expect(rendered()).not.toContain("ƒ n000");
+    expect(rendered()).toContain("↓ ");
+    const pagesBeforeUp = requested.mock.calls.length;
+    const scrollUpUntil = async (predicate: () => boolean, message: string): Promise<void> => {
+      const deadline = Date.now() + 30_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(message);
+        fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+    await scrollUpUntil(
+      () => requested.mock.calls.length > pagesBeforeUp,
+      "the widget never asked for the previous window",
+    );
+    // Scrolling up opens the previous window at its bottom, where the user was.
+    await waitUntil(() => rendered().includes("↑ "), 30_000);
+    expect(rendered()).toMatch(/ƒ n2\d\d/);
+    await fake.emit("session_shutdown");
+  }, 120_000);
+
+  it("re-arms a paged session window with its cursor", async () => {
+    const { cwd } = await setupProject();
+    await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
+    const workflowPath = await writeWideWorkflow(cwd, 300);
+    const watchSession = WorkflowClient.prototype.watchSession;
+    const cursors: Array<number | undefined> = [];
+    const drop = { run: null as (() => void) | null };
+    vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(async function (
+      this: WorkflowClient,
+      sessionId: string,
+      listener: (event: ClientEvent) => void,
+      options?: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number },
+    ) {
+      cursors.push(options?.nodeCursor);
+      drop.run = () =>
+        listener({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "event",
+          subscriptionId: options?.subscriptionId ?? "session-window-cursor",
+          event: "unavailable",
+          payload: {
+            schema: "pi-workflows.subscription-failure.v1",
+            reasonCode: "connection_lost",
+            message: "Workflow server connection is unavailable.",
+          },
+        });
+      return await watchSession.call(this, sessionId, listener, options);
+    });
+    const fake = makePi({ cwd });
+    const rendered = (): string =>
+      fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
+    const requested = vi.spyOn(WorkflowClient.prototype, "setSessionNodeWindow");
+    try {
+      await fake.emit("session_start");
+      await fake.runCommand(workflowPath);
+      await waitUntil(() => rendered().includes("ƒ n000"), 30_000);
+      // The user pages the widget down until it asks for the next window.
+      const askedCursors = (): Array<number | null> => requested.mock.calls.map((call) => call[1]);
+      const deadline = Date.now() + 30_000;
+      while (!askedCursors().some((value) => typeof value === "number")) {
+        if (Date.now() > deadline) throw new Error("the widget never asked for the next window");
+        fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const cursor = askedCursors()
+        .filter((value): value is number => typeof value === "number")
+        .at(-1);
+      expect(cursor).toBeGreaterThan(0);
+      // The connection is lost, so the extension drops the subscription and arms
+      // a new one. The window the user scrolled to must come back with it.
+      drop.run?.();
+      await waitUntil(() => cursors.length >= 2, 30_000);
+      expect(cursors.at(-1)).toBe(cursor);
+      await fake.emit("session_shutdown");
+    } finally {
+      requested.mockRestore();
+    }
+  }, 120_000);
+
+  it("fences workflow delivery when the session subscription is lost", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeValidatedWorkflow(cwd);
+    const fence = vi.spyOn(WorkflowMessageCoordinator.prototype, "fence");
+    const watchSession = WorkflowClient.prototype.watchSession;
+    vi.spyOn(WorkflowClient.prototype, "watchSession").mockImplementation(async function (
+      this: WorkflowClient,
+      sessionId: string,
+      listener: (event: ClientEvent) => void,
+      options?: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number },
+    ) {
+      let dropped = false;
+      return await watchSession.call(
+        this,
+        sessionId,
+        (event) => {
+          listener(event);
+          // One lost subscription: the client keeps its last snapshot for display
+          // and removes the authority to deliver from it.
+          if (dropped || event.event !== "session_snapshot") return;
+          dropped = true;
+          listener({
+            schema: CLIENT_PROTOCOL_SCHEMA,
+            type: "event",
+            subscriptionId: event.subscriptionId,
+            event: "unavailable",
+            payload: {
+              schema: "pi-workflows.subscription-failure.v1",
+              reasonCode: "connection_lost",
+              message: "Workflow server connection is unavailable.",
+            },
+          });
+        },
+        options,
+      );
+    });
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fence.mock.calls.length > 0, 30_000);
+    // The last snapshot stays for display, and no message is delivered from it.
+    await waitUntil(() => fake.widgets.some((value) => typeof value === "function"), 30_000);
+    expect(renderedWidget(fake)).toContain("workflow server-validated");
+    expect(fake.sent).toHaveLength(0);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("re-arms the session subscription after a failure during the first publish", async () => {
+    const { cwd } = await setupProject();
+    if (testHome === undefined) throw new Error("the test home directory is not configured");
+    const socketPath = clientSocketPath(workflowStatePath(testHome));
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const watches: Array<{ subscriptionId: string; sessionId: string }> = [];
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const server = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: "projection-failure",
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true, coordinatorEpoch: "projection-epoch" },
+            }),
+          );
+          if (message.operation !== "view.session.watch") continue;
+          const payload = message.payload as { subscriptionId: string; sessionId: string };
+          watches.push(payload);
+          // The server publishes the first snapshot immediately, so its failure
+          // arrives while the extension is still waiting for this response.
+          if (watches.length === 1) {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "event",
+                subscriptionId: payload.subscriptionId,
+                event: "unavailable",
+                payload: {
+                  schema: "pi-workflows.subscription-failure.v1",
+                  reasonCode: "projection_failed",
+                  message: "session view exceeds one frame",
+                },
+              }),
+            );
+          }
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const fake = makePi({ cwd });
+    try {
+      await fake.emit("session_start");
+      // The failed first subscription must not strand the session view.
+      await waitUntil(() => watches.length > 1, 30_000);
+      expect(fake.notifications.map((notice) => notice.message)).toEqual([]);
+      expect(watches[0]?.sessionId).toBe("session-one");
+      expect(watches[1]?.sessionId).toBe("session-one");
+      expect(watches[1]?.subscriptionId).not.toBe(watches[0]?.subscriptionId);
+      await fake.emit("session_shutdown");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
+  it("starts a new session without the previous projection backoff", async () => {
+    const { cwd } = await setupProject();
+    if (testHome === undefined) throw new Error("the test home directory is not configured");
+    const socketPath = clientSocketPath(workflowStatePath(testHome));
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const watches: Array<{ subscriptionId: string; sessionId: string }> = [];
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const server = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: "projection-backoff",
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true, coordinatorEpoch: "projection-epoch" },
+            }),
+          );
+          if (message.operation !== "view.session.watch") continue;
+          const payload = message.payload as { subscriptionId: string; sessionId: string };
+          watches.push(payload);
+          // Every published projection fails, so the retry deadline grows.
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "event",
+              subscriptionId: payload.subscriptionId,
+              event: "unavailable",
+              payload: {
+                schema: "pi-workflows.subscription-failure.v1",
+                reasonCode: "projection_failed",
+                message: "session view exceeds one frame",
+              },
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const fake = makePi({ cwd });
+    try {
+      await fake.emit("session_start");
+      // Three failures grow the retry deadline to several seconds.
+      await waitUntil(() => watches.length >= 3, 30_000);
+      await fake.emit("session_shutdown");
+      const started = Date.now();
+      await fake.emit("session_start");
+      await waitUntil(() => watches.length >= 4, 10_000);
+      // The next session starts with a fresh retry budget instead of waiting for
+      // the deadline the closed session left behind.
+      expect(Date.now() - started).toBeLessThan(1_500);
+      await fake.emit("session_shutdown");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
   it("stays quiet for a usable shortcuts file", async () => {
     const { cwd } = await setupProject();
     await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
@@ -1581,6 +1969,27 @@ export default defineResourceManager({
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("pages back from an empty node window", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+    const view = new SessionWorkflowView();
+    const cursors: Array<number | null> = [];
+    view.setNodePager((cursor) => {
+      cursors.push(cursor);
+    });
+    const loaded = widgetSessionSnapshot(1, "running", "publish", 1);
+    if (loaded.run === null) throw new Error("run missing");
+    // The window that holds the last row, then the empty window that follows a
+    // node row too large for one client frame at the end of the topology.
+    const held = { ...loaded.run, nodeStart: 4, nodeTotal: 5 };
+    view.update({ ...loaded, run: held }, fake.ctx);
+    view.update({ ...loaded, run: { ...held, nodes: [], nodeStart: 5 } }, fake.ctx);
+    view.scrollUp(fake.ctx);
+    // The empty window has no row to count back from, so the view returns to the
+    // last window that held rows instead of asking for the same empty one.
+    expect(cursors).toEqual([4]);
+  }, 60_000);
+
   it("binds the configured scroll key to the widget window and shows the same keys", async () => {
     const { cwd } = await setupProject();
     await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
@@ -1592,18 +2001,20 @@ export default defineResourceManager({
     await fake.runCommand(workflowPath);
     const rendered = (): string =>
       fake.widgets.some((value) => typeof value === "function") ? renderedWidget(fake) : "";
-    await waitUntil(() => rendered().includes("ctrl+alt+↑/↓ scroll"), 30_000);
+    // Wait for the step that is pending delivery. Its node is the one the widget
+    // shows as working, so the window starts at the top and both keys can move.
+    await waitUntil(() => rendered().includes("waiting on step: ask"), 30_000);
 
     const before = rendered();
-    fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
-    const scrolledUp = rendered();
-    expect(scrolledUp).not.toBe(before);
-    expect(scrolledUp).toContain("ƒ n0");
-
     fake.shortcuts.get("ctrl+alt+down")?.(fake.ctx);
+    const scrolledDown = rendered();
+    expect(scrolledDown).not.toBe(before);
+    expect(scrolledDown).toContain("ƒ n3");
+
+    fake.shortcuts.get("ctrl+alt+up")?.(fake.ctx);
     const scrolledBack = rendered();
-    expect(scrolledBack).not.toBe(scrolledUp);
-    expect(scrolledBack).toContain("ƒ n3");
+    expect(scrolledBack).not.toBe(scrolledDown);
+    expect(scrolledBack).toContain("ƒ n0");
     await fake.emit("session_shutdown");
   }, 60_000);
 });

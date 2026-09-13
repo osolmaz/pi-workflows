@@ -11,10 +11,10 @@ async function writeResourceManager(projectPath: string): Promise<void> {
   const directory = path.join(projectPath, ".pi", "resource-managers");
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(
-    path.join(directory, "hosted.resource-manager.ts"),
+    path.join(directory, "server.resource-manager.ts"),
     `import { defineResourceManager } from ${JSON.stringify(path.resolve("src/resource-managers/index.ts"))};
 export default defineResourceManager({
-  name: "hosted",
+  name: "server",
   initialStatus: () => ({
     runnerPid: null,
     effectState: null,
@@ -23,15 +23,15 @@ export default defineResourceManager({
   }),
   async reconcile(ctx) {
     const effect = await ctx.effects.ensure({
-      key: "hosted-effect",
+      key: "server-effect",
       kind: "test",
       request: { value: 1 },
       observe: () => ({ state: "not_applied" }),
       apply: () => ({ state: "applied", externalRef: String(process.pid) }),
     });
     const child = await ctx.workflows.ensure({
-      requestKey: "hosted-child",
-      workflow: "hosted-child",
+      requestKey: "server-child",
+      workflow: "server-child",
       input: { value: 1 },
     });
     const resourceManagerStatus = {
@@ -42,8 +42,8 @@ export default defineResourceManager({
     };
     if (child.state !== "succeeded") return ctx.requeueAfter(10, { resourceManagerStatus });
     const controlled = await ctx.workflows.ensure({
-      requestKey: "hosted-controlled",
-      workflow: "hosted-controlled",
+      requestKey: "server-controlled",
+      workflow: "server-controlled",
       input: {},
     });
     if (controlled.state !== "waiting" || controlled.runId === undefined) {
@@ -61,19 +61,19 @@ export default defineResourceManager({
   const workflows = path.join(projectPath, ".pi", "workflows");
   await fs.mkdir(workflows, { recursive: true });
   await fs.writeFile(
-    path.join(workflows, "hosted-child.workflow.ts"),
+    path.join(workflows, "server-child.workflow.ts"),
     `import { compute, defineWorkflow } from ${JSON.stringify(
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "hosted-child",
+  name: "server-child",
   startAt: "work",
   nodes: { work: compute({ run: () => ({ runnerPid: process.pid }) }) },
   edges: [],
 });\n`,
   );
   await fs.writeFile(
-    path.join(workflows, "hosted-controlled.workflow.ts"),
+    path.join(workflows, "server-controlled.workflow.ts"),
     `import {
   allowSettingsPath,
   checkpoint,
@@ -81,11 +81,11 @@ export default defineWorkflow({
   workflowSettings,
 } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
 export default defineWorkflow({
-  name: "hosted-controlled",
+  name: "server-controlled",
   settings: workflowSettings({
     initial: { mode: "old" },
     parse: (value) => value,
-    paths: [allowSettingsPath("/mode", { replace: ["controller"] })],
+    paths: [allowSettingsPath("/mode", { replace: ["resource_manager"] })],
   }),
   startAt: "wait",
   nodes: { wait: checkpoint({ summary: "wait" }) },
@@ -95,7 +95,7 @@ export default defineWorkflow({
 }
 
 describe("resource manager execution", () => {
-  it("routes managed resource commands through the host", async () => {
+  it("routes managed resource commands through the workflow server", async () => {
     const projectPath = await makeTempDir("server-resource-manager-admin-project");
     const databasePath = path.join(
       await makeTempDir("server-resource-manager-admin-state"),
@@ -113,8 +113,8 @@ export default defineResourceManager({
   reconcile: (ctx) => ctx.settled(),
 });\n`,
     );
-    const host = new WorkflowServer({ databasePath, claimPollMs: 1_000_000 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 1_000_000 });
+    await server.start();
     try {
       const client = new WorkflowClient({ databasePath });
       const resolved = await client.resolveResourceManagerInitialization({
@@ -195,7 +195,7 @@ export default defineResourceManager({
         error: "ResourceManager source changed before apply committed",
       });
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 30_000);
 
@@ -208,7 +208,7 @@ export default defineResourceManager({
     await writeResourceManager(projectPath);
     const store = new SqliteResourceManagerStore(databasePath, { projectPath });
     store.putResource({
-      resourceManager: "hosted",
+      resourceManager: "server",
       key: "one",
       spec: {},
       initialStatus: {
@@ -221,8 +221,8 @@ export default defineResourceManager({
     store.close();
 
     // Reconciles and their child workflows share this one execution slot.
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10, maxWorkers: 1 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10, maxRunners: 1 });
+    await server.start();
     try {
       await waitUntil(() => {
         const reader = new SqliteResourceManagerStore(databasePath, {
@@ -238,7 +238,7 @@ export default defineResourceManager({
               childState: string | null;
               settingsChanged: boolean;
             }
-          >({ resourceManager: "hosted", key: "one" });
+          >({ resourceManager: "server", key: "one" });
           return resource?.status.resourceManagerStatus?.settingsChanged === true;
         } finally {
           reader.close();
@@ -255,7 +255,7 @@ export default defineResourceManager({
             childState: string | null;
             settingsChanged: boolean;
           }
-        >({ resourceManager: "hosted", key: "one" });
+        >({ resourceManager: "server", key: "one" });
         expect(resource?.status.resourceManagerStatus).toMatchObject({
           effectState: "applied",
           childState: "succeeded",
@@ -268,13 +268,13 @@ export default defineResourceManager({
         );
         expect(queue.listWorkflowRuns()).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ workflowName: "hosted-child", status: "done" }),
-            expect.objectContaining({ workflowName: "hosted-controlled", status: "parked" }),
+            expect.objectContaining({ workflowName: "server-child", status: "done" }),
+            expect.objectContaining({ workflowName: "server-controlled", status: "parked" }),
           ]),
         );
         const controlled = queue
           .listWorkflowRuns()
-          .find((run) => run.workflowName === "hosted-controlled");
+          .find((run) => run.workflowName === "server-controlled");
         if (controlled === undefined) throw new Error("controlled child missing");
         const settings = reader.state.connection
           .prepare(
@@ -284,14 +284,14 @@ export default defineResourceManager({
           )
           .get(controlled.runId) as { content?: Buffer } | undefined;
         expect(JSON.parse(settings?.content?.toString("utf8") ?? "null")).toEqual({ mode: "new" });
-        expect(reader.listEvents({ resourceManager: "hosted", key: "one" })).toEqual(
+        expect(reader.listEvents({ resourceManager: "server", key: "one" })).toEqual(
           expect.arrayContaining([expect.objectContaining({ type: "reconcile_finished" })]),
         );
       } finally {
         reader.close();
       }
     } finally {
-      await host.stop();
+      await server.stop();
     }
   }, 90_000);
 });

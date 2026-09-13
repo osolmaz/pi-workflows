@@ -99,7 +99,7 @@ export class ChannelEffectStore {
       {
         resourceId,
         operation: "channel.effect.create",
-        actor: { type: "host", id: options.ownerId },
+        actor: { type: "server", id: options.ownerId },
         expectedRevision: 0,
       },
       "effect.applying",
@@ -331,7 +331,7 @@ export class ChannelEffectStore {
       {
         resourceId: current.resourceId,
         operation: "channel.effect.retry",
-        actor: { type: reason === "explicit" ? "human" : "host", id: actorId },
+        actor: { type: reason === "explicit" ? "human" : "server", id: actorId },
         expectedRevision: this.resourceRevision(current.resourceId),
       },
       "effect.applying",

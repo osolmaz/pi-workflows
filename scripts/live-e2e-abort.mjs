@@ -31,7 +31,7 @@ export function workflowAbortAttempt(event, entries, runId) {
     : undefined;
 }
 
-/** Accept the abort only after the host has recorded that same attempt's timeout. */
+/** Accept the abort only after the workflow server has recorded that same attempt's timeout. */
 export function isExpectedWorkflowAbort(event, entries, state, runId) {
   const attemptId = workflowAbortAttempt(event, entries, runId);
   return (

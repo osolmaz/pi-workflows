@@ -71,7 +71,7 @@ class StdioRunnerTransport implements WorkflowRunnerStoreTransport {
 
   async request(options: Parameters<WorkflowRunnerStoreTransport["request"]>[0]) {
     const message: WorkflowRunnerMessage = {
-      schema: "pi-workflows.worker-message.v1",
+      schema: "pi-workflows.runner-message.v1",
       launchSchema: this.launch.schema,
       messageId: options.messageId,
       kind: options.kind,
@@ -101,7 +101,7 @@ class StdioRunnerTransport implements WorkflowRunnerStoreTransport {
     payload: JsonValue,
   ): Promise<WorkflowRunnerResponse> {
     return await this.sendResolved({
-      schema: "pi-workflows.worker-message.v1",
+      schema: "pi-workflows.runner-message.v1",
       launchSchema: this.launch.schema,
       messageId: randomUUID(),
       kind: operation,
@@ -130,7 +130,7 @@ class StdioRunnerTransport implements WorkflowRunnerStoreTransport {
       ...response,
       result: await materializeRunnerContent(reference, async (offset) => {
         const chunkResponse = await this.send({
-          schema: "pi-workflows.worker-message.v1",
+          schema: "pi-workflows.runner-message.v1",
           launchSchema: this.launch.schema,
           messageId: randomUUID(),
           kind: "runner.progress",
@@ -511,7 +511,7 @@ function readLaunchEnvelope(): WorkflowRunnerLaunchEnvelope {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    (value as { schema?: unknown }).schema !== "pi-workflows.worker-launch.v1"
+    (value as { schema?: unknown }).schema !== "pi-workflows.runner-launch.v1"
   ) {
     throw new Error("Workflow runner launch envelope is invalid");
   }

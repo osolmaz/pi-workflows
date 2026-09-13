@@ -597,8 +597,8 @@ describe("durable workflow settings", () => {
       runId,
       requestId: "remove-follow-up",
       targetSessionId: "session-1",
-      actor: { type: "controller", id: "controller-1" },
-      source: "controller-request",
+      actor: { type: "resource_manager", id: "resource-manager-1" },
+      source: "resource-manager-request",
       prompt: "Remove me",
     });
     const removed = store.removeFollowUp({

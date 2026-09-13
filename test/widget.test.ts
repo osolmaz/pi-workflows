@@ -461,7 +461,7 @@ describe("buildWidgetLines", () => {
     expect(lines.split("\n").length).toBeLessThanOrEqual(10);
   });
 
-  it("renders the durable queued state before a worker starts", () => {
+  it("renders the durable queued state before a runner starts", () => {
     const queued = makeState({ status: "queued" as WorkflowRunState["status"] });
     expect(
       stripAnsi(
@@ -895,7 +895,7 @@ describe("buildWidgetLines", () => {
     expect(view.scroll).toBe(0);
   });
 
-  it("uses the host display status instead of stale durable state", () => {
+  it("uses the workflow server display status instead of stale durable state", () => {
     const waitingState = makeState({ status: "waiting", waitingOn: "third" });
     expect(buildWidgetView(waitingState, snapshot, undefined, null, false, 0)).toEqual({
       lines: [],

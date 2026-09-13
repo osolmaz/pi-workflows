@@ -8,8 +8,10 @@ import { WorkflowClient, WorkflowClientVersionError } from "../src/client/client
 import {
   CLIENT_PROTOCOL_SCHEMA,
   NdjsonFrameDecoder,
+  assertSocketPathSupported,
   clientSocketPath,
   encodeProtocolLine,
+  maxSocketPathBytes,
   parseClientMessage,
   type ClientRequest,
 } from "../src/client/protocol.js";
@@ -18,6 +20,29 @@ import type { JsonValue } from "../src/state/json.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("WorkflowClient", () => {
+  it("reports a socket path above the operating system limit as a blocker", async () => {
+    const linuxLimit = maxSocketPathBytes("linux");
+    const databasePath = path.join("/tmp", "p".repeat(linuxLimit), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    expect(Buffer.byteLength(socketPath, "utf8")).toBeGreaterThan(linuxLimit);
+    expect(() => assertSocketPathSupported(socketPath, "linux")).toThrow(/operating system limit/);
+    // macOS and the BSDs have a shorter `sun_path`, so one byte less is already
+    // a blocker there, and a Windows named pipe has no such limit.
+    const darwinLimit = maxSocketPathBytes("darwin");
+    expect(darwinLimit).toBeLessThan(linuxLimit);
+    expect(() => assertSocketPathSupported("p".repeat(darwinLimit), "darwin")).not.toThrow();
+    expect(() => assertSocketPathSupported("p".repeat(darwinLimit + 1), "darwin")).toThrow(
+      /operating system limit/,
+    );
+    expect(() => assertSocketPathSupported("p".repeat(400), "win32")).not.toThrow();
+    // The client refuses to spawn or connect instead of waiting for a socket
+    // the operating system cannot bind.
+    const client = new WorkflowClient({ databasePath });
+    const start = vi.spyOn(client as unknown as { startDetached: () => void }, "startDetached");
+    await expect(client.ensureAvailable()).rejects.toThrow(/operating system limit/);
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("keeps the cold-start retry wait referenced", async () => {
     const databasePath = path.join(await makeTempDir("client-cold-start"), "state.sqlite");
     const client = new WorkflowClient({ databasePath });
@@ -93,8 +118,8 @@ describe("WorkflowClient", () => {
 
   it("rejects a backpressured request when its connection closes", async () => {
     const databasePath = path.join(await makeTempDir("client-drain-close"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-drain-close" });
     await client.connect();
     const socket = (client as unknown as { socket: net.Socket | null }).socket;
@@ -108,14 +133,14 @@ describe("WorkflowClient", () => {
     } finally {
       socket.destroy();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
   });
 
   it("uses one connection and rejects watches for missing runs", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
-    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    await host.start();
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-live" });
     const events: string[] = [];
     let unwatchRuns: (() => Promise<void>) | undefined;
@@ -206,7 +231,7 @@ describe("WorkflowClient", () => {
         () =>
           [
             ...(
-              host as unknown as {
+              server as unknown as {
                 connections: Map<string, { subscriptions: Map<string, unknown> }>;
               }
             ).connections.values(),
@@ -216,7 +241,7 @@ describe("WorkflowClient", () => {
     } finally {
       await client.close();
       await client.close();
-      await host.stop();
+      await server.stop();
     }
     await expect(client.request({ operation: "server.status" })).rejects.toThrow(
       "Workflow client is closed",
@@ -309,6 +334,97 @@ describe("WorkflowClient", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("moves the session node window and keeps it across a reconnect", async () => {
+    const databasePath = path.join(await makeTempDir("client-node-window"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    const requests: ClientRequest[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `node-window-${sockets.length}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          requests.push(message);
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              outcome: "accepted",
+              receipt: { subscribed: true },
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    try {
+      await client.watchSession("session-window", () => undefined, {
+        subscriptionId: "window-subscription",
+        coordinator: true,
+      });
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "window-subscription", sessionId: "session-window" },
+      });
+      const firstWatch = requests.at(-1);
+      expect(
+        (firstWatch?.payload as { nodeCursor?: unknown } | undefined)?.nodeCursor,
+      ).toBeUndefined();
+      await expect(client.setSessionNodeWindow("session-window", 128)).resolves.toBe(true);
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.window",
+        payload: { subscriptionId: "window-subscription", nodeCursor: 128 },
+      });
+      await expect(client.setSessionNodeWindow("session-window", null)).resolves.toBe(true);
+      expect(requests.at(-1)).toMatchObject({
+        payload: { subscriptionId: "window-subscription", nodeCursor: null },
+      });
+      await expect(client.setSessionNodeWindow("missing-session", 1)).resolves.toBe(false);
+
+      await client.setSessionNodeWindow("session-window", 64);
+      const watched = requests.filter(
+        (request) => request.operation === "view.session.watch",
+      ).length;
+      // A reconnect restores the window with the coordinator claim intact.
+      sockets.at(-1)?.destroy();
+      await waitUntil(
+        () =>
+          requests.filter((request) => request.operation === "view.session.watch").length > watched,
+        10_000,
+      );
+      expect(requests.at(-1)).toMatchObject({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "window-subscription",
+          sessionId: "session-window",
+          coordinator: true,
+          nodeCursor: 64,
+        },
+      });
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 30_000);
 
   it("discards incomplete and stale run-list pages", async () => {
     const databasePath = path.join(await makeTempDir("client-run-page-errors"), "state.sqlite");
@@ -962,7 +1078,191 @@ describe("WorkflowClient", () => {
     }
   });
 
-  it("reports a package mismatch without trying to replace the live host", async () => {
+  it("counts a refused subscription restore toward reconnect exhaustion", async () => {
+    const databasePath = path.join(await makeTempDir("client-restore"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    let connections = 0;
+    let refuseRestores = false;
+    const connectionTimes: number[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      connections += 1;
+      connectionTimes.push(Date.now());
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `restore-${connections}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          const refused = refuseRestores;
+          socket.write(
+            encodeProtocolLine({
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: message.requestId,
+              ...(refused
+                ? { outcome: "notFound", error: "Workflow run is not available" }
+                : {
+                    outcome: "accepted",
+                    receipt: { subscribed: true, coordinatorEpoch: "restore-epoch" },
+                  }),
+            }),
+          );
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    const failures: string[] = [];
+    try {
+      await client.watchSession("session-restore", (event) => {
+        if (event.event !== "unavailable") return;
+        const payload = event.payload as { reasonCode?: string };
+        if (typeof payload.reasonCode === "string") failures.push(payload.reasonCode);
+      });
+      // Every later restore is refused, so the client never proves that it holds
+      // its view again. Its reconnect budget must therefore grow instead of
+      // resetting on each successful handshake.
+      refuseRestores = true;
+      const connectionsBefore = connections;
+      sockets.at(-1)?.destroy();
+      const deadline = Date.now() + 20_000;
+      while (connections < connectionsBefore + 4 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(connections).toBeGreaterThanOrEqual(connectionsBefore + 4);
+      expect(failures).toContain("connection_lost");
+      // The reconnect delay grows with each attempt, so a refused restore counts
+      // toward the bounded budget instead of restarting it at the base delay.
+      const gapMs = (connectionTimes.at(-1) ?? 0) - (connectionTimes.at(-2) ?? 0);
+      expect(gapMs).toBeGreaterThan(700);
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
+  it("keeps the reconnect budget after a view from a partly restored subscription", async () => {
+    const databasePath = path.join(await makeTempDir("client-partial-restore"), "state.sqlite");
+    const socketPath = clientSocketPath(databasePath);
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    const packageJson = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8")) as {
+      version: string;
+    };
+    let connections = 0;
+    let refuseSecond = false;
+    const connectionTimes: number[] = [];
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => {
+      connections += 1;
+      connectionTimes.push(Date.now());
+      sockets.push(socket);
+      socket.on("error", () => undefined);
+      const decoder = new NdjsonFrameDecoder();
+      socket.write(
+        encodeProtocolLine({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "hello",
+          connectionId: `partial-${connections}`,
+          packageVersion: packageJson.version,
+        }),
+      );
+      let restored = 0;
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(chunk)) {
+          const message = parseClientMessage(frame);
+          if (message.type !== "request") continue;
+          const subscriptionId =
+            (message.payload as { subscriptionId?: string }).subscriptionId ?? "partial-unknown";
+          restored += 1;
+          if (restored === 1) {
+            // The first subscription restores and delivers a view, while a later
+            // subscription on the same connection is still refused. That view
+            // must not prove the connection healthy.
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "accepted",
+                receipt: { subscribed: true, coordinatorEpoch: "partial-epoch" },
+              }),
+            );
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "event",
+                subscriptionId,
+                event: "session_snapshot",
+                revision: 1,
+                payload: { sessionId: "session-partial" },
+              }),
+            );
+            continue;
+          }
+          if (!refuseSecond) {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "accepted",
+                receipt: { subscribed: true, coordinatorEpoch: "partial-epoch" },
+              }),
+            );
+            continue;
+          }
+          setTimeout(() => {
+            socket.write(
+              encodeProtocolLine({
+                schema: CLIENT_PROTOCOL_SCHEMA,
+                type: "response",
+                requestId: message.requestId,
+                outcome: "notFound",
+                error: "Workflow run is not available",
+              }),
+            );
+          }, 60);
+        }
+      });
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    const client = new WorkflowClient({ databasePath });
+    try {
+      await client.watchSession("session-partial", () => undefined);
+      await client.watchRuns(() => undefined);
+      refuseSecond = true;
+      const connectionsBefore = connections;
+      sockets.at(-1)?.destroy();
+      // Every later attempt restores one subscription and then fails the next
+      // one, so the budget must keep growing instead of restarting at the base
+      // delay. Six seconds admit about five bounded attempts.
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      expect(connections - connectionsBefore).toBeLessThanOrEqual(8);
+      const gapMs = (connectionTimes.at(-1) ?? 0) - (connectionTimes.at(-2) ?? 0);
+      expect(gapMs).toBeGreaterThan(700);
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
+
+  it("reports a package mismatch without trying to replace the live workflow server", async () => {
     const databasePath = path.join(await makeTempDir("client-version"), "state.sqlite");
     const socketPath = clientSocketPath(databasePath);
     await fs.mkdir(path.dirname(socketPath), { recursive: true });

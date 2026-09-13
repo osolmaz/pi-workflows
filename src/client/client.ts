@@ -10,6 +10,7 @@ import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
   NdjsonFrameDecoder,
+  assertSocketPathSupported,
   clientSocketPath,
   encodeProtocolLine,
   parseClientMessage,
@@ -28,7 +29,11 @@ import type { WorkflowRunListPage, WorkflowRunSummary, WorkflowRunView } from ".
 
 const CONNECT_TIMEOUT_MS = 2_000;
 const START_TIMEOUT_MS = 10_000;
-const RECONNECT_DELAY_MS = 250;
+/** Capped exponential reconnect delay with jitter; the first retry is fastest. */
+const RECONNECT_BASE_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 10_000;
+/** After this many failed attempts the client reports a blocker and stops looping. */
+const RECONNECT_MAX_ATTEMPTS = 12;
 const RESOLVER_TIMEOUT_MS = 30_000;
 const CLIENT_PACKAGE_VERSION = runtimePackageVersion();
 
@@ -43,6 +48,12 @@ type Subscription = {
   payload: JsonValue;
   listener: (event: ClientEvent) => void;
   runListGeneration: number;
+};
+
+/** Bounded reason code and safe message for one failed subscription. */
+export type SubscriptionFailure = {
+  reasonCode: "connection_lost" | "reconnect_exhausted" | "projection_failed";
+  message: string;
 };
 
 export class WorkflowClientVersionError extends Error {
@@ -71,6 +82,9 @@ export class WorkflowClient {
   private hello: ClientHello | null = null;
   private closed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  /** Set only after a connection holds every subscription it asked to restore. */
+  private subscriptionsRestored = false;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly subscriptions = new Map<string, Subscription>();
 
@@ -182,7 +196,7 @@ export class WorkflowClient {
   async watchSession(
     sessionId: string,
     listener: (event: ClientEvent) => void,
-    options: { subscriptionId?: string; coordinator?: boolean } = {},
+    options: { subscriptionId?: string; coordinator?: boolean; nodeCursor?: number } = {},
   ): Promise<() => Promise<void>> {
     return await this.subscribe(
       "view.session.watch",
@@ -191,9 +205,37 @@ export class WorkflowClient {
         subscriptionId: options.subscriptionId ?? randomUUID(),
         sessionId,
         ...(options.coordinator === undefined ? {} : { coordinator: options.coordinator }),
+        ...(options.nodeCursor === undefined ? {} : { nodeCursor: options.nodeCursor }),
       },
       listener,
     );
+  }
+
+  /**
+   * Move the node window of the active session subscription. `null` returns to
+   * the window that follows the node the widget shows as working. The stored
+   * subscription keeps the window, so a reconnect restores it.
+   */
+  async setSessionNodeWindow(sessionId: string, nodeCursor: number | null): Promise<boolean> {
+    const entry = [...this.subscriptions.entries()].find(
+      ([, subscription]) =>
+        subscription.operation === "view.session.watch" &&
+        (subscription.payload as { sessionId?: unknown }).sessionId === sessionId,
+    );
+    if (entry === undefined) return false;
+    const [subscriptionId, subscription] = entry;
+    const payload = { ...(subscription.payload as Record<string, JsonValue>) };
+    if (nodeCursor === null) delete payload.nodeCursor;
+    else payload.nodeCursor = nodeCursor;
+    const response = await this.request({
+      operation: "view.session.window",
+      payload: { subscriptionId, nodeCursor },
+    });
+    if (response.outcome !== "accepted" && response.outcome !== "adopted") {
+      throw new Error(response.error ?? `Workflow session window was ${response.outcome}`);
+    }
+    subscription.payload = payload;
+    return true;
   }
 
   async ensureAvailable(): Promise<ClientHello> {
@@ -201,6 +243,9 @@ export class WorkflowClient {
       return await this.connect();
     } catch (error) {
       if (error instanceof WorkflowClientVersionError) throw error;
+      // A path the operating system cannot bind is a blocker. Do not spawn a
+      // child that can never serve it.
+      assertSocketPathSupported(this.endpoint);
       this.resetConnection();
       this.startDetached();
     }
@@ -533,6 +578,7 @@ export class WorkflowClient {
   }
 
   private async openConnection(): Promise<ClientHello> {
+    assertSocketPathSupported(this.endpoint);
     const socket = net.createConnection(this.endpoint);
     const decoder = new NdjsonFrameDecoder();
     this.socket = socket;
@@ -624,7 +670,12 @@ export class WorkflowClient {
           throw new Error("Workflow server hello timed out");
         }),
       ]);
+      // A successful hello starts a fresh reconnect budget only together with a
+      // restored subscription set. A subscription the server keeps refusing must
+      // not reset the budget, or the client would reconnect forever.
       await this.restoreSubscriptions();
+      this.subscriptionsRestored = true;
+      this.reconnectAttempts = 0;
       return hello;
     } catch (error) {
       socket.destroy();
@@ -638,6 +689,11 @@ export class WorkflowClient {
     subscription: Subscription,
     event: ClientEvent,
   ): Promise<void> {
+    // One accepted view proves the connection works again, so the reconnect
+    // budget resets here as well as after hello. A view from a subscription the
+    // server restored before it refused a later one is not that proof, because
+    // the client still owes work on this connection.
+    if (event.event !== "unavailable" && this.subscriptionsRestored) this.reconnectAttempts = 0;
     if (subscription.operation !== "view.runs.watch" || event.event !== "runs") {
       subscription.listener(event);
       return;
@@ -708,32 +764,66 @@ export class WorkflowClient {
     this.socket = null;
     this.hello = null;
     this.connectTask = null;
+    this.subscriptionsRestored = false;
     if (socket !== null && !socket.destroyed) socket.destroy();
     for (const pending of this.pending.values()) pending.reject(reason);
     this.pending.clear();
     if (!this.closed) {
-      for (const [subscriptionId, subscription] of this.subscriptions) {
-        try {
-          subscription.listener({
-            schema: CLIENT_PROTOCOL_SCHEMA,
-            type: "event",
-            subscriptionId,
-            event: "unavailable",
-            payload: { message: "Workflow server connection is unavailable." },
-          });
-        } catch {
-          // One renderer cannot block reconnection for other subscriptions.
-        }
+      this.reportSubscriptionFailure(
+        { reasonCode: "connection_lost", message: "Workflow server connection is unavailable." },
+        false,
+      );
+    }
+  }
+
+  /**
+   * Report one bounded failure to every subscriber. The extension keeps its last
+   * view for display and loses command authority until a fresh snapshot arrives.
+   */
+  private reportSubscriptionFailure(failure: SubscriptionFailure, clear: boolean): void {
+    for (const [subscriptionId, subscription] of this.subscriptions) {
+      try {
+        subscription.listener({
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "event",
+          subscriptionId,
+          event: "unavailable",
+          payload: { schema: "pi-workflows.subscription-failure.v1", ...failure },
+        });
+      } catch {
+        // One renderer cannot block reconnection for other subscriptions.
       }
+      if (clear) this.subscriptions.delete(subscriptionId);
     }
   }
 
   private scheduleReconnect(): void {
     if (this.closed || this.subscriptions.size === 0 || this.reconnectTimer !== null) return;
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      // A fast loop would hide the blocker. Report it once and wait for new work.
+      this.reportSubscriptionFailure(
+        {
+          reasonCode: "reconnect_exhausted",
+          // The budget counts a stopped server and a refused restore, so the
+          // blocker must not claim that the server stayed silent.
+          message: `Workflow server did not return this session's view after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start or restart the workflow server, then open or resume a session.`,
+        },
+        false,
+      );
+      return;
+    }
+    const capped = Math.min(
+      RECONNECT_MAX_DELAY_MS,
+      RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts,
+    );
+    // Full jitter over the upper half of the window keeps one reconnect storm
+    // from repeating on the same instant across sessions.
+    const delayMs = Math.round(capped / 2 + Math.random() * (capped / 2));
+    this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect().catch(() => this.scheduleReconnect());
-    }, RECONNECT_DELAY_MS);
+    }, delayMs);
     this.reconnectTimer.unref?.();
   }
 

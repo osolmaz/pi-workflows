@@ -105,7 +105,7 @@ describe("run ownership fencing", () => {
     });
     queue.claimWorkflowRun({
       runId,
-      runnerId: "host-2",
+      runnerId: "server-2",
       claimToken: "new",
       leaseMs: 60_000,
       now: new Date(now + 60_000).toISOString(),
@@ -149,7 +149,7 @@ describe("run ownership fencing", () => {
     });
     queue.claimWorkflowRun({
       runId,
-      runnerId: "host-2",
+      runnerId: "server-2",
       claimToken: "new",
       leaseMs: 60_000,
       now: "2026-08-23T00:00:01.000Z",

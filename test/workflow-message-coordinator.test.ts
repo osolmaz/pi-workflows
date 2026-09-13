@@ -1,9 +1,19 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkflowSessionView } from "../src/client/view.js";
+import type { WorkflowSessionMessage, WorkflowSessionView } from "../src/client/view.js";
 import { WorkflowMessageCoordinator } from "../src/extension/workflow-message-coordinator.js";
+import { canonicalJson, type JsonValue } from "../src/state/json.js";
 import { WORKFLOW_TURN_SCHEMA, type WorkflowMessage } from "../src/state/workflow-messages.js";
 
 function followUpMessage(status: "pending" | "sent" = "pending"): WorkflowMessage {
+  const content: WorkflowMessage["content"] = {
+    schema: "pi-workflows.workflow-message-content.v1",
+    customType: "pi-workflows-follow-up",
+    content: "Done.",
+    display: false,
+    details: { workflowMessageId: "follow-up-message" },
+    triggerTurn: true,
+  };
   return {
     schema: "pi-workflows.workflow-message.v1",
     workflowMessageId: "follow-up-message",
@@ -11,20 +21,50 @@ function followUpMessage(status: "pending" | "sent" = "pending"): WorkflowMessag
     targetSessionId: "session-1",
     kind: "followUp",
     sourceId: "run-1",
-    contentDigest: "sha256:content",
+    contentDigest: contentDigestOf(content),
+    triggerTurn: content.triggerTurn,
     order: 1,
     status,
     piSessionEntryId: status === "sent" ? "entry-1" : null,
     createdAt: "2026-09-02T00:00:00.000Z",
     updatedAt: "2026-09-02T00:00:00.000Z",
-    content: {
-      schema: "pi-workflows.workflow-message-content.v1",
-      customType: "pi-workflows-follow-up",
-      content: "Done.",
-      display: false,
-      details: { workflowMessageId: "follow-up-message" },
-      triggerTurn: true,
-    },
+    content,
+  };
+}
+
+function contentDigestOf(content: unknown): string {
+  return createHash("sha256")
+    .update(canonicalJson(content as JsonValue))
+    .digest("hex");
+}
+
+/** Client double that also serves the verified content read Pi now performs. */
+function clientDouble(request: (options: Record<string, unknown>) => Promise<unknown>): never {
+  return {
+    request,
+    hydrateContent: async (_runId: string, value: unknown) => value,
+  } as never;
+}
+
+function sessionMessage(message: WorkflowMessage): WorkflowSessionMessage {
+  return {
+    schema: "pi-workflows.session-message.v1",
+    workflowMessageId: message.workflowMessageId,
+    runId: message.runId,
+    targetSessionId: message.targetSessionId,
+    kind: message.kind,
+    sourceId: message.sourceId,
+    order: message.order,
+    status: message.status,
+    piSessionEntryId: message.piSessionEntryId,
+    createdAt: message.createdAt,
+    updatedAt: message.updatedAt,
+    triggerTurn: message.content.triggerTurn,
+    customType: message.content.customType,
+    display: message.content.display,
+    content: message.content as unknown as JsonValue,
+    contentDigest: message.contentDigest,
+    deliveryCancelled: false,
   };
 }
 
@@ -65,17 +105,9 @@ function view(message: WorkflowMessage): WorkflowSessionView {
     schema: "pi-workflows.session-view.v1",
     sessionId: "session-1",
     run: null,
-    pendingInteractions: [],
-    pendingInteractionStart: 0,
-    pendingInteractionTotal: 0,
-    workflowMessages: [message],
-    workflowMessageStart: 0,
-    workflowMessageTotal: 1,
-    workflowMessageWindowComplete: true,
-    nextWorkflowMessageId: message.status === "pending" ? message.workflowMessageId : null,
-    openWorkflowMessageId: null,
+    interaction: null,
+    workflowMessage: sessionMessage(message),
     openWorkflowTurn: null,
-    cancelledWorkflowMessageIds: [],
     coordinatorEpoch: "epoch-1",
     coordinatorActive: true,
     branchReportRequired: false,
@@ -105,7 +137,7 @@ describe("WorkflowMessageCoordinator", () => {
         acceptedServerRequest(options),
       );
       const sync = () =>
-        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+        coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
       coordinator.startTurn();
       if (timing === "during start") {
         coordinator.updateView(view(message));
@@ -122,18 +154,55 @@ describe("WorkflowMessageCoordinator", () => {
       const beforeTurnEnd = vi.fn(async () => undefined);
       idle = true;
       coordinator.endTurn("completed", "workflow-reply");
-      await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         beforeTurnEnd,
       });
-      expect(beforeTurnEnd).toHaveBeenCalledWith(message, {
-        stopReason: "completed",
-        responseSessionEntryId: "workflow-reply",
-      });
+      expect(beforeTurnEnd).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowMessageId: message.workflowMessageId }),
+        {
+          stopReason: "completed",
+          responseSessionEntryId: "workflow-reply",
+        },
+      );
       expect(
         request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
       ).toHaveLength(2);
     },
   );
+
+  it("sends nothing from a snapshot whose subscription failed", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    const branch: Record<string, unknown>[] = [];
+    let idle = true;
+    const ctx = {
+      isIdle: () => idle,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "step-entry", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+    });
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
+    coordinator.updateView(view(message));
+    // A subscription failure keeps the snapshot for display only, so nothing may
+    // start a turn or report an epoch the server no longer confirms.
+    coordinator.fence();
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(coordinator.activeTurnMessage()).toBeUndefined();
+    // A fresh snapshot restores the coordinator epoch and delivers the message.
+    coordinator.updateView(view(message));
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
+  });
 
   it("does not resend an unconfirmed delivery while ordinary events arrive", async () => {
     const coordinator = new WorkflowMessageCoordinator();
@@ -148,7 +217,7 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => [] },
     } as never;
     for (let count = 0; count < 3; count++) {
-      await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+      await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
       coordinator.endTurn("completed", "unrelated-reply");
     }
     expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -185,11 +254,11 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
     const beforeTurnEnd = vi.fn(
-      async (_message: WorkflowMessage, _end: { responseSessionEntryId: string | null }) =>
+      async (_message: WorkflowSessionMessage, _end: { responseSessionEntryId: string | null }) =>
         undefined,
     );
     const sync = () =>
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         beforeTurnEnd,
       });
     await sync();
@@ -239,13 +308,16 @@ describe("WorkflowMessageCoordinator", () => {
       hasPendingMessages: () => false,
       sessionManager: { getBranch: () => branch },
     } as never;
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
       beforeTurnEnd,
     });
-    expect(beforeTurnEnd).toHaveBeenCalledWith(message, {
-      stopReason: "completed",
-      responseSessionEntryId: "response-during-ack",
-    });
+    expect(beforeTurnEnd).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowMessageId: message.workflowMessageId }),
+      {
+        stopReason: "completed",
+        responseSessionEntryId: "response-during-ack",
+      },
+    );
     expect(
       request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
     ).toHaveLength(2);
@@ -256,7 +328,8 @@ describe("WorkflowMessageCoordinator", () => {
     const message = followUpMessage("sent");
     message.kind = "terminal";
     message.content.triggerTurn = false;
-    const current = { ...view(message), nextWorkflowMessageId: null };
+    message.contentDigest = contentDigestOf(message.content);
+    const current = view(message);
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(current);
     const branch: Record<string, unknown>[] = [];
@@ -271,7 +344,7 @@ describe("WorkflowMessageCoordinator", () => {
     );
     const terminalDelivered = vi.fn(async () => undefined);
     const sync = async () =>
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         terminalDelivered,
       });
     await sync();
@@ -325,13 +398,13 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
     await expect(
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         beforeTurnEnd: beforeEnd,
       }),
     ).rejects.toThrow("Lost branch acknowledgment");
     coordinator.startTurn(); // An unrelated later event cannot replace the pending settled turn.
     coordinator.endTurn("error", "other-response");
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
       beforeTurnEnd: beforeEnd,
     });
     expect(order).toEqual(["started", "submit", "ended"]);
@@ -339,7 +412,7 @@ describe("WorkflowMessageCoordinator", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(coordinator.activeTurnMessage()).toBeUndefined();
   });
-  it("clears an explicit follow-up turn locally as soon as the host accepts its end", async () => {
+  it("clears an explicit follow-up turn locally as soon as the workflow server accepts its end", async () => {
     const message = followUpMessage();
     const current = view(message);
     const branch: Record<string, unknown>[] = [];
@@ -348,7 +421,7 @@ describe("WorkflowMessageCoordinator", () => {
     const request = vi.fn(async (options: Record<string, unknown>) =>
       acceptedServerRequest(options),
     );
-    let activeBeforeServerAcceptance: WorkflowMessage | undefined;
+    let activeBeforeServerAcceptance: WorkflowSessionMessage | undefined;
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
       coordinator.startTurn();
@@ -360,9 +433,9 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
 
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
     expect(activeBeforeServerAcceptance).toBeUndefined();
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
     const started = request.mock.calls
       .map(([call]) => call)
       .find(
@@ -375,7 +448,6 @@ describe("WorkflowMessageCoordinator", () => {
         ? undefined
         : (started.payload as { workflowTurnId?: unknown }).workflowTurnId;
     expect(typeof workflowTurnId).toBe("string");
-    current.openWorkflowMessageId = message.workflowMessageId;
     current.openWorkflowTurn = {
       schema: "pi-workflows.workflow-turn.v1",
       workflowTurnId: workflowTurnId as string,
@@ -390,9 +462,9 @@ describe("WorkflowMessageCoordinator", () => {
     };
 
     coordinator.endTurn("completed", "response-1");
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
 
-    expect(current.openWorkflowMessageId).toBeNull();
+    expect(current.workflowMessage?.workflowMessageId).toBe(message.workflowMessageId);
     expect(current.openWorkflowTurn).toBeNull();
     coordinator.startTurn();
     expect(coordinator.activeTurnMessage()).toBeUndefined();
@@ -412,7 +484,6 @@ describe("WorkflowMessageCoordinator", () => {
       const message = followUpMessage("sent");
       message.kind = "step";
       const current = view(message);
-      current.openWorkflowMessageId = message.workflowMessageId;
       if (recordedTurn) {
         current.openWorkflowTurn = {
           schema: WORKFLOW_TURN_SCHEMA,
@@ -446,7 +517,7 @@ describe("WorkflowMessageCoordinator", () => {
         sessionManager: { getBranch: () => branch },
       } as never;
       const sync = () =>
-        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
           beforeTurnEnd,
         });
       coordinator.startTurn();
@@ -460,7 +531,7 @@ describe("WorkflowMessageCoordinator", () => {
       expect(
         request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
       ).toEqual([]);
-      expect(current.openWorkflowMessageId).toBe(message.workflowMessageId);
+      expect(current.workflowMessage?.workflowMessageId).toBe(message.workflowMessageId);
       expect(current.openWorkflowTurn?.workflowTurnId ?? null).toBe(
         recordedTurn ? "old-workflow-turn" : null,
       );
@@ -470,7 +541,6 @@ describe("WorkflowMessageCoordinator", () => {
   it("keeps the accepted workflow turn through an automatic Pi retry", async () => {
     const message = followUpMessage("sent");
     const current = view(message);
-    current.openWorkflowMessageId = message.workflowMessageId;
     current.openWorkflowTurn = {
       schema: "pi-workflows.workflow-turn.v1",
       workflowTurnId: "accepted-turn",
@@ -487,7 +557,7 @@ describe("WorkflowMessageCoordinator", () => {
     coordinator.updateView(current);
     await coordinator.synchronize(
       { sendMessage: vi.fn() } as never,
-      { request: vi.fn(async () => ({ outcome: "accepted" })) } as never,
+      clientDouble(vi.fn(async () => ({ outcome: "accepted" }))),
       {
         isIdle: () => false,
         hasPendingMessages: () => false,
@@ -498,11 +568,11 @@ describe("WorkflowMessageCoordinator", () => {
         },
       } as never,
     );
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
 
     coordinator.startTurn();
 
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
   });
 
   it("keeps a sent workflow message ready until its Pi model turn starts", async () => {
@@ -522,16 +592,16 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
 
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
     expect(coordinator.activeTurnMessage()).toBeUndefined();
     expect(
       request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
     ).toHaveLength(0);
 
     coordinator.startTurn();
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
 
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
     expect(
       request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
     ).toHaveLength(1);
@@ -556,26 +626,65 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
 
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
 
     coordinator.updateView({
       ...current,
-      workflowMessages: [],
-      workflowMessageTotal: 0,
-      nextWorkflowMessageId: null,
-      openWorkflowMessageId: null,
+      workflowMessage: null,
       openWorkflowTurn: null,
     });
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
 
     coordinator.endTurn("completed", "response-1");
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
 
     expect(coordinator.activeTurnMessage()).toBeUndefined();
     expect(
       request.mock.calls.filter(([call]) => call.operation === "workflowTurn.report"),
     ).toHaveLength(2);
+  });
+
+  it("blocks every tool while a lost subscription leaves the turn unconfirmed", async () => {
+    const coordinator = new WorkflowMessageCoordinator();
+    const message = followUpMessage();
+    message.kind = "step";
+    message.content.details = {
+      workflowMessageId: message.workflowMessageId,
+      contract: { requestId: "exact-request", allowedTools: ["read"] },
+    };
+    message.contentDigest = contentDigestOf(message.content);
+    coordinator.updateView(view(message));
+    const branch: unknown[] = [];
+    let idle = true;
+    const ctx = {
+      isIdle: () => idle,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn((entry: { details: unknown }) => {
+      branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
+      idle = false;
+      coordinator.startTurn();
+    });
+    await coordinator.synchronize(
+      { sendMessage } as never,
+      clientDouble(
+        vi.fn(async (options: Record<string, unknown>) => acceptedServerRequest(options)),
+      ),
+      ctx,
+    );
+    // The confirmed turn permits its allowlisted tool and blocks the rest.
+    expect(coordinator.toolCallBlockReason("read", {})).toBeUndefined();
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("not allowed");
+    // A lost subscription removes the authority the allowlist came from, so the
+    // running turn may not act until a fresh snapshot confirms it again.
+    coordinator.fence();
+    expect(coordinator.toolCallBlockReason("read", {})).toContain("unavailable");
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("unavailable");
+    coordinator.updateView(view(message));
+    expect(coordinator.toolCallBlockReason("read", {})).toBeUndefined();
+    expect(coordinator.toolCallBlockReason("bash", {})).toContain("not allowed");
   });
 
   it("enforces the owned turn allowlist before acknowledgment without restricting ordinary chat", async () => {
@@ -587,6 +696,7 @@ describe("WorkflowMessageCoordinator", () => {
       allowedTools: ["read", "list_sessions"] as string[] | string,
     };
     message.content.details = { workflowMessageId: message.workflowMessageId, contract };
+    message.contentDigest = contentDigestOf(message.content);
     coordinator.updateView(view(message));
     expect(coordinator.toolCallBlockReason("bash", {})).toBeUndefined();
     const branch: unknown[] = [];
@@ -604,7 +714,9 @@ describe("WorkflowMessageCoordinator", () => {
     });
     await coordinator.synchronize(
       { sendMessage } as never,
-      { request: vi.fn(async (options) => acceptedServerRequest(options)) } as never,
+      clientDouble(
+        vi.fn(async (options: Record<string, unknown>) => acceptedServerRequest(options)),
+      ),
       ctx,
     );
     for (const tool of ["read", "list_sessions"])
@@ -636,7 +748,7 @@ describe("WorkflowMessageCoordinator", () => {
     contract.allowedTools = ["read"];
     coordinator.updateView({
       ...view(message),
-      cancelledWorkflowMessageIds: [message.workflowMessageId],
+      workflowMessage: { ...sessionMessage(message), deliveryCancelled: true },
     });
     expect(coordinator.toolCallBlockReason("read", {})).toContain("cancelled");
     coordinator.endTurn("aborted", null);
@@ -674,7 +786,7 @@ describe("WorkflowMessageCoordinator", () => {
     } as never;
     const beforeTurnEnd = vi.fn(async () => undefined);
     const sync = () =>
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         beforeTurnEnd,
       });
     await sync();
@@ -726,18 +838,21 @@ describe("WorkflowMessageCoordinator", () => {
     });
     const beforeTurnEnd = vi.fn(async () => undefined);
     const sync = () =>
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
         beforeTurnEnd,
       });
     await sync();
     coordinator.updateView({
       ...current,
-      cancelledWorkflowMessageIds: [message.workflowMessageId],
+      workflowMessage:
+        current.workflowMessage === null
+          ? null
+          : { ...current.workflowMessage, deliveryCancelled: true },
     });
     await sync();
     await sync();
     expect(abort).toHaveBeenCalledTimes(1);
-    expect(coordinator.activeTurnMessage()).toBe(message);
+    expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(message.workflowMessageId);
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(
       request.mock.calls.filter(([call]) => (call.payload as { state?: string }).state === "ended"),
@@ -809,14 +924,17 @@ describe("WorkflowMessageCoordinator", () => {
       });
       const beforeTurnEnd = vi.fn(async () => undefined);
       const sync = () =>
-        coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx, {
           beforeTurnEnd,
         });
       const delivery = sync();
       await waiting;
       coordinator.updateView({
         ...current,
-        cancelledWorkflowMessageIds: [message.workflowMessageId],
+        workflowMessage:
+          current.workflowMessage === null
+            ? null
+            : { ...current.workflowMessage, deliveryCancelled: true },
       });
       // The extension invokes this before its serialized presentation queue.
       coordinator.abortCancelledTurn(ctx);
@@ -837,8 +955,9 @@ describe("WorkflowMessageCoordinator", () => {
   it("does not bind a later manual turn to a terminal message that was already reported", async () => {
     const branch: Record<string, unknown>[] = [];
     const message = followUpMessage();
+    const current = view(message);
     const coordinator = new WorkflowMessageCoordinator();
-    coordinator.updateView(view(message));
+    coordinator.updateView(current);
     const request = vi.fn(async (options: Record<string, unknown>) =>
       acceptedServerRequest(options),
     );
@@ -850,18 +969,15 @@ describe("WorkflowMessageCoordinator", () => {
       });
     });
 
-    await coordinator.synchronize(
-      { sendMessage } as never,
-      { request } as never,
-      {
-        isIdle: () => true,
-        hasPendingMessages: () => false,
-        sessionManager: { getBranch: () => branch },
-      } as never,
-    );
+    await coordinator.synchronize({ sendMessage } as never, clientDouble(request), {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never);
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(message.status).toBe("sent");
+    // The branch report confirms the delivery, so the message Pi holds is sent.
+    expect(current.workflowMessage?.status).toBe("sent");
     coordinator.startTurn();
     expect(coordinator.activeTurnMessage()).toBeUndefined();
     expect(request).toHaveBeenCalledWith(

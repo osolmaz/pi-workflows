@@ -28,7 +28,7 @@ describe("parseResourceManagerArgs", () => {
     });
   });
 
-  it("rejects embedded-host controls and malformed apply specs", () => {
+  it("rejects embedded server controls and malformed apply specs", () => {
     expect(() => parseResourceManagerArgs("start")).toThrow(/Usage/u);
     expect(() => parseResourceManagerArgs("stop")).toThrow(/Usage/u);
     expect(() => parseResourceManagerArgs("apply sample one {broken")).toThrow(

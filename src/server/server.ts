@@ -19,6 +19,7 @@ import { WorkflowClient } from "../client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
   encodeProtocolLine,
+  assertSocketPathSupported,
   clientSocketPath,
   NdjsonFrameDecoder,
   parseClientRequest,
@@ -28,6 +29,7 @@ import {
   type ClientResponse,
 } from "../client/protocol.js";
 import {
+  BRANCH_REPORT_RECEIPT_SCHEMA,
   WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA,
   type WorkflowBranchReport,
   type WorkflowRunView,
@@ -142,7 +144,7 @@ const AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS = 5 * 60 * 1_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RESOURCE_MANAGER_CLAIM_LEASE_MS = 120_000;
 const RESOURCE_MANAGER_RENEW_MS = 30_000;
-const DEFAULT_MAX_WORKERS = 4;
+const DEFAULT_MAX_RUNNERS = 4;
 const DEFAULT_RESOURCE_MANAGER_TIMEOUT_MS = 60_000;
 
 export type WorkflowServerOptions = {
@@ -154,8 +156,8 @@ export type WorkflowServerOptions = {
   piArgs?: string[];
   env?: Record<string, string>;
   claimPollMs?: number;
-  /** Combined capacity for workflow and resource-manager execution workers. */
-  maxWorkers?: number;
+  /** Combined capacity for workflow runner and resource runner processes. */
+  maxRunners?: number;
   serverLeaseMs?: number;
   serverRenewMs?: number;
   runClaimLeaseMs?: number;
@@ -186,6 +188,8 @@ type ClientSubscription = {
   target?: string;
   revision: number;
   limit?: number;
+  /** First node row this session snapshot must start at. */
+  nodeCursor?: number;
   digest?: string;
 };
 
@@ -194,6 +198,8 @@ type ClientConnection = {
   socket: Socket;
   subscriptions: Map<string, ClientSubscription>;
   publishing: boolean;
+  /** Set when a change must publish after the pass that is already running. */
+  publishQueued: boolean;
 };
 
 type SessionCoordinator = {
@@ -268,7 +274,7 @@ export class WorkflowServer {
   private started = false;
   private schedulerActive = false;
   private preferResourceManager = false;
-  private readonly maxWorkers: number;
+  private readonly maxRunners: number;
   private decisionTimeoutActive = false;
   private decisionChannelConfig: DecisionChannelConfig | null = null;
   private decisionChannelError: string | null = null;
@@ -283,15 +289,15 @@ export class WorkflowServer {
 
   constructor(options: WorkflowServerOptions = {}) {
     this.options = options;
-    this.maxWorkers = options.maxWorkers ?? DEFAULT_MAX_WORKERS;
-    if (!Number.isSafeInteger(this.maxWorkers) || this.maxWorkers < 1) {
-      throw new Error("maxWorkers must be a positive safe integer");
+    this.maxRunners = options.maxRunners ?? DEFAULT_MAX_RUNNERS;
+    if (!Number.isSafeInteger(this.maxRunners) || this.maxRunners < 1) {
+      throw new Error("maxRunners must be a positive safe integer");
     }
-    this.serverId = options.runnerId ?? `host-${randomUUID()}`;
+    this.serverId = options.runnerId ?? `server-${randomUUID()}`;
     this.databasePath = path.resolve(options.databasePath ?? workflowStatePath());
-    this.stateDirectory = path.join(path.dirname(this.databasePath), "host");
+    this.stateDirectory = path.join(path.dirname(this.databasePath), "server");
     this.socketPath = clientSocketPath(this.databasePath);
-    this.lockPath = path.join(this.stateDirectory, "host.lock.json");
+    this.lockPath = path.join(this.stateDirectory, "server.lock.json");
     this.state = new StateDatabase({ filePath: this.databasePath });
     this.serverState = new ServerStateStore(this.databasePath, { state: this.state });
     this.recovery = new WorkflowRecovery(this.state);
@@ -479,13 +485,13 @@ export class WorkflowServer {
       this.state.connection
         .prepare(
           `UPDATE leases SET expires_at = ?
-           WHERE owner_id = ? AND owner_type IN ('host', 'controller') AND expires_at > ?`,
+           WHERE owner_id = ? AND owner_type IN ('server', 'resource_manager') AND expires_at > ?`,
         )
         .run(now, previousServerId, now);
       this.state.connection
         .prepare(
-          `UPDATE run_workers SET status = 'orphaned', finished_at = ?
-           WHERE host_epoch < ? AND status IN ('starting', 'ready', 'running')`,
+          `UPDATE run_runners SET status = 'orphaned', finished_at = ?
+           WHERE server_epoch < ? AND status IN ('starting', 'ready', 'running')`,
         )
         .run(now, serverEpoch);
     });
@@ -559,6 +565,7 @@ export class WorkflowServer {
       server.once("listening", onListening);
       server.once("error", onError);
       try {
+        assertSocketPathSupported(this.socketPath);
         server.listen(this.socketPath);
       } catch (error) {
         cleanup();
@@ -576,6 +583,7 @@ export class WorkflowServer {
       socket,
       subscriptions: new Map(),
       publishing: false,
+      publishQueued: false,
     };
     this.connections.set(socket, connection);
     socket.write(
@@ -711,6 +719,24 @@ export class WorkflowServer {
           if (payload.coordinator !== undefined && payload.coordinator !== false) {
             throw new Error("view.session.watch coordinator must be a boolean");
           }
+          // A node-window change is part of the subscription, so it must arrive
+          // as a fresh snapshot instead of waiting for the next publish poll.
+          this.publishViews();
+          return clientResponse(request.requestId, "accepted", { subscribed: true });
+        }
+        case "view.session.window": {
+          const payload = requireRecord(request.payload, "view.session.window payload");
+          const subscriptionId = requireString(payload.subscriptionId, "subscriptionId");
+          const subscription = connection.subscriptions.get(subscriptionId);
+          if (subscription === undefined || subscription.kind !== "session") {
+            throw new Error("view.session.window needs a session subscription");
+          }
+          if (payload.nodeCursor === null) delete subscription.nodeCursor;
+          else
+            subscription.nodeCursor = requireNonNegativeInteger(payload.nodeCursor, "nodeCursor");
+          // The same window can repeat, and the next publish poll must not be
+          // the reason a scrolled widget waits for its rows.
+          this.publishViews();
           return clientResponse(request.requestId, "accepted", { subscribed: true });
         }
         case "view.run.unwatch": {
@@ -903,11 +929,16 @@ export class WorkflowServer {
       kind === "runs" && payload.limit !== undefined
         ? requirePositiveInteger(payload.limit, "limit")
         : undefined;
+    const nodeCursor =
+      kind !== "session" || payload.nodeCursor === undefined
+        ? undefined
+        : requireNonNegativeInteger(payload.nodeCursor, "nodeCursor");
     connection.subscriptions.set(id, {
       id,
       kind,
       ...(target === undefined ? {} : { target }),
       ...(limit === undefined ? {} : { limit }),
+      ...(nodeCursor === undefined ? {} : { nodeCursor }),
       revision: 0,
     });
   }
@@ -972,8 +1003,34 @@ export class WorkflowServer {
       report.targetSessionId,
       report.coordinatorEpoch,
     );
-    const messages = this.serverState.workflowMessages.listSession(report.targetSessionId);
+    const messages = this.serverState.workflowMessages.listSessionSummaries(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
+    // Pi reports its one current message, or null when it holds none yet. A
+    // present report without an entry means the message stays pending.
+    const workflowMessageId = report.workflowMessageId;
+    // A report proves the branch facts of one known message. An unknown ID is a
+    // stale or wrong-session report, and it must not authorize idle recovery.
+    if (workflowMessageId !== null && !allowed.has(workflowMessageId)) {
+      throw new Error(
+        `Workflow branch report names an unknown workflow message: ${workflowMessageId}`,
+      );
+    }
+    const piSessionEntryId =
+      workflowMessageId !== null && report.piSessionEntryId !== null
+        ? report.piSessionEntryId
+        : null;
+    const entries =
+      workflowMessageId === null || piSessionEntryId === null
+        ? []
+        : [{ workflowMessageId, piSessionEntryId }];
+    // Pi reports one message, so only that message's source has branch evidence
+    // in this report. A report of no message proves that the branch holds no
+    // workflow message at all, which covers every pending interaction.
+    const reportedSourceId =
+      workflowMessageId === null
+        ? null
+        : (messages.find((message) => message.workflowMessageId === workflowMessageId)?.sourceId ??
+          null);
     const reconciledRunIds = new Set<string>();
     this.state.transaction(() => {
       if (coordinator.needsTimerResume) {
@@ -982,8 +1039,8 @@ export class WorkflowServer {
       }
       this.serverState.workflowMessages.adoptBranch(
         report.targetSessionId,
-        report.entries,
-        allowed,
+        entries,
+        new Set(entries.map((entry) => entry.workflowMessageId)),
       );
       if (report.isIdle && !report.hasPendingMessages) {
         for (const turn of this.serverState.workflowMessages.openTurnsForSession(
@@ -1001,11 +1058,20 @@ export class WorkflowServer {
             responseSessionEntryId: null,
           });
         }
-        const branchIds = new Set(report.entries.map((entry) => entry.workflowMessageId));
-        const refreshed = this.serverState.workflowMessages.listSession(report.targetSessionId);
+        const branchIds = new Set(entries.map((entry) => entry.workflowMessageId));
+        const refreshed = this.serverState.workflowMessages.listSessionSummaries(
+          report.targetSessionId,
+        );
         for (const interaction of this.serverState.listPendingInteractions(
           report.targetSessionId,
         )) {
+          // An unreported source keeps its own recovery on the next report that
+          // names it, so a missing entry is never assumed from another message.
+          if (workflowMessageId !== null && interaction.requestId !== reportedSourceId) continue;
+          // A paused run acts on nothing, and the session view does not carry a
+          // delivered step while its run is paused, so a report of no message
+          // proves nothing about that source. Its recovery waits for the run.
+          if (this.serverState.isRunPaused(interaction.runId)) continue;
           const sourceMessages = refreshed.filter(
             (message) => message.sourceId === interaction.requestId,
           );
@@ -1029,7 +1095,9 @@ export class WorkflowServer {
     this.views.noteWorkflowActivityChange();
     this.publishViews();
     return clientResponse(request.requestId, "accepted", {
-      recorded: true,
+      schema: BRANCH_REPORT_RECEIPT_SCHEMA,
+      outcome: piSessionEntryId === null ? "absent" : "present",
+      workflowMessageId,
       coordinatorEpoch: coordinator.epoch,
     });
   }
@@ -1092,7 +1160,7 @@ export class WorkflowServer {
       });
       if (
         this.queue.isWorkflowRunPaused(report.runId) ||
-        session.openWorkflowMessageId !== report.workflowMessageId
+        session.workflowMessage?.workflowMessageId !== report.workflowMessageId
       ) {
         outcome = "adopted";
         return workflowTurnReceipt("absent", null);
@@ -1215,51 +1283,97 @@ export class WorkflowServer {
   }
 
   private async publishConnection(connection: ClientConnection): Promise<void> {
+    // A change that arrives while a pass runs must publish too, or an explicit
+    // request would wait for the next poll tick to reach its client. The running
+    // pass therefore repeats until no further pass was asked for.
+    connection.publishQueued = true;
     if (connection.publishing || connection.socket.destroyed) return;
     connection.publishing = true;
     try {
-      for (const subscription of connection.subscriptions.values()) {
-        const payload =
-          subscription.kind === "runs"
-            ? toJsonValue(this.views.list(0, subscription.limit))
-            : subscription.kind === "run"
-              ? toJsonValue(this.views.run(subscription.target ?? ""))
-              : toJsonValue(
-                  this.views.session(
-                    subscription.target ?? "",
-                    this.sessionCoordinatorView(connection, subscription.target ?? ""),
-                  ),
-                );
-        const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
-        if (subscription.digest === digest) continue;
-        subscription.digest = digest;
-        subscription.revision += 1;
-        const event: ClientEvent = {
-          schema: CLIENT_PROTOCOL_SCHEMA,
-          type: "event",
-          subscriptionId: subscription.id,
-          event:
-            subscription.kind === "runs"
-              ? "runs"
-              : subscription.kind === "run"
-                ? "run_snapshot"
-                : "session_snapshot",
-          revision: subscription.revision,
-          ...(subscription.kind === "run" && subscription.target !== undefined
-            ? { runId: subscription.target }
-            : {}),
-          payload,
-        };
-        if (!connection.socket.write(encodeProtocolLine(event))) {
-          await waitForSocketDrain(connection.socket);
-          if (connection.socket.destroyed) return;
+      while (connection.publishQueued && !connection.socket.destroyed) {
+        connection.publishQueued = false;
+        for (const subscription of connection.subscriptions.values()) {
+          // One failed projection fails only its own subscription. The connection
+          // stays open, and the client decides when to ask again.
+          try {
+            await this.publishSubscription(connection, subscription);
+          } catch (error) {
+            connection.subscriptions.delete(subscription.id);
+            this.log(
+              `client view error for subscription ${subscription.id}: ${errorMessage(error)}`,
+            );
+            this.failSubscription(connection, subscription.id, errorMessage(error));
+          }
         }
       }
-    } catch (error) {
-      this.log(`client view error: ${errorMessage(error)}`);
-      connection.socket.destroy();
     } finally {
       connection.publishing = false;
+    }
+  }
+
+  private failSubscription(
+    connection: ClientConnection,
+    subscriptionId: string,
+    message: string,
+  ): void {
+    const event: ClientEvent = {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId,
+      event: "unavailable",
+      payload: {
+        schema: "pi-workflows.subscription-failure.v1",
+        reasonCode: "projection_failed",
+        message: message.slice(0, 300),
+      },
+    };
+    try {
+      if (!connection.socket.write(encodeProtocolLine(event))) {
+        void waitForSocketDrain(connection.socket).catch(() => undefined);
+      }
+    } catch {
+      // A closed socket needs no failure notice.
+    }
+  }
+
+  private async publishSubscription(
+    connection: ClientConnection,
+    subscription: ClientSubscription,
+  ): Promise<void> {
+    const payload =
+      subscription.kind === "runs"
+        ? toJsonValue(this.views.list(0, subscription.limit))
+        : subscription.kind === "run"
+          ? toJsonValue(this.views.run(subscription.target ?? ""))
+          : toJsonValue(
+              this.views.session(
+                subscription.target ?? "",
+                this.sessionCoordinatorView(connection, subscription.target ?? ""),
+                subscription.nodeCursor,
+              ),
+            );
+    const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
+    if (subscription.digest === digest) return;
+    subscription.digest = digest;
+    subscription.revision += 1;
+    const event: ClientEvent = {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: subscription.id,
+      event:
+        subscription.kind === "runs"
+          ? "runs"
+          : subscription.kind === "run"
+            ? "run_snapshot"
+            : "session_snapshot",
+      revision: subscription.revision,
+      ...(subscription.kind === "run" && subscription.target !== undefined
+        ? { runId: subscription.target }
+        : {}),
+      payload,
+    };
+    if (!connection.socket.write(encodeProtocolLine(event))) {
+      await waitForSocketDrain(connection.socket);
     }
   }
 
@@ -1381,7 +1495,7 @@ export class WorkflowServer {
           if (
             !this.queue.cancelWorkflowRun({
               runId: active.record.runId,
-              // Handoff has already released this worker's claim. The queue's
+              // Handoff has already released this runner's claim. The queue's
               // unclaimed path still rejects a different live owner atomically.
               ...(active.control === "handoff" ? {} : { claimToken: active.claimToken }),
             })
@@ -1572,6 +1686,7 @@ export class WorkflowServer {
       case "view.page":
       case "view.content":
       case "view.session.watch":
+      case "view.session.window":
       case "workflowMessage.reportBranch":
       case "workflowTurn.report":
       case "run.changeSettings":
@@ -1984,10 +2099,10 @@ export class WorkflowServer {
         "SELECT COUNT(*) AS count FROM interactive_requests WHERE status = 'pending'",
       ),
       ambiguousEffects: count("SELECT COUNT(*) AS count FROM effects WHERE status = 'ambiguous'"),
-      pendingResourceManagers: count("SELECT COUNT(*) AS count FROM controller_queue"),
+      pendingResourceManagers: count("SELECT COUNT(*) AS count FROM managed_resource_queue"),
       activeResourceRunners: this.activeResourceManagers.size,
-      executionWorkers: this.executionWorkerCount(),
-      maxWorkers: this.maxWorkers,
+      executionRunners: this.executionRunnerCount(),
+      maxRunners: this.maxRunners,
       lifecycleContradictions: violations.filter((item) => item.code === "queueState").length,
       stateViolations: violations,
     };
@@ -2133,7 +2248,7 @@ export class WorkflowServer {
       counts: {
         resources: count("SELECT COUNT(*) AS count FROM resources"),
         runs: count("SELECT COUNT(*) AS count FROM runs"),
-        resourceManagers: count("SELECT COUNT(*) AS count FROM controller_resources"),
+        resourceManagers: count("SELECT COUNT(*) AS count FROM managed_resources"),
         decisions: count("SELECT COUNT(*) AS count FROM human_decisions"),
         settingsScopes: count("SELECT COUNT(*) AS count FROM workflow_settings"),
         pendingInteractions: count(
@@ -2574,7 +2689,7 @@ export class WorkflowServer {
       );
       this.activeChannels.clear();
 
-      this.markApplyingChannelEffectsAmbiguous(undefined, "host_restarted_without_receipt");
+      this.markApplyingChannelEffectsAmbiguous(undefined, "server_restarted_without_receipt");
       const configuredDir = this.options.env?.PI_WORKFLOWS_CONFIG_DIR;
       const loaded = await loadDecisionChannelConfig(configuredDir);
       this.decisionChannelConfig = loaded?.channels ?? null;
@@ -3130,8 +3245,8 @@ export class WorkflowServer {
       const rows = this.state.connection
         .prepare(
           `SELECT DISTINCT p.canonical_path AS projectPath
-           FROM controller_queue q
-           JOIN controller_resources c ON c.controller_resource_id = q.controller_resource_id
+           FROM managed_resource_queue q
+           JOIN managed_resources c ON c.managed_resource_id = q.managed_resource_id
            JOIN projects p ON p.project_id = c.project_id
            JOIN leases l ON l.resource_id = c.resource_id
            WHERE q.available_at <= ? AND (l.owner_id IS NULL OR l.expires_at <= ?)
@@ -3196,7 +3311,7 @@ export class WorkflowServer {
     const key = `${projectPath}\u0000${claim.resourceManager}\u0000${claim.key}`;
     const reconcileId = randomUUID();
     const envelope: ResourceRunnerLaunchEnvelope = {
-      schema: "pi-workflows.controller-worker-launch.v1",
+      schema: "pi-workflows.resource-runner-launch.v1",
       runnerEpoch,
       serverEpoch: this.claim.epoch,
       generation: claim.generation,
@@ -3375,8 +3490,8 @@ export class WorkflowServer {
           runId: request.runId,
           requestId: request.actorRequestKey,
           targetSessionId,
-          actor: { type: "controller", id: request.managedResourceUid },
-          source: "controller-request",
+          actor: { type: "resource_manager", id: request.managedResourceUid },
+          source: "resource-manager-request",
           prompt: request.prompt,
         });
         return {
@@ -3391,8 +3506,8 @@ export class WorkflowServer {
         const result = this.runStore.removeFollowUp({
           runId: request.runId,
           followUpId: request.followUpId,
-          actor: { type: "controller", id: request.managedResourceUid },
-          source: "controller-request",
+          actor: { type: "resource_manager", id: request.managedResourceUid },
+          source: "resource-manager-request",
         });
         return {
           runId: request.runId,
@@ -3463,8 +3578,8 @@ export class WorkflowServer {
       scopeId,
       requestId: request.actorRequestKey,
       expectedChangeNumber: request.expectedChangeNumber ?? scope.changeNumber,
-      actor: { type: "controller", id: request.managedResourceUid },
-      source: "controller-request",
+      actor: { type: "resource_manager", id: request.managedResourceUid },
+      source: "resource-manager-request",
       patch: proposal.patch,
     });
     return {
@@ -3595,7 +3710,7 @@ export class WorkflowServer {
     const now = new Date();
     const delay = Math.min(60_000, 1_000 * 2 ** Math.min(active.claim.consecutiveErrors, 6));
     this.state.transaction(() => {
-      // A replaced worker cannot record a failure or schedule another attempt.
+      // A replaced runner cannot record a failure or schedule another attempt.
       if (
         !active.store.renewClaim(active.claim, RESOURCE_MANAGER_CLAIM_LEASE_MS, now.toISOString())
       )
@@ -3740,7 +3855,7 @@ export class WorkflowServer {
     this.pendingRunClaims.delete(runId);
   }
 
-  private executionWorkerCount(): number {
+  private executionRunnerCount(): number {
     return (
       new Set([...this.activeRuns.keys(), ...this.pendingRunClaims.keys()]).size +
       this.activeResourceManagers.size
@@ -3752,7 +3867,7 @@ export class WorkflowServer {
       this.stopping ||
       this.claim === null ||
       this.schedulerActive ||
-      this.executionWorkerCount() >= this.maxWorkers
+      this.executionRunnerCount() >= this.maxRunners
     )
       return;
     this.schedulerActive = true;
@@ -3776,7 +3891,7 @@ export class WorkflowServer {
         if (launched) this.preferResourceManager = false;
       }
     } catch (error) {
-      this.log(`worker scheduling failed: ${errorMessage(error)}`);
+      this.log(`runner scheduling failed: ${errorMessage(error)}`);
     } finally {
       this.schedulerActive = false;
       if (launched && !this.stopping) setImmediate(() => void this.claimOne());
@@ -3849,7 +3964,7 @@ export class WorkflowServer {
       return;
     }
     const envelope: WorkflowRunnerLaunchEnvelope = {
-      schema: "pi-workflows.worker-launch.v1",
+      schema: "pi-workflows.runner-launch.v1",
       runId,
       generation,
       runnerEpoch: randomUUID(),
@@ -4727,10 +4842,10 @@ export class WorkflowServer {
   private completeResourceManagerWorkflow(runId: string, state: WorkflowRunState): void {
     const row = this.state.connection
       .prepare(
-        `SELECT w.request_id AS requestId, c.controller_name AS resourceManager,
+        `SELECT w.request_id AS requestId, c.resource_manager_name AS resourceManager,
                 c.resource_key AS resourceKey, p.canonical_path AS projectPath
-         FROM controller_workflows w
-         JOIN controller_resources c ON c.controller_resource_id = w.controller_resource_id
+         FROM managed_resource_workflows w
+         JOIN managed_resources c ON c.managed_resource_id = w.managed_resource_id
          JOIN projects p ON p.project_id = c.project_id
          WHERE w.run_id = ? LIMIT 1`,
       )
@@ -4974,7 +5089,7 @@ function acquireServerLock(
   }
   fs.writeFileSync(
     lockPath,
-    `${JSON.stringify({ schema: "pi-workflows.host-lock.v1", ...record })}\n`,
+    `${JSON.stringify({ schema: "pi-workflows.server-lock.v1", ...record })}\n`,
     { encoding: "utf8", mode: 0o600, flag: "wx" },
   );
 }
@@ -5005,7 +5120,7 @@ function runnerResponse(
   revision?: number,
 ): WorkflowRunnerResponse {
   return {
-    schema: "pi-workflows.worker-response.v1",
+    schema: "pi-workflows.runner-response.v1",
     messageId: message.messageId,
     outcome,
     ...(revision === undefined ? {} : { revision }),
@@ -5021,7 +5136,7 @@ function resourceRunnerResponse(
   error?: string,
 ): ResourceRunnerResponse {
   return {
-    schema: "pi-workflows.controller-worker-response.v1",
+    schema: "pi-workflows.resource-runner-response.v1",
     messageId: message.messageId,
     outcome,
     ...(result === undefined ? {} : { result }),
@@ -5158,12 +5273,24 @@ function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind, cursor: n
       items: Array.isArray(queue.items) ? queue.items : [],
     };
   }
-  return {
-    ...base,
-    start: view.updateStart,
-    total: view.updateTotal,
-    items: view.updates,
-  };
+  if (kind === "workflow_messages") {
+    return {
+      ...base,
+      start: view.workflowMessageStart,
+      total: view.workflowMessageTotal,
+      items: view.workflowMessages,
+    };
+  }
+  if (kind === "updates") {
+    return {
+      ...base,
+      start: view.updateStart,
+      total: view.updateTotal,
+      items: view.updates,
+    };
+  }
+  // A new page kind must add its receipt above instead of returning update rows.
+  throw new Error(`view.page kind ${kind} has no receipt`);
 }
 
 function clientResponse(
@@ -5192,23 +5319,18 @@ function boundedClientError(error: string): string {
 
 function parseWorkflowBranchReport(payload: JsonValue): WorkflowBranchReport {
   const value = requireRecord(payload, "workflowMessage.reportBranch payload");
-  if (!Array.isArray(value.entries)) throw new Error("Workflow branch entries must be an array");
-  const seen = new Set<string>();
-  const entries = value.entries.map((item) => {
-    const entry = requireRecord(item as JsonValue, "workflow branch entry");
-    const workflowMessageId = requireString(entry.workflowMessageId, "workflowMessageId");
-    if (seen.has(workflowMessageId))
-      throw new Error("Workflow branch report has duplicate messages");
-    seen.add(workflowMessageId);
-    return {
-      workflowMessageId,
-      piSessionEntryId: requireString(entry.piSessionEntryId, "piSessionEntryId"),
-    };
-  });
+  const piSessionEntryId =
+    value.piSessionEntryId === null
+      ? null
+      : requireString(value.piSessionEntryId, "piSessionEntryId");
   return {
     targetSessionId: requireString(value.targetSessionId, "targetSessionId"),
     coordinatorEpoch: requireString(value.coordinatorEpoch, "coordinatorEpoch"),
-    entries,
+    workflowMessageId:
+      value.workflowMessageId === null
+        ? null
+        : requireString(value.workflowMessageId, "workflowMessageId"),
+    piSessionEntryId,
     isIdle: requireBoolean(value.isIdle, "isIdle"),
     hasPendingMessages: requireBoolean(value.hasPendingMessages, "hasPendingMessages"),
   };
@@ -5337,7 +5459,7 @@ function isLockRecord(
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as { schema?: unknown }).schema === "pi-workflows.host-lock.v1" &&
+    (value as { schema?: unknown }).schema === "pi-workflows.server-lock.v1" &&
     typeof (value as { pid?: unknown }).pid === "number" &&
     typeof (value as { startIdentity?: unknown }).startIdentity === "string" &&
     typeof (value as { serverId?: unknown }).serverId === "string"

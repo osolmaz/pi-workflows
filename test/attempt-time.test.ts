@@ -96,13 +96,13 @@ it("recovers only durable samples after a crash and excludes server downtime", a
     f.advance(80);
     f.time.sample();
     f.advance(100_000);
-    const nextHost = new AttemptTime(f.queue.state, f.clock);
-    expect(() => nextHost.start("attempt")).toThrow("Recover the previous host");
-    nextHost.recover();
+    const nextServer = new AttemptTime(f.queue.state, f.clock);
+    expect(() => nextServer.start("attempt")).toThrow("Recover the previous workflow server");
+    nextServer.recover();
     expect(f.elapsed()).toBe(80);
-    nextHost.start("attempt");
+    nextServer.start("attempt");
     f.advance(20);
-    nextHost.stop("attempt");
+    nextServer.stop("attempt");
     expect(f.elapsed()).toBe(100);
   } finally {
     f.queue.close();

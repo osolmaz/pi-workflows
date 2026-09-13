@@ -145,7 +145,7 @@ The coordinator sends only one workflow message at a time. A poll can find work,
 
 Pi can emit `agent_start` before the server saves the new Pi entry ID. The coordinator keeps that start and any matching end in its in-memory session map. It first marks the workflow message `sent`, then reports the saved turn events in order. It does not drop a turn event while server confirmation is in progress.
 
-A visible active-branch entry with the hidden ID is `sent`, even if the source lifecycle cancelled the message before the evidence arrived. Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages in the same observation. If Pi or the extension disappears after the send call, the message stays `pending`; reconnect reports the branch before another send. These rules do not prove cross-branch absence or exactly-once model execution.
+A visible active-branch entry with the hidden ID is `sent`, even if the source lifecycle cancelled the message before the evidence arrived. Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages in the same observation. One report names one message, so that absence is usable only for the reported message's own source. A report of no message at all proves that the branch holds no workflow message, which covers every pending source. An unreported source keeps its recovery for the next report that names it. A report that names a message the server does not know for that session is refused; it is stale or belongs to another session, and it cannot stand in as branch evidence. If Pi or the extension disappears after the send call, the message stays `pending`; reconnect reports the branch before another send. These rules do not prove cross-branch absence or exactly-once model execution.
 
 After Pi, the extension, or the server restarts, branch reporting runs before any new send. It re-creates a message of the source's own kind only when the active branch has no entry for that source. A pending interaction gets one `step` with reason `resumed`; a pending decision gets one `decision`. Old incompatible workflow state is not reinterpreted.
 
@@ -171,14 +171,14 @@ response ID pending. Once message and turn ownership are confirmed, the coordina
 submits that exact response before it reports the end. Later events cannot replace
 the pending turn or its response. Repeated reports adopt the saved result.
 
-The session view derives `cancelledWorkflowMessageIds` from cancelled agent requests and cancelled or removed follow-ups. It includes sent messages whose source was cancelled. This is a projection of existing records, not another durable state store. The coordinator calls public `ctx.abort()` once, only for its exact running owned turn. A rejected start acknowledgment follows the same stop-and-settle path. It never submits a result from the cancelled turn. Lost end acknowledgments retain that turn and its response without aborting later ordinary chat.
+The session view marks the one current message with `deliveryCancelled` when its source agent request was cancelled or its follow-up was cancelled or removed. This is a projection of existing records, not another durable state store. The coordinator calls public `ctx.abort()` once, only for its exact running owned turn. A rejected start acknowledgment follows the same stop-and-settle path. It never submits a result from the cancelled turn. Lost end acknowledgments retain that turn and its response without aborting later ordinary chat.
 
 A terminal workflow outcome cancels pending messages but does not fabricate Pi turn settlement. Any open workflow turn blocks the next delivery until an end report or a valid idle branch observation closes it.
 
 An aborted pending step pauses its run. Resume retains the request and attempt,
 advances the request revision, and creates one resumed step message when needed.
 A protected decision keeps its answer revision and decision message. A missing
-submission stays pending: the host adds no reminder turn or hidden retry limit.
+submission stays pending: the workflow server adds no reminder turn or hidden retry limit.
 
 Durable execution status and the visible status remain separate. A completed run remains
 completed during reporting or follow-up work. An agent request can remain durably waiting
@@ -186,7 +186,7 @@ while its workflow-owned Pi turn is active; the visible status is `running` duri
 An active supervised runner also displays `running`. Without active workflow work, a pending
 request displays `waiting`. Paused, ambiguous, and terminal states retain precedence. Ordinary
 chat does not count as workflow activity. Response controls follow the exact pending request
-in both running and waiting displays, not the visible label alone. Host
+in both running and waiting displays, not the visible label alone. Workflow server
 recovery closes active-time intervals at their last durable samples, not the Pi
 turn itself. Only an idle-session branch report can prove an unended turn lost.
 

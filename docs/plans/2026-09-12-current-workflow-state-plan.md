@@ -111,9 +111,13 @@ Selection uses this order:
 2. Otherwise, use the oldest relevant message whose presence on the active Pi branch is not yet
    known for the current coordinator epoch.
 3. Otherwise, use the next pending message that is eligible for delivery.
-4. Keep a retained terminal or follow-up message current until its required delivery or first turn
+4. Keep a delivered, cancelled step message current while Pi has not reported its turn, because the
+   extension must learn that a message it already holds is cancelled and stop that turn. A message Pi
+   never received needs no stopping, and keeping it current would let the extension deliver a
+   cancelled step again and would hide the retained terminal view.
+5. Keep a retained terminal or follow-up message current until its required delivery or first turn
    finishes.
-5. Return null when no message needs Pi.
+6. Return null when no message needs Pi.
 
 Future messages remain in SQLite. After Pi settles or confirms the current message, the server sends
 a new session snapshot with the next message. A long queue therefore changes the number of small
@@ -415,6 +419,97 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 Then run one real-model live end-to-end test with an authenticated low-cost model and an exact
 provider and model ID, as required by this repository.
 
+Result on `feat/current-workflow-state` after the rounds below:
+
+- `npm run check`: 110 files, 1327 tests, statements 90.93%, branches 85.41%.
+- `npm run test:e2e`: 14 tests passed.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`.
+- `npx slophammer-ts@latest dry .`: no findings.
+- `npx slophammer-ts@latest check . --only ts.dependency-boundaries-required`: no findings.
+- `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
+- Runtime live E2E: `20260913T001425191Z-live-runtime-e2e-302519f1`, result `passed`.
+- Real-model live E2E: `20260913T001754183Z-live-model-e2e-abc4df03`, provider `openai`, model
+  `gpt-5.6-luna`, cost $0.00384, result `passed`.
+- CI on the pull request: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+
+Result after the closing vocabulary sweep:
+
+- `npm run check`: 111 files, 1343 tests, statements 90.93%, branches 85.47%.
+- `npm run test:e2e`: 14 tests passed.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`: 87 tests passed.
+- `npx slophammer-ts@latest dry .` and the dependency-boundary check: no findings.
+- `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
+- Runtime live E2E: `20260913T014917509Z-live-runtime-e2e-f605c294`, result `passed`.
+- Real-model live E2E: `20260913T015035278Z-live-model-e2e-69c3e9f4`, provider `openai`, model
+  `gpt-5.6-luna`, cost $0.00340, result `passed`.
+- CI on the pull request at `c526ea5`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+- Result on the final head `bb36dd6`, after the reviewer rounds 29 to 36:
+  - `npm run check`: 111 files, 1348 tests, statements 90.93%, branches 85.48%.
+  - `npm run test:e2e`: 14 tests passed.
+  - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`: passed.
+  - `npx slophammer-ts@latest dry .` and the dependency-boundary check: no findings.
+  - `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
+  - Runtime live E2E: `20260913T033457066Z-live-runtime-e2e-4e428b1a`, result `passed`.
+  - Real-model live E2E: `20260913T033616192Z-live-model-e2e-28b0ef64`, provider `openai`, model
+    `gpt-5.6-luna`, cost $0.00339, result `passed`.
+  - CI on the pull request at `bb36dd6`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+  - Pi Reviewer round 36, on `bb36dd6`: no findings.
+- Pi Reviewer rounds on the pull request reached no findings at round 28. The model named by the
+  implementation workflow, `huggingface/deepseek-ai/DeepSeek-V4.1-Flash`, had answered with a rate
+  limit during the earlier rounds and returned findings again in rounds 29 to 34. Every finding was
+  either fixed with a red-green test or answered with source and test evidence. The later rounds
+  fixed a cancelled step that Pi never received, a session view cache that keyed
+  the selected message on the run, a lost action subtype, a lost current node during a pending
+  handoff, and an empty node window that could not page back.
+- Round 29 found that the compact run reported the current and waiting node as unbounded scalars,
+  while the window leaves out a row whose own bytes exceed the frame budget. `bcb952c` leaves such
+  an identity out of those two facts as well, so no node id larger than one frame reaches a client.
+  `test/server-view.test.ts` "leaves out a node identity that cannot fit the frame" covers it, and
+  the run stays complete through the row count and the detailed run view.
+- Round 31 asked whether a refused restore should stay retryable instead of spending the reconnect
+  budget. The rule is intended and already documented and tested: the budget resets only after a
+  handshake and a restored subscription set both succeed, a refused restore counts toward it
+  (`test/client.test.ts` "keeps the reconnect budget after a refused restore"), and a view from a
+  partly restored connection does not reset it ("keeps the reconnect budget after a view from a
+  partly restored subscription"). The blocker message now says that the server did not return the
+  session view, because the budget also counts a refused restore, and it names the recovery step.
+- Round 32 found that the human answer path can no longer answer a pending request that is not the
+  one in the session view. The one pending request is the plan's own bound, and the extension needs
+  the request's run and revision to answer a decision and must not guess the kind of a request the
+  view does not carry, so the refusal stays. The message now names the true state instead of
+  claiming that no request waits, `docs/WORKFLOW_SERVER.md` records the rule, and
+  `test/extension.test.ts` "answers only the pending request the session view carries" covers both
+  the refusal and the answer.
+- Round 33 found that the bounded session text cut could fall inside a multi-byte character and end
+  the value with a replacement character. `boundSessionText` now cuts on a character boundary;
+  `test/server-view.test.ts` "cuts bounded session text at a complete character" covers it.
+- Round 34 raised three bounded-cost questions, and each one is already answered by the code, a test,
+  or both, so no further change was needed.
+  - The message count in `readRunViewCounts` is not an unindexed scan. `workflow_messages_run_idx`
+    covers `(run_id, order_number)` (`src/state/schema.ts:558`), and the shared counts helper serves
+    `readRunView`, which builds `workflowMessages` and `workflowMessageTotal` for every caller. A
+    split would add a branch to a hot path to save one index scan over the messages of one run.
+  - The paged node window cannot be dropped before use. The widget asks for a window only through
+    `scrollBy`, which needs a loaded run, so `sessionWindowRunId` already equals the incoming run ID
+    when a cursor exists. The reset fires only on a real run change, which is the intended behavior,
+    and `test/extension.test.ts` "keeps the paged window across a re-arm" covers the reconnect path.
+  - An entry-less branch report is accepted and reported as absent. `reportWorkflowBranch` accepts
+    every message the session stores, including a cancelled one, and only an ID outside that set is
+    refused. `test/server.test.ts` covers both: the refusal at line 2099 and the entry-less present
+    report at line 2140, which re-issues the step message.
+- Round 35 found two real defects and both are fixed.
+  - A report of no message re-issued the step of a paused run. The session view does not carry a
+    delivered step while its run is paused, so Pi reports no message while it still holds the step,
+    and the report cancelled that message and created a second one. `reportWorkflowBranch` now skips
+    a paused source, because a paused run acts on nothing and Pi's branch may still hold the message.
+    `test/server.test.ts` "keeps a delivered step of a paused run when the branch reports no message"
+    fails without the guard with `[ 'sent', 'pending' ]` and passes with it. `docs/WORKFLOW_SERVER.md`
+    records the exception.
+  - The Rust version-1 operation list lacked `view.session.window`, so a valid request naming it
+    would be refused by the Rust parser while the TypeScript client and the schema accepted it.
+    `tui/src/protocol.rs` now lists it, and `test/client-boundary.test.ts` "keeps the Rust client
+    operations equal to the version-1 schema" keeps the two lists equal.
+
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
 
@@ -447,3 +542,180 @@ The change is complete when all of these statements are true:
 - The client protocol has one version-1 path with no compatibility code.
 - Pi core and Pi session schemas do not change.
 - All required checks, end-to-end tests, the live low-cost model test, and CI pass.
+
+## Implementation record
+
+Status: implemented on 2026-09-12, before merge.
+
+Commits:
+
+- `feat(state): send only current workflow state to Pi`
+- `fix(server): keep the next actionable message current`
+- `fix(client): bound reconnect and isolate one failed view`
+- `refactor(client): remove the unused run_patch event`
+- `refactor(state): rename components to workflow server, runner, and resource manager`
+- the documentation, test, and naming sweep commit that carries this record.
+
+### Departures from this plan
+
+1. **The widget keeps its own adapter instead of a rewritten data path.** `buildWidgetView(state,
+snapshot, ...)` keeps its signature. A new `src/extension/session-run-adapter.ts` rebuilds the
+   minimal run state, snapshot, and update records that the widget needs from the compact session
+   run. Reason: the widget has about a thousand lines of behavior tests. The adapter keeps those
+   tests meaningful, keeps the server-owned facts intact, and avoids a rewrite that the acceptance
+   criteria do not require.
+
+2. **The branch report names one message or no message.** `WorkflowBranchReport.workflowMessageId`
+   is `string | null`. A session that holds no workflow message yet must still clear the pending
+   branch report. Without a nullable value the coordinator can never report, and workflow commands
+   stay blocked. The server receipt reports `present` or `absent`. This replaces the removed
+   `workflowMessageIds` array.
+
+3. **One open turn per target session is a schema rule.** This plan already required a single open
+   turn. The implementation adds `workflow_turns_open_session_idx` beside
+   `workflow_turns_open_message_idx`, and `startTurn` rejects a second open turn for the same
+   session with the integrity error `Workflow session <id> already has open turn <turnId>`.
+
+4. **A failed subscription projection drops only that subscription.** `publishConnection` isolates
+   each subscriber. A failing projection emits `unavailable` with reason code `projection_failed`,
+   removes only that subscription, and logs `client view error for subscription <id>`. The client
+   re-arms with capped backoff: 1 s doubling to 30 s.
+
+5. **`apply_patch` and `PatchOp` stay in the Rust protocol module.** The `run_patch` event is gone
+   from the client schema and from both implementations. The RFC 6902 helpers remain as tested
+   public protocol utilities, because the Rust protocol test suite uses them directly.
+
+6. **Component naming was cut over in the same change.** See the next section. The plan did not name
+   this work, and it added one commit. It does not change the acceptance criteria.
+
+### Component naming cutover
+
+The public vocabulary is now workflow server, workflow runner, resource manager, resource runner,
+and managed resource. The cutover changed names in place. It adds no alias, no second storage path,
+and no compatibility reader.
+
+- SQLite: `workflow_server_state`, `server_id`, `server_commands`, `server_epoch`, `run_runners`,
+  `runner_epoch`, `runner_messages`, `managed_resources`, `managed_resource_finalizers`,
+  `managed_resource_queue`, `managed_resource_workflows`, `resource_manager_name`, and the matching
+  indexes.
+- Stored values: resource type `managed_resource`; owner and actor `server` and `resource_manager`.
+- Protocol schemas: `runner-launch.v1`, `runner-message.v1`, `runner-response.v1`,
+  `runner-content-reference.v1`, `runner-content-chunk.v1`, `resource-runner-launch.v1`,
+  `resource-runner-message.v1`, `resource-runner-response.v1`, `server-lock.v1`.
+- Paths and options: state directory `server`, `server.sock`, `server.lock.json`,
+  `server.children.json`, `maxRunners`, `executionRunners`, `PI_WORKFLOWS_MAX_RUNNERS`.
+- Server identifiers use the `server-` prefix; managed resources use `managed-resource-`.
+
+Dated plan records under `docs/plans/` and `docs/2026-*.md` keep their original wording, because they
+are historical records of the state at their date.
+
+The sweep covers every surface a user or a client sees today: production sources, protocol schemas,
+scripts, the Rust crate manifest, and current documentation. It renamed the last three occurrences
+that remained after the first pass: the `piw` crate description, one live-E2E comment about who
+records an attempt timeout, and two status lines that described a dated record in the retired
+wording. `test/component-vocabulary.test.ts` now fails when a retired term returns. It reads every file in the repository
+that a person can open, which includes the sources, the protocol schemas, the scripts, the Rust
+crate manifest, the skills, and the documentation. Three kinds of file stay out of scope: a dated
+record, because it describes the state at its date; a test, because a test may build an invalid old
+value on purpose; and `package-lock.json`, because it is generated dependency metadata. The check
+failed first on a skill document, which the earlier, narrower version of the sweep did not read.
+
+An automated pass over the tree confirms every item above: 8 SQLite
+tables, 4 columns, 9 protocol schemas, 3 state paths, 3 options, 3 stored owner or type values, the
+`server-` identifier prefix, and the `managed-resource-` prefix. No `host.sock`, `host.lock.json`, or
+`host.children.json` name and no `maxHosts` or `executionHosts` option remains in a current surface.
+
+Three old names stay on purpose, and each one names a fact about an earlier layout rather than the
+current one: the dated plan file names, the `apply_patch` and `PatchOp` protocol helpers, and the
+legacy state directories `runs`, `decisions`, and `controllers` that `assertNoLegacyState` refuses.
+`PI_WORKFLOWS_RUNS_DIR` and `PI_WORKFLOWS_CONTROLLER_DIR` exist only in a dated record that states
+they were removed.
+
+The stored database changes shape. This repository is in alpha, so the server reports the existing
+reset instruction when it opens an older database. No migration is added.
+
+### Message selection and message history
+
+Selection reads stored message metadata only. `WorkflowMessageStore` gained `listSessionSummaries`,
+`listRunSummaries`, `listRunSummaryPage`, `countForRun`, and `materialize`. The view materializes
+content for the one message the session must act on. `listSession` and `listRun` now build from the
+same summary rows, so no caller loads a content blob per stored row.
+
+`workflow_messages` gained a `trigger_turn` column. It mirrors `content.triggerTurn`, so eligibility,
+retention, recovery stopping, and follow-up checks never read the content blob. The alpha cutover
+changes the DDL in place, as allowed above.
+
+Complete message history is reachable through the `workflow_messages` run page. It obeys the same
+item limit, byte budget, and digest-bound content reference rule as every other history page.
+
+One branch report names one message, so it proves the presence of that message only. The server uses
+that evidence for the reported message's own source and leaves every other pending source to its own
+report. A report of no message at all proves that the branch holds no workflow message, which covers
+every source. Without this rule, a report about one source could cancel and re-create the step
+message of another source that Pi still holds, and Pi would receive the same request twice.
+
+### Bounded node window
+
+The session view carries a bounded window of node rows with its first row index and the complete row
+count. Rows are the canonical snapshot order. The default window starts `SESSION_NODE_LEAD` rows
+before the node the widget shows as working. When the run has no working node, that node is the most
+recent failed node, or the last row, which is the row the widget highlights. One
+row's `statusDetail`, `error`, `summary`, and human-decision summary are bounded by
+`SESSION_TEXT_BYTES`; the complete text stays in the detailed run view. A row whose own identity is
+larger than the window budget is left out and the window starts at the next row, so an unbounded
+node id cannot break the frame. `test/server-view.test.ts` "leaves out a node row that cannot fit
+the frame by itself" drives a 200 KiB node id first and in the middle of a topology.
+
+The widget asks for the adjacent window with `view.session.window`, which moves the node cursor of
+the live session subscription. `null` returns the window to the one that follows the working node.
+Only a key press at an edge of the loaded window asks for the adjacent window, so the rows between
+the current position and that edge stay visible first. A down page opens the next window at its
+first row, which continues where the loaded one ended, and an up page opens the previous window at
+its last row, where the user was. The view keeps the loaded window and its position until the asked
+window arrives, so a failed request stays retryable without losing the position. A window that
+already holds rows stops before a row too large for the frame, so its rows stay contiguous and the
+next cursor is exact; the following window skips that row and continues. The extension resets the
+cursor when the run changes, so a window never outlives its run. A paged window therefore replaces
+the loaded rows instead of growing them, and no client holds the complete topology.
+
+When the run has no working node, the default window follows the row the widget highlights: the most
+recent failed node when there is one, otherwise the last row. Detail text belongs to the same node,
+so the failure the widget shows is never outside the loaded window.
+
+The compact run carries the newest progress updates of its run, up to 16 keys, because a run keeps
+up to 1,024 current updates and the oldest keys are the least useful ones for the widget. The
+current-updates read already keeps the newest record per type and key, so one busy key cannot hide
+another track; the bound removes the least recent keys only. Complete update history stays on the
+run's update page. `test/server-view.test.ts` "keeps one progress record per key however often one
+key publishes" proves it with five tracks and twenty updates for one key, and asserts that a second monitor cycle replaces the first `next-check` record instead of adding a stale one.
+
+### Acceptance evidence
+
+| Criterion                                                     | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi receives only current workflow state                       | `src/client/view.ts` `WorkflowSessionView` carries one `workflowMessage`, one `interaction`, one `openWorkflowTurn`, and the compact run. `test/server-view.test.ts` "keeps the session snapshot bounded while stored message history grows".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| At most one message and one open turn in the snapshot         | The `WorkflowSessionView` type has single fields, not arrays. `workflow_turns_open_session_idx` rejects a second open turn.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| No complete run view or message history                       | `ServerViewStore.session()` reads `currentWorkflowMessage`, `currentInteraction`, and `sessionRun` with `graphCursor: 0`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Snapshot stays bounded as history grows                       | The new test stores 25 messages of about 300 KiB each (more than 4 MiB) and asserts the encoded `session_snapshot` frame stays below 256 KiB.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Large current message through verified bounded chunks         | `WorkflowMessageCoordinator.prepareContent` hydrates content by reference and verifies `contentDigest` before delivery; a mismatch throws `Workflow message <id> content failed its digest check`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Old messages and complete run details remain available        | The bounded snapshot test pages the `workflow_messages` run page to all 25 stored messages and reads one externalized message through `view.content`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Reconnect and branch recovery inspect one message             | `reportBranch` carries one nullable message id; `hasUnconfirmedBranchEntry` tracks one message. One report proves one message, so `test/server.test.ts` "scopes a missing step-message recovery to its own branch report" keeps an unreported source intact, re-issues a message that left the branch, and refuses an unknown message ID.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| A sent message is adopted, not sent twice                     | `test/extension.test.ts` delivery, reminder, and recovery cases; `test/workflow-message-coordinator.test.ts` 21 cases.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Delivery, reminder, terminal, and follow-up behavior          | The same extension and coordinator tests, with `deliveryCancelled` on the one current message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Oversized frame cannot close the connection or loop fast      | `publishConnection` isolates one subscription; the client re-arms with capped backoff (`RECONNECT_MAX_ATTEMPTS`, 250 ms to 10 s) and reports `reconnect_exhausted`. `test/extension.test.ts` "re-arms the session subscription after a failure during the first publish" proves a failed first publish cannot strand the session view. Every free-form value in the compact run is bounded, so a workflow cannot build an oversized session frame: `test/server-view.test.ts` "bounds every free-form session field so one frame still fits" proves a 64 KiB workflow name, run title, node output, and failure keep the whole projection below a quarter of the frame limit. The reconnect budget resets only after a handshake and its subscription restore both succeed, so a subscription the server keeps refusing counts toward the budget instead of looping; `test/client.test.ts` "counts a refused subscription restore toward reconnect exhaustion" fails without that order. A view from a subscription the server restored while a later one is still refused does not reset the budget either, so a partial restore cannot loop at the base delay; `test/client.test.ts` "keeps the reconnect budget after a view from a partly restored subscription" fails without that rule. |
+| An explicit window request is not deferred to the poll        | A change that arrives while a publish pass runs queues one further pass, so `view.session.window` reaches the client without waiting for the 250 ms view poll; `test/server.test.ts` "publishes the asked node window after a pass already running" holds the socket under backpressure and fails without the queue.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| A run with many update keys still carries its newest tracks   | The compact run reads a bounded tail of its progress and monitor update types instead of the head of the complete set; `test/server-view.test.ts` "reads the newest progress keys when a run publishes many tracks" seeds 300 tracks after a schedule and fails on the old head read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| A stale snapshot renders but cannot authorize                 | The extension keeps the last view, adds the `stale` marker, and refuses commands and branch reports for a stale session id. It also fences the message coordinator, so no Pi turn starts and the running workflow turn may not call a tool from a snapshot the server no longer confirms: `test/workflow-message-coordinator.test.ts` "sends nothing from a snapshot whose subscription failed" and "blocks every tool while a lost subscription leaves the turn unconfirmed" fail without the fence, and `test/extension.test.ts` "fences workflow delivery when the session subscription is lost" proves the wiring. The projection retry deadline belongs to one session, so a new session starts with a fresh budget: `test/extension.test.ts` "starts a new session without the previous projection backoff" fails when a closed session leaves its deadline behind.                                                                                                                                                                                                                                                                                                                                                                                                                     | A cancelled step message whose delivery Pi has not confirmed stays current, so cancellation still stops a delivered turn: `test/server-view.test.ts` "keeps a cancelled step current until Pi confirms its delivery" fails without that rule. |
+| Bounded widget scrolling                                      | The widget adapter rebuilds only the rows the server sends. `test/server-view.test.ts` pages a 300-node workflow and reaches every node through bounded windows, opens a run with no working node on its end, and keeps the newest 16 progress keys; `test/extension.test.ts` scrolls the widget to the next window and retries a failed request; `test/client.test.ts` moves and restores the window through the protocol.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| A re-armed subscription keeps the paged window                | The extension keeps the cursor it last asked for, because the client subscription that held it is dropped when the connection is lost; `test/extension.test.ts` "re-arms a paged session window with its cursor" pages a 300-node run, drops the subscription, and fails without the cursor on the new watch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| A superseded attempt cannot report a finished node as working | Compact node rows report the node's newest attempt; `test/server-view.test.ts` "reports a node whose leftover unfinished attempt was superseded" leaves an unfinished first attempt beside a completed second attempt and fails without that rule.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| One endpoint, reported before a probe                         | The rename shortened the Unix socket path, and each client reports a path above the operating system limit from its own measurement: `src/client/protocol.ts` `assertSocketPathSupported` and its `test/client-protocol.test.ts` cases on TypeScript side, and `tui/src/main.rs` `check_socket_path` with `tui/src/main.rs` `tests::reports_a_socket_path_above_the_operating_system_limit`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| One version-1 path, no compatibility code                     | `run_patch` is removed from the client schema, the TypeScript client, and the Rust client. No alias or second message path exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| One vocabulary in every current surface                       | Every repository file that a person can open contains no retired term; `test/component-vocabulary.test.ts` fails when `hosted`, a `host` owner value, or an old `host` request name returns in a source, a schema, a skill, or a document. Dated records, tests, and `package-lock.json` stay out of scope.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| A cancelled step Pi never received                            | A cancelled step message stays current only while Pi holds it and has not reported its turn; `test/server-view.test.ts` "drops a cancelled step that Pi never received" proves an undelivered cancelled step is not selected, so the extension cannot deliver it again and the retained terminal view stays visible.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| A selected-message change re-reads the view                   | The session view key names the selected message even when the session holds no live or retained run; `test/server-view.test.ts` "re-reads the session view when only the selected message changes" changes a message status in the same millisecond and proves the next read is fresh.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| One action subtype per node row                               | A node row keeps the exact `function` or `shell` subtype, so the widget renders a shell action with its own glyph; `test/server-view.test.ts` "carries the action subtype and the current node for a pending attempt" and `test/session-run-adapter.test.ts` "carries the action subtype the widget renders".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| The current node survives a pending handoff                   | The widget adapter takes the active node from the run fact, so a run whose active attempt is still `pending` keeps the node highlight and the elapsed time; `test/session-run-adapter.test.ts` "keeps the current node while its attempt is still pending".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| A node identity that cannot fit one frame is left out         | The compact run leaves out a current or waiting node identity whose own bytes exceed the window budget, so one long node id never breaks a client frame; `test/server-view.test.ts` "leaves out a node identity that cannot fit the frame".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| A window with no rows still pages back                        | An empty node window, which a row too large for one frame can leave behind, returns to the last window that held rows; `test/extension.test.ts` "pages back from an empty node window".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Pi core and Pi session schemas unchanged                      | No file outside this repository changed. The extension sends workflow messages through the existing Pi session API.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |

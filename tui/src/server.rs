@@ -186,7 +186,7 @@ mod tests {
     #[tokio::test]
     async fn relay_couples_one_websocket_to_one_server_socket() {
         let temporary = tempdir().unwrap();
-        let socket_path = temporary.path().join("host.sock");
+        let socket_path = temporary.path().join("server.sock");
         let server_listener = UnixListener::bind(&socket_path).unwrap();
         let server_task = tokio::spawn(async move {
             let (server, _) = server_listener.accept().await.unwrap();

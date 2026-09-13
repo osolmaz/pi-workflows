@@ -5,7 +5,7 @@ import { WorkflowClient } from "../src/client/client.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import { makeTempDir, waitUntil } from "./helpers.js";
+import { makeTempDir, reportBranch, waitUntil } from "./helpers.js";
 
 it("keeps a completed parent's follow-up when its explicit restart fails", async () => {
   const cwd = await makeTempDir("restart-follow-up-project");
@@ -28,9 +28,9 @@ export default defineWorkflow({ name: "restart-follow-up", startAt: "done", node
   } })
 }, edges: [] });`,
   );
-  const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+  const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
   const client = new WorkflowClient({ databasePath });
-  await host.start();
+  await server.start();
   const runs = new WorkflowRunStore(databasePath, { readOnly: true });
   const queue = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
   try {
@@ -62,17 +62,7 @@ export default defineWorkflow({ name: "restart-follow-up", startAt: "done", node
       targetSessionId: "session",
       coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
     };
-    expect(
-      await client.request({
-        operation: "workflowMessage.reportBranch",
-        payload: {
-          ...authority,
-          entries: [],
-          isIdle: true,
-          hasPendingMessages: false,
-        },
-      }),
-    ).toMatchObject({ outcome: "accepted" });
+    expect(await reportBranch(client, authority)).toMatchObject({ outcome: "accepted" });
     const followUpResponse = await client.request({
       operation: "followUp.queue",
       runId: "original",
@@ -112,7 +102,7 @@ export default defineWorkflow({ name: "restart-follow-up", startAt: "done", node
     runs.close();
     queue.close();
     await client.close();
-    await host.stop();
+    await server.stop();
   }
 }, 60_000);
 
@@ -127,9 +117,9 @@ import { compute, defineWorkflow } from ${JSON.stringify(path.resolve("src/workf
 export default defineWorkflow({ name: "restart", startAt: "done",
   nodes: { done: compute({ run: ({ input }) => input }) }, edges: [] });`,
   );
-  const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+  const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
   const client = new WorkflowClient({ databasePath, clientId: "restart-owner" });
-  await host.start();
+  await server.start();
   const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
   try {
     const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
@@ -154,16 +144,7 @@ export default defineWorkflow({ name: "restart", startAt: "done",
       },
     });
     const coordinatorEpoch = (watch.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
-    await client.request({
-      operation: "workflowMessage.reportBranch",
-      payload: {
-        targetSessionId: "session",
-        coordinatorEpoch,
-        entries: [],
-        isIdle: true,
-        hasPendingMessages: false,
-      },
-    });
+    await reportBranch(client, { targetSessionId: "session", coordinatorEpoch });
     let runId = "original";
     for (let restartNumber = 1; restartNumber <= 5; restartNumber += 1) {
       await waitUntil(() => store.getWorkflowRun(runId)?.status === "done", 30_000);
@@ -251,6 +232,6 @@ export default defineWorkflow({ name: "restart", startAt: "done",
   } finally {
     store.close();
     await client.close();
-    await host.stop();
+    await server.stop();
   }
 }, 60_000);

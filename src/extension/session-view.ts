@@ -1,10 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { WorkflowSessionView } from "../client/view.js";
-import type {
-  WorkflowDefinitionSnapshot,
-  WorkflowRunState,
-  WorkflowUpdateRecord,
-} from "../workflows/types.js";
+import type { WorkflowSessionRunView, WorkflowSessionView } from "../client/view.js";
+import { widgetRunInput } from "./session-run-adapter.js";
 import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
@@ -16,32 +12,75 @@ export class SessionWorkflowView {
   private scroll: number | null = null;
   private shownScroll = 0;
   private maxScroll = 0;
-  private stepCount = 0;
+  private focus: string | undefined;
+  private staleReason: string | null = null;
   private visible = false;
   private actionHint: string | undefined;
   private lastNoticeKey: string | null = null;
+  private pageNodes: ((cursor: number | null) => Promise<void> | void) | undefined;
+  /** Window the widget already asked for, so repeated key presses ask once. */
+  private requestedNodeCursor: number | null = null;
+  /** Start of the last loaded window that held a row, so an empty one can page back. */
+  private lastWindowStart: number | null = null;
+  /** Position to show when the asked window arrives, applied only on success. */
+  private pendingScroll: number | null = null;
 
   /** `scrollHint` is the effective scroll key label resolved from the configuration file. */
   constructor(private readonly scrollHint?: string) {}
 
+  /**
+   * Serve a node window that starts at `cursor`. The session view holds one
+   * bounded window, so scrolling past an edge asks the server for the adjacent
+   * window instead of keeping the complete node history.
+   */
+  setNodePager(pageNodes: (cursor: number | null) => Promise<void> | void): void {
+    this.pageNodes = pageNodes;
+  }
+
   update(session: WorkflowSessionView, ctx: ExtensionContext): void {
     const run = session.run;
-    if (
-      run === null ||
-      !isWorkflowRunState(run.state) ||
-      !isWorkflowDefinitionSnapshot(run.workflow)
-    ) {
+    if (run === null) {
       this.session = session;
       this.clearWidget(ctx);
       return;
     }
     const previousRun = this.session?.run;
-    if (previousRun?.runId !== run.runId || this.stepCount !== run.state.steps.length) {
+    const focus = run.currentNode ?? run.waitingOn ?? undefined;
+    if (previousRun?.runId !== run.runId || this.focus !== focus) {
       this.scroll = null;
-      this.stepCount = run.state.steps.length;
+      this.focus = focus;
+      // A new run follows its own focus again, so the next request is new too.
+      if (previousRun?.runId !== run.runId) {
+        this.requestedNodeCursor = null;
+        this.pendingScroll = null;
+        this.lastWindowStart = null;
+      }
+    } else if (previousRun !== undefined && nodeWindowChanged(previousRun, run)) {
+      // An asked-for window arrived: show its top after scrolling down or its
+      // bottom after scrolling up, so the view continues where the user was.
+      if (this.pendingScroll !== null) {
+        // The widget clamps this to the new window, so an up page lands on the
+        // bottom of the previous window even when the old window was shorter.
+        this.scroll = Math.max(0, this.pendingScroll);
+        this.pendingScroll = null;
+      }
     }
     this.session = session;
+    this.staleReason = null;
+    // Keep the last window that holds rows, because a window that follows a row
+    // too large for the frame holds none and has no row to count back from.
+    if (run.nodes.length > 0) this.lastWindowStart = run.nodeStart;
     this.notifyTransition(previousRun, session, ctx);
+    this.render(ctx);
+  }
+
+  /**
+   * Keep the last view for display while the connection is lost. Every state
+   * change needs a fresh snapshot, so this view no longer authorizes commands.
+   */
+  markStale(message: string, ctx: ExtensionContext): void {
+    if (this.session === null) return;
+    this.staleReason = message;
     this.render(ctx);
   }
 
@@ -71,15 +110,59 @@ export class SessionWorkflowView {
     this.scroll = null;
     this.shownScroll = 0;
     this.maxScroll = 0;
-    this.stepCount = 0;
+    this.focus = undefined;
+    this.staleReason = null;
     this.lastNoticeKey = null;
+    this.requestedNodeCursor = null;
+    this.lastWindowStart = null;
+    this.pendingScroll = null;
     this.clearWidget(ctx);
   }
 
+  /**
+   * Ask for one node window. A failed request stays retryable, so the same edge
+   * can ask again instead of leaving the loaded window stuck, and the view keeps
+   * its position until the asked window arrives.
+   */
+  private requestWindow(cursor: number, position: number): void {
+    this.requestedNodeCursor = cursor;
+    this.pendingScroll = position;
+    const asked = this.pageNodes?.(cursor) as Promise<void> | void;
+    if (asked === undefined || typeof asked.then !== "function") return;
+    void asked.catch(() => {
+      if (this.requestedNodeCursor === cursor) {
+        this.requestedNodeCursor = null;
+        this.pendingScroll = null;
+      }
+    });
+  }
+
   private scrollBy(ctx: ExtensionContext, delta: number): void {
-    if (this.session?.run === null || this.session === null) return;
+    const run = this.session?.run;
+    if (this.session === null || run === null || run === undefined) return;
     const current = this.scroll ?? this.shownScroll;
-    this.scroll = Math.max(0, Math.min(this.maxScroll, current + delta));
+    const next = Math.max(0, Math.min(this.maxScroll, current + delta));
+    // Only a key press at an edge of the loaded window asks for the adjacent
+    // window, so the rows between the current position and the edge stay
+    // visible before the window moves on.
+    const end = run.nodeStart + run.nodes.length;
+    if (delta > 0 && current >= this.maxScroll && end < run.nodeTotal) {
+      if (this.requestedNodeCursor !== end) this.requestWindow(end, 0);
+      return;
+    }
+    if (delta < 0 && current <= 0 && run.nodeStart > 0) {
+      // An empty window holds no row to count back from, so page back to the last
+      // window that held rows instead of asking for the same empty window again.
+      const start =
+        run.nodes.length === 0
+          ? (this.lastWindowStart ?? 0)
+          : Math.max(0, run.nodeStart - run.nodes.length);
+      if (this.requestedNodeCursor !== start) {
+        this.requestWindow(start, Number.MAX_SAFE_INTEGER);
+      }
+      return;
+    }
+    this.scroll = next;
     this.render(ctx);
   }
 
@@ -95,25 +178,23 @@ export class SessionWorkflowView {
   private render(ctx: ExtensionContext): void {
     const run = this.session?.run;
     if (run === null || run === undefined) return;
-    if (!isWorkflowRunState(run.state) || !isWorkflowDefinitionSnapshot(run.workflow)) return;
-    const state = run.state;
-    const snapshot = run.workflow;
+    const input = widgetRunInput(run);
     const render = (
       width = Number.POSITIVE_INFINITY,
       theme?: Parameters<typeof buildWidgetView>[6],
     ) => {
       const view = buildWidgetView(
-        state,
-        snapshot,
+        input.state,
+        input.snapshot,
         new Date(),
         this.scroll,
         run.display.status === "paused",
         width,
         theme,
-        workflowUpdates(run.updates),
+        input.updates,
         this.actionHint,
         run.display.status,
-        run.display.reason,
+        this.staleReason ?? run.display.reason,
         run.display.controls,
         this.scrollHint,
       );
@@ -131,10 +212,10 @@ export class SessionWorkflowView {
       } else {
         ctx.ui.setWidget(WIDGET_KEY, render());
       }
-      const focus = state.currentNode ?? state.waitingOn;
+      const focus = run.currentNode ?? run.waitingOn;
       ctx.ui.setStatus(
         WIDGET_KEY,
-        `${state.workflowName} [${run.display.status}]${focus === undefined ? "" : ` ${focus}`}`,
+        `${run.workflowName} [${run.display.status}]${focus === null ? "" : ` ${focus}`}${this.staleReason === null ? "" : " · stale"}`,
       );
       this.visible = true;
     });
@@ -146,11 +227,9 @@ export class SessionWorkflowView {
     ctx: ExtensionContext,
   ): void {
     const run = session.run;
-    if (run === null || !isWorkflowRunState(run.state)) return;
+    if (run === null) return;
     const status = run.display.status;
-    const decision = session.pendingInteractions.some(
-      (value) => isRecord(value) && value.kind === "decision" && value.status === "pending",
-    );
+    const decision = session.interaction?.kind === "decision";
     const shouldNotify =
       isTerminalStatus(status) ||
       (status === "waiting" && (decision || previousRun?.display.status !== "waiting")) ||
@@ -161,10 +240,10 @@ export class SessionWorkflowView {
     this.lastNoticeKey = key;
     const reason = run.display.reason?.trim();
     const message = decision
-      ? `Workflow ${run.state.workflowName} needs a human decision.`
+      ? `Workflow ${run.workflowName} needs a human decision.`
       : reason && reason.length > 0
         ? reason
-        : `Workflow ${run.state.workflowName} ${status.replace("_", " ")}.`;
+        : `Workflow ${run.workflowName} ${status.replace("_", " ")}.`;
     safelyUpdateUi(ctx, () => {
       ctx.ui.notify(
         message,
@@ -178,43 +257,14 @@ export class SessionWorkflowView {
   }
 }
 
-function isWorkflowRunState(value: unknown): value is WorkflowRunState {
+/** True when the run now holds a different node window than before. */
+function nodeWindowChanged(previous: WorkflowSessionRunView, run: WorkflowSessionRunView): boolean {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { schema?: unknown }).schema === "pi-workflows.run-state.v1" &&
-    typeof (value as { workflowName?: unknown }).workflowName === "string" &&
-    Array.isArray((value as { steps?: unknown }).steps)
-  );
-}
-
-function workflowUpdates(values: readonly unknown[]): WorkflowUpdateRecord[] {
-  return values.filter(isWorkflowUpdateRecord);
-}
-
-function isWorkflowUpdateRecord(value: unknown): value is WorkflowUpdateRecord {
-  return (
-    isRecord(value) &&
-    typeof value.updateId === "string" &&
-    typeof value.seq === "number" &&
-    typeof value.at === "string" &&
-    typeof value.runId === "string" &&
-    typeof value.nodeId === "string" &&
-    typeof value.attemptId === "string" &&
-    typeof value.type === "string" &&
-    typeof value.key === "string" &&
-    isRecord(value.data)
-  );
-}
-
-function isWorkflowDefinitionSnapshot(value: unknown): value is WorkflowDefinitionSnapshot {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { schema?: unknown }).schema === "pi-workflows.definition-snapshot.v1" &&
-    typeof (value as { nodes?: unknown }).nodes === "object"
+    previous.nodeStart !== run.nodeStart ||
+    previous.nodeTotal !== run.nodeTotal ||
+    previous.nodes.length !== run.nodes.length ||
+    previous.nodes[0]?.nodeId !== run.nodes[0]?.nodeId ||
+    previous.nodes.at(-1)?.nodeId !== run.nodes.at(-1)?.nodeId
   );
 }
 
@@ -226,10 +276,6 @@ function isTerminalStatus(status: string): boolean {
     status === "cancelled" ||
     status === "ambiguous"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function safelyUpdateUi(ctx: ExtensionContext, update: () => void): void {

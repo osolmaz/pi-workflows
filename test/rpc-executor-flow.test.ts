@@ -197,8 +197,8 @@ sleep 2
 
 describe("ServerProcessRegistry edge cases", () => {
   it("tolerates corrupt registry files", async () => {
-    const dir = await makeTempDir("pi-host-registry-corrupt");
-    const file = path.join(dir, "host.children.json");
+    const dir = await makeTempDir("pi-server-registry-corrupt");
+    const file = path.join(dir, "server.children.json");
     await fs.writeFile(file, "not json\n", "utf8");
     const registry = new ServerProcessRegistry(dir);
     expect(registry.reapOrphans()).toEqual([]);
@@ -215,7 +215,7 @@ describe("ServerProcessRegistry edge cases", () => {
   });
 
   it("kills one exact registered process group", async () => {
-    const dir = await makeTempDir("pi-host-registry-one");
+    const dir = await makeTempDir("pi-server-registry-one");
     const registry = new ServerProcessRegistry(dir);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,
@@ -231,7 +231,7 @@ describe("ServerProcessRegistry edge cases", () => {
   });
 
   it("killAll clears the registry and tolerates dead pids", async () => {
-    const dir = await makeTempDir("pi-host-registry-kill");
+    const dir = await makeTempDir("pi-server-registry-kill");
     const registry = new ServerProcessRegistry(dir);
     expect(() => registry.register(424_250)).toThrow(/attest/);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -244,7 +244,7 @@ describe("ServerProcessRegistry edge cases", () => {
     registry.killAll();
     await exited;
     expect(registry.size).toBe(0);
-    expect(JSON.parse(await fs.readFile(path.join(dir, "host.children.json"), "utf8"))).toEqual({
+    expect(JSON.parse(await fs.readFile(path.join(dir, "server.children.json"), "utf8"))).toEqual({
       schema: "pi-workflows.process-registry.v1",
       processes: [],
     });

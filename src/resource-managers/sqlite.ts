@@ -71,12 +71,12 @@ type WorkflowRow = {
 };
 
 function resourceManagerSelect(clause: string): string {
-  return `SELECT c.controller_resource_id AS managedResourceId,
+  return `SELECT c.managed_resource_id AS managedResourceId,
     c.resource_id AS resourceId, r.revision AS resourceVersion,
-    c.controller_name AS resourceManagerName, c.resource_key AS resourceKey,
+    c.resource_manager_name AS resourceManagerName, c.resource_key AS resourceKey,
     c.uid, c.generation, c.spec_hash AS specHash, c.status_hash AS statusHash,
     c.deletion_requested_at AS deletionRequestedAt
-    FROM controller_resources c JOIN resources r ON r.resource_id = c.resource_id ${clause}`;
+    FROM managed_resources c JOIN resources r ON r.resource_id = c.resource_id ${clause}`;
 }
 
 function effectSelect(clause: string): string {
@@ -86,7 +86,7 @@ function effectSelect(clause: string): string {
     e.created_at AS startedAt, e.settled_at AS completedAt,
     e.external_ref AS externalRef, e.error_hash AS errorHash
     FROM effects e
-    JOIN controller_resources c ON c.resource_id = e.source_resource_id
+    JOIN managed_resources c ON c.resource_id = e.source_resource_id
     JOIN blobs b ON b.blob_hash = e.payload_hash ${clause}`;
 }
 
@@ -95,8 +95,8 @@ function workflowSelect(clause: string): string {
     w.request_key AS requestKey, w.input_fingerprint AS inputFingerprint,
     w.workflow_name AS workflowName, COALESCE(w.run_id, w.reserved_run_id) AS runId, w.status,
     w.attempt_count AS attemptCount, w.error_hash AS errorHash
-    FROM controller_workflows w
-    JOIN controller_resources c ON c.controller_resource_id = w.controller_resource_id ${clause}`;
+    FROM managed_resource_workflows w
+    JOIN managed_resources c ON c.managed_resource_id = w.managed_resource_id ${clause}`;
 }
 
 type QueueListRow = {
@@ -198,16 +198,16 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       });
       if (existing === undefined) {
         const uid = randomUUID();
-        const managedResourceId = `controller-resource-${randomUUID()}`;
+        const managedResourceId = `managed-resource-${randomUUID()}`;
         const resourceId = resourceIdFor(
-          "controller",
+          "managed_resource",
           `${this.requireProjectId()}:${options.resourceManager}:${options.key}`,
         );
         this.state.connection
           .prepare(
             `INSERT INTO resources(
                resource_id, resource_type, aggregate_key, revision, created_at, updated_at
-             ) VALUES (?, 'controller', ?, 1, ?, ?)`,
+             ) VALUES (?, 'managed_resource', ?, 1, ?, ?)`,
           )
           .run(resourceId, managedResourceId, now, now);
         this.state.connection
@@ -215,8 +215,8 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
           .run(resourceId);
         this.state.connection
           .prepare(
-            `INSERT INTO controller_resources(
-               controller_resource_id, resource_id, project_id, controller_name,
+            `INSERT INTO managed_resources(
+               managed_resource_id, resource_id, project_id, resource_manager_name,
                resource_key, uid, generation, spec_hash, status_hash, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
           )
@@ -246,9 +246,9 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         const revision = existing.resourceVersion + 1;
         this.state.connection
           .prepare(
-            `UPDATE controller_resources
+            `UPDATE managed_resources
              SET spec_hash = ?, generation = generation + 1, updated_at = ?
-             WHERE controller_resource_id = ?`,
+             WHERE managed_resource_id = ?`,
           )
           .run(specHash, now, existing.managedResourceId);
         this.bumpResource(existing.resourceId, existing.resourceVersion, now);
@@ -294,13 +294,13 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       params.push(this.projectId);
     }
     if (options.resourceManager !== undefined) {
-      clauses.push("c.controller_name = ?");
+      clauses.push("c.resource_manager_name = ?");
       params.push(options.resourceManager);
     }
     const rows = this.state.connection
       .prepare(
         resourceManagerSelect(
-          `WHERE ${clauses.join(" AND ")} ORDER BY c.controller_name, c.resource_key`,
+          `WHERE ${clauses.join(" AND ")} ORDER BY c.resource_manager_name, c.resource_key`,
         ),
       )
       .all(...params);
@@ -327,7 +327,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       const statusHash = this.state.putJson(options.status, now);
       this.state.connection
         .prepare(
-          "UPDATE controller_resources SET status_hash = ?, updated_at = ? WHERE controller_resource_id = ?",
+          "UPDATE managed_resources SET status_hash = ?, updated_at = ? WHERE managed_resource_id = ?",
         )
         .run(statusHash, now, row.managedResourceId);
       if (options.finalizers !== undefined)
@@ -337,7 +337,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         row.resourceId,
         row.resourceVersion + 1,
         "resource.status_updated",
-        "controller",
+        "resource_manager",
         options.claim.ownerId,
         {},
         now,
@@ -355,7 +355,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       if (row.deletionRequestedAt === null) {
         this.state.connection
           .prepare(
-            "UPDATE controller_resources SET deletion_requested_at = ?, updated_at = ? WHERE controller_resource_id = ?",
+            "UPDATE managed_resources SET deletion_requested_at = ?, updated_at = ? WHERE managed_resource_id = ?",
           )
           .run(now, now, row.managedResourceId);
         this.bumpResource(row.resourceId, row.resourceVersion, now);
@@ -388,7 +388,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       }
       this.replaceFinalizers(row.managedResourceId, options.finalizers);
       this.state.connection
-        .prepare("UPDATE controller_resources SET updated_at = ? WHERE controller_resource_id = ?")
+        .prepare("UPDATE managed_resources SET updated_at = ? WHERE managed_resource_id = ?")
         .run(now, row.managedResourceId);
       this.bumpResource(row.resourceId, row.resourceVersion, now);
       this.insertEvent(
@@ -418,7 +418,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       if (row.deletionRequestedAt === null || this.finalizers(row.managedResourceId).length > 0)
         return false;
       this.state.connection
-        .prepare("DELETE FROM controller_resources WHERE controller_resource_id = ?")
+        .prepare("DELETE FROM managed_resources WHERE managed_resource_id = ?")
         .run(row.managedResourceId);
       return true;
     });
@@ -442,21 +442,21 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
     const placeholders = options.resourceManagers.map(() => "?").join(", ");
     const exclusions = options.exclude ?? [];
     const exclusionSql = exclusions
-      .map(() => "AND NOT (c.controller_name = ? AND c.resource_key = ?)")
+      .map(() => "AND NOT (c.resource_manager_name = ? AND c.resource_key = ?)")
       .join("\n               ");
     const exclusionParams = exclusions.flatMap((ref) => [ref.resourceManager, ref.key]);
     return this.state.transaction(() => {
       const row = this.state.connection
         .prepare(
           `${resourceManagerSelect(`
-             JOIN controller_queue q ON q.controller_resource_id = c.controller_resource_id
+             JOIN managed_resource_queue q ON q.managed_resource_id = c.managed_resource_id
              JOIN leases l ON l.resource_id = c.resource_id
              WHERE c.project_id = ?
-               AND c.controller_name IN (${placeholders})
+               AND c.resource_manager_name IN (${placeholders})
                ${exclusionSql}
                AND q.available_at <= ?
                AND (l.owner_id IS NULL OR l.expires_at <= ?)
-             ORDER BY q.available_at, c.controller_name, c.resource_key
+             ORDER BY q.available_at, c.resource_manager_name, c.resource_key
              LIMIT 1`)}`,
         )
         .get(this.requireProjectId(), ...options.resourceManagers, ...exclusionParams, now, now);
@@ -468,7 +468,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       const result = this.state.connection
         .prepare(
           `UPDATE leases
-           SET generation = ?, owner_type = 'controller', owner_id = ?, token_hash = ?,
+           SET generation = ?, owner_type = 'resource_manager', owner_id = ?, token_hash = ?,
                acquired_at = ?, heartbeat_at = ?, expires_at = ?
            WHERE resource_id = ? AND generation = ?
              AND (owner_id IS NULL OR expires_at <= ?)`,
@@ -491,7 +491,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         row.resourceId,
         row.resourceVersion + 1,
         "lease.claimed",
-        "controller",
+        "resource_manager",
         options.ownerId,
         { expiresAt },
         now,
@@ -519,7 +519,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
     const result = this.state.connection
       .prepare(
         `UPDATE leases SET heartbeat_at = ?, expires_at = ?
-         WHERE resource_id = ? AND owner_type = 'controller' AND owner_id = ?
+         WHERE resource_id = ? AND owner_type = 'resource_manager' AND owner_id = ?
            AND token_hash = ? AND generation = ? AND expires_at > ?`,
       )
       .run(
@@ -550,13 +550,13 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   listQueue(): QueueItem[] {
     const rows = this.state.connection
       .prepare(
-        `SELECT c.controller_name AS resourceManager, c.resource_key AS resourceKey,
+        `SELECT c.resource_manager_name AS resourceManager, c.resource_key AS resourceKey,
                 q.available_at AS availableAt, q.consecutive_errors AS consecutiveErrors,
                 l.expires_at AS claimExpiresAt
-         FROM controller_queue q
-         JOIN controller_resources c ON c.controller_resource_id = q.controller_resource_id
+         FROM managed_resource_queue q
+         JOIN managed_resources c ON c.managed_resource_id = q.managed_resource_id
          JOIN leases l ON l.resource_id = c.resource_id
-         WHERE c.project_id = ? ORDER BY q.available_at, c.controller_name, c.resource_key`,
+         WHERE c.project_id = ? ORDER BY q.available_at, c.resource_manager_name, c.resource_key`,
       )
       .all(this.requireProjectId());
     return rows.filter(isQueueListRow).map((row) => ({
@@ -621,7 +621,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
              effect_id, resource_id, source_resource_id, source_revision, effect_type,
              idempotency_key, payload_hash, owner_scope, status, attempt_count,
              created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'controller', 'pending', 0, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'resource_manager', 'pending', 0, ?, ?)`,
         )
         .run(
           effectId,
@@ -638,7 +638,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         effectResourceId,
         1,
         "effect.reserved",
-        "controller",
+        "resource_manager",
         options.claim.ownerId,
         {},
         now,
@@ -692,7 +692,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         effectResourceId,
         revision + 1,
         `effect.${options.state}`,
-        "controller",
+        "resource_manager",
         options.claim.ownerId,
         {},
         now,
@@ -733,8 +733,8 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       const requestId = randomUUID();
       this.state.connection
         .prepare(
-          `INSERT INTO controller_workflows(
-             request_id, controller_resource_id, request_key, workflow_name,
+          `INSERT INTO managed_resource_workflows(
+             request_id, managed_resource_id, request_key, workflow_name,
              input_fingerprint, status, attempt_count, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
         )
@@ -777,7 +777,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
           : this.state.putText(update.error, now);
       this.state.connection
         .prepare(
-          `UPDATE controller_workflows
+          `UPDATE managed_resource_workflows
            SET reserved_run_id = COALESCE(?, reserved_run_id),
                run_id = CASE
                  WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
@@ -819,7 +819,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
           : this.state.putText(update.error, now);
       this.state.connection
         .prepare(
-          `UPDATE controller_workflows
+          `UPDATE managed_resource_workflows
            SET run_id = CASE
                  WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
                  ELSE run_id
@@ -881,7 +881,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         row.resourceId,
         revision,
         options.type,
-        options.claim === undefined ? "control" : "controller",
+        options.claim === undefined ? "control" : "resource_manager",
         options.claim?.ownerId ?? null,
         options.payload ?? {},
         now,
@@ -907,14 +907,14 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   listEvents(
     options: { resourceManager?: string; key?: string; limit?: number } = {},
   ): ResourceManagerEvent[] {
-    const clauses = ["r.resource_type = 'controller'"];
+    const clauses = ["r.resource_type = 'managed_resource'"];
     const params: unknown[] = [];
     if (this.projectId !== null) {
       clauses.push("c.project_id = ?");
       params.push(this.projectId);
     }
     if (options.resourceManager !== undefined) {
-      clauses.push("c.controller_name = ?");
+      clauses.push("c.resource_manager_name = ?");
       params.push(options.resourceManager);
     }
     if (options.key !== undefined) {
@@ -925,11 +925,11 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
     const rows = this.state.connection
       .prepare(
         `SELECT e.event_seq AS seq, e.recorded_at AS recordedAt,
-                c.controller_name AS resourceManager, c.resource_key AS resourceKey,
+                c.resource_manager_name AS resourceManager, c.resource_key AS resourceKey,
                 e.event_type AS eventType, e.payload_hash AS payloadHash
          FROM events e
          JOIN resources r ON r.resource_id = e.resource_id
-         JOIN controller_resources c ON c.resource_id = r.resource_id
+         JOIN managed_resources c ON c.resource_id = r.resource_id
          WHERE ${clauses.join(" AND ")}
          ORDER BY e.event_seq DESC LIMIT ?`,
       )
@@ -949,7 +949,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
     const row = this.state.connection
       .prepare(
         resourceManagerSelect(
-          "WHERE c.project_id = ? AND c.controller_name = ? AND c.resource_key = ?",
+          "WHERE c.project_id = ? AND c.resource_manager_name = ? AND c.resource_key = ?",
         ),
       )
       .get(this.projectId, ref.resourceManager, ref.key);
@@ -1000,7 +1000,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   private finalizers(managedResourceId: string): string[] {
     const rows = this.state.connection
       .prepare(
-        "SELECT finalizer FROM controller_finalizers WHERE controller_resource_id = ? ORDER BY position",
+        "SELECT finalizer FROM managed_resource_finalizers WHERE managed_resource_id = ? ORDER BY position",
       )
       .all(managedResourceId);
     return rows.flatMap((row) => (isFinalizerRow(row) ? [row.finalizer] : []));
@@ -1011,10 +1011,10 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
     if (unique.length !== finalizers.length)
       throw new Error("ResourceManager finalizers must be unique");
     this.state.connection
-      .prepare("DELETE FROM controller_finalizers WHERE controller_resource_id = ?")
+      .prepare("DELETE FROM managed_resource_finalizers WHERE managed_resource_id = ?")
       .run(managedResourceId);
     const insert = this.state.connection.prepare(
-      "INSERT INTO controller_finalizers(controller_resource_id, finalizer, position) VALUES (?, ?, ?)",
+      "INSERT INTO managed_resource_finalizers(managed_resource_id, finalizer, position) VALUES (?, ?, ?)",
     );
     unique.forEach((finalizer, index) => insert.run(managedResourceId, finalizer, index));
   }
@@ -1026,13 +1026,13 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   ): void {
     this.state.connection
       .prepare(
-        `INSERT INTO controller_queue(
-           controller_resource_id, available_at, queue_version,
+        `INSERT INTO managed_resource_queue(
+           managed_resource_id, available_at, queue_version,
            consecutive_errors, created_at, updated_at
          ) VALUES (?, ?, 1, 0, ?, ?)
-         ON CONFLICT(controller_resource_id) DO UPDATE SET
-           available_at = MIN(controller_queue.available_at, excluded.available_at),
-           queue_version = controller_queue.queue_version + 1,
+         ON CONFLICT(managed_resource_id) DO UPDATE SET
+           available_at = MIN(managed_resource_queue.available_at, excluded.available_at),
+           queue_version = managed_resource_queue.queue_version + 1,
            updated_at = excluded.updated_at`,
       )
       .run(managedResourceId, availableAt, now, now);
@@ -1041,7 +1041,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   private queueErrors(managedResourceId: string): number {
     const row = this.state.connection
       .prepare(
-        "SELECT consecutive_errors AS consecutiveErrors FROM controller_queue WHERE controller_resource_id = ?",
+        "SELECT consecutive_errors AS consecutiveErrors FROM managed_resource_queue WHERE managed_resource_id = ?",
       )
       .get(managedResourceId);
     return isErrorCountRow(row) ? row.consecutiveErrors : 0;
@@ -1050,7 +1050,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
   private queueVersion(managedResourceId: string): number {
     const row = this.state.connection
       .prepare(
-        "SELECT queue_version AS queueVersion FROM controller_queue WHERE controller_resource_id = ?",
+        "SELECT queue_version AS queueVersion FROM managed_resource_queue WHERE managed_resource_id = ?",
       )
       .get(managedResourceId);
     /* istanbul ignore if -- exact schema and internal query shape */
@@ -1080,7 +1080,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       if (requeue === undefined) {
         if (currentQueueVersion === claim.queueVersion) {
           this.state.connection
-            .prepare("DELETE FROM controller_queue WHERE controller_resource_id = ?")
+            .prepare("DELETE FROM managed_resource_queue WHERE managed_resource_id = ?")
             .run(row.managedResourceId);
         }
       } else {
@@ -1088,10 +1088,10 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
           requeue.error === undefined ? null : this.state.putText(requeue.error, now);
         this.state.connection
           .prepare(
-            `UPDATE controller_queue
+            `UPDATE managed_resource_queue
              SET available_at = ?, queue_version = queue_version + 1,
                  consecutive_errors = consecutive_errors + 1,
-                 last_error_hash = ?, updated_at = ? WHERE controller_resource_id = ?`,
+                 last_error_hash = ?, updated_at = ? WHERE managed_resource_id = ?`,
           )
           .run(epoch(requeue.availableAt), errorHash, now, row.managedResourceId);
       }
@@ -1110,7 +1110,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
       throw new Error("ResourceManager claim targets another resource");
     const lease = this.requireLease(row.resourceId);
     if (
-      lease.ownerType !== "controller" ||
+      lease.ownerType !== "resource_manager" ||
       lease.ownerId !== claim.ownerId ||
       lease.generation !== claim.generation ||
       lease.tokenHash === null ||
@@ -1138,7 +1138,7 @@ export class SqliteResourceManagerStore extends ProjectStore implements Resource
         resourceId,
         revision + 1,
         "lease.released",
-        "controller",
+        "resource_manager",
         claim.ownerId,
         {},
         now,

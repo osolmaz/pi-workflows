@@ -1,6 +1,6 @@
 # SQLite state
 
-Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior. The [automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract.
+Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored the earlier in-process run behavior. The [automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract.
 
 Pi Workflows stores all live durable state in one database:
 
@@ -118,23 +118,23 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Schema and projects | `schema_meta`, `projects`                                                                                                                                |
 | Content             | `blobs`, `run_view_content`                                                                                                                              |
-| Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                                                   |
-| Server protocol     | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                                                     |
+| Shared lifecycle    | `resources`, `leases`, `events`, `workflow_server_state`                                                                                                 |
+| Server protocol     | `server_commands`, `run_runners`, `runner_messages`, `interactive_requests`, `interactive_submissions`                                                   |
 | Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `attempt_active_intervals`, `workflow_updates` |
 | Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                                                          |
 | Post-run follow-ups | `workflow_follow_ups`                                                                                                                                    |
 | Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                                               |
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`                                                                            |
-| Managed resources   | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                                              |
+| Managed resources   | `managed_resources`, `managed_resource_finalizers`, `managed_resource_queue`, `managed_resource_workflows`                                               |
 | Effects             | `effects`, `effect_attempts`                                                                                                                             |
 | Pi messages         | `workflow_messages`, `workflow_turns`                                                                                                                    |
 | Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                                                        |
 
-The `host_*`, `run_workers`, `worker_*`, and `controller_*` names remain version-1 internal SQLite identifiers. The `host` and `controller` actor and owner values and the `~/.pi/agent/workflows/host/` state directory also remain internal identifiers. Public APIs and documentation call these components the workflow server, workflow runner, resource manager, resource runner, and managed resource. The alpha hard cut adds no alias or second storage path.
+The component names in the schema match the public vocabulary: the workflow server, the workflow runner, the resource manager, the resource runner, and the managed resource. The alpha hard cut adds no alias or second storage path.
 
-`workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
+`workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. It also mirrors the content `triggerTurn` flag in `trigger_turn`, so message selection reads stored facts instead of every content blob. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
 
-`workflow_turns` stores the server-approved ownership of one Pi model turn. Each row names the exact workflow message, run, session, and turn ID. A partial unique index permits only one open turn for a message. The server checks for an exact saved turn or another open turn before insertion, so a normal conflict returns a controlled protocol error instead of a raw SQLite error. Terminalization ends every open turn for that run as `lost` in the same transaction. It cancels pending step and decision messages, plus follow-ups when the run did not complete successfully. Committed notifications remain eligible. Matching late reports adopt the saved result, while conflicting identities remain errors.
+`workflow_turns` stores the server-approved ownership of one Pi model turn. Each row names the exact workflow message, run, session, and turn ID. Partial unique indexes permit only one open turn for a message and only one open turn for a session. The server checks for an exact saved turn or another open turn before insertion, so a normal conflict returns a controlled protocol error instead of a raw SQLite error. Terminalization ends every open turn for that run as `lost` in the same transaction. It cancels pending step and decision messages, plus follow-ups when the run did not complete successfully. Committed notifications remain eligible. Matching late reports adopt the saved result, while conflicting identities remain errors.
 
 `channels` stores configured channel resource identities. `channel_cursors` stores the last accepted external polling position. `channel_messages` stores immutable decision delivery and settlement records for audit and duplicate evidence. External application state and Telegram message references belong to `effects` and `effect_attempts`.
 
@@ -142,14 +142,14 @@ Foreign keys join projects, runs, attempts, decisions, managed resources, effect
 
 ### ServerBacked commands and interactions
 
-`workflow_host_state` stores the one current server epoch and its live local
-claim. `host_commands` stores each client request fingerprint, operation,
+`workflow_server_state` stores the one current server epoch and its live local
+claim. `server_commands` stores each client request fingerprint, operation,
 outcome, revision, and receipt or error. Repeating an exact request adopts the
 stored receipt. Reusing an ID or idempotency key for another request is a
 conflict.
 
-`run_workers` records each runner epoch before spawn and later records its exact
-process identity and terminal outcome. `worker_messages` deduplicates accepted
+`run_runners` records each runner epoch before spawn and later records its exact
+process identity and terminal outcome. `runner_messages` deduplicates accepted
 state-changing child messages.
 
 `interactive_requests` owns the durable request contract and workflow state for origin-session work. It stores the run, node attempt, target session, contract, request status, accepted submission, and revision. Pause is stored once on the run and derived for its one pending interaction. `interactive_submissions` stores the idempotency key, payload, outcome, and receipt. It stores no Pi presentation claim or Pi session entry. `workflow_messages` owns those facts, and the extension reports the active Pi branch after reload.
@@ -190,7 +190,7 @@ The public contract uses `null` for an unlimited timeout.
 
 `attempt_active_intervals` records numbered active intervals in the same database.
 Only one interval can be open for an attempt. Each interval keeps its start,
-last observation, end, and measured elapsed time. The host measures duration with
+last observation, end, and measured elapsed time. The workflow server measures duration with
 a monotonic clock and saves samples during normal polling. Wall-clock changes
 cannot spend or restore the active budget. Pause, disconnect, and settlement close
 the interval. Reconnect opens another interval only for an unpaused, active model
@@ -283,7 +283,7 @@ one new run per handoff, including after that run finishes. Counting the child r
 enforces the shared two-launch limit. Pruning treats the chain as one connected run tree.
 `workflow_messages.recovery_stop` records cancellation, interruption, or timeout
 without removing delivery evidence. `workflow_turns.active_elapsed_ms` saves the
-terminal turn's active time; a monotonic clock excludes disconnected time and host
+terminal turn's active time; a monotonic clock excludes disconnected time and workflow server
 downtime. Reminder messages use the same request ID and identify the exact ended
 turn in their idempotency key. At most two reminder messages can be issued for a
 pending attempt.
@@ -296,7 +296,7 @@ Read paths do not repair state. Owner reconcilers apply pending effects and writ
 
 ## Projects and concurrency
 
-All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped resource manager and run queries use that key. One global server owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/host/`. A second live server is rejected even when it was started from another project.
+All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped resource manager and run queries use that key. One global server owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/server/`. A second live server is rejected even when it was started from another project.
 
 SQLite WAL keeps bounded projection reads consistent with commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions. Production clients receive revisioned snapshots, patches, and pages from the server instead of opening concurrent SQLite readers.
 
@@ -306,7 +306,7 @@ This contract is for local storage on one machine. It does not claim distributed
 
 The server keeps terminal root-run trees for 30 days from `finished_at`. A tree is eligible only when every restart descendant is terminal, older than the cutoff, free of protected work, and free of references from outside the tree.
 
-Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, controller ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a run or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
+Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, resource manager ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a run or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
 
 The server requests cleanup after startup recovery and after workflow runners exit. It also schedules the next daily check after a completed sweep. Overlapping requests use one in-process task. Cleanup starts only while there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes no more than one sweep in 24 hours. A due sweep that finds work active or stops between trees remains due. The next idle lifecycle trigger or a five-minute idle retry continues it.
 

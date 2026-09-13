@@ -139,7 +139,7 @@ export async function runPiAgentGroup(
   let nextIndex = 0;
   let primary: { index: number; error: unknown } | undefined;
 
-  const worker = async () => {
+  const runSlot = async () => {
     while (!signal.aborted) {
       const index = nextIndex;
       if (index >= requests.length) return;
@@ -163,7 +163,7 @@ export async function runPiAgentGroup(
   };
 
   const runnerCount = Math.min(options.maxConcurrency, requests.length);
-  await Promise.all(Array.from({ length: runnerCount }, worker));
+  await Promise.all(Array.from({ length: runnerCount }, runSlot));
 
   if (options.signal.aborted) throw cancellationError("group", options.signal.reason);
   if (primary !== undefined) {

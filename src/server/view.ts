@@ -1,18 +1,29 @@
 import { createHash } from "node:crypto";
 import {
   RUN_VIEW_SCHEMA,
+  SESSION_MESSAGE_SCHEMA,
+  SESSION_RUN_VIEW_SCHEMA,
   SESSION_VIEW_SCHEMA,
+  type ClientInteractiveRequest,
   type WorkflowDisplay,
   type WorkflowDisplayStatus,
   type WorkflowRunListPage,
   type WorkflowRunQueueView,
   type WorkflowRunSummary,
   type WorkflowRunView,
+  type WorkflowSessionMessage,
+  type WorkflowSessionNodeRow,
+  type WorkflowSessionProgressUpdate,
+  type WorkflowSessionRunView,
   type WorkflowSessionView,
 } from "../client/view.js";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import { WorkflowMessageStore, type WorkflowMessage } from "../state/workflow-messages.js";
+import {
+  WorkflowMessageStore,
+  type WorkflowMessage,
+  type WorkflowMessageSummary,
+} from "../state/workflow-messages.js";
 import type {
   WorkflowRunQueueStore,
   WorkflowRunQueueRecord,
@@ -39,6 +50,7 @@ export const WORKFLOW_PAGE_KINDS = [
   "settings",
   "follow_ups",
   "updates",
+  "workflow_messages",
 ] as const;
 
 export type WorkflowPageKind = (typeof WORKFLOW_PAGE_KINDS)[number];
@@ -63,6 +75,26 @@ const CONTENT_CHUNK_BYTES = 192 * 1024;
 const CONTENT_CACHE_BYTES = 64 * 1024 * 1024;
 const VIEW_CACHE_ITEMS = 64;
 const TERMINAL_VIEW_RETENTION_MS = 60_000;
+/**
+ * Rows of context the widget window keeps above the node it follows. The widget
+ * is about ten lines, so a few earlier rows are enough for orientation.
+ */
+const SESSION_NODE_LEAD = 4;
+/**
+ * Text one session field may carry: one node row, the workflow name, the run
+ * title, the run error, or one decision choice label. The widget renders each on
+ * one line it truncates to the terminal width, and the 1 MiB client frame budget
+ * is the external limit that requires this bound. Complete text stays available
+ * through the detailed run view and its node history.
+ */
+const SESSION_TEXT_BYTES = 4 * 1024;
+/**
+ * JSON one session detail may carry, such as a monitor estimate, one progress
+ * payload, or the choice labels of one decision. A larger value is reported as
+ * null, left out, or cut at a choice boundary so the single session frame stays
+ * bounded; the detailed run view carries the complete value.
+ */
+const SESSION_DETAIL_JSON_BYTES = 8 * 1024;
 
 export class ServerViewStore {
   private readonly contentRecords = new Map<string, ContentRecord>();
@@ -190,6 +222,10 @@ export class ServerViewStore {
       counts.updates,
       page?.kind === "updates" ? page.cursor : undefined,
     );
+    const messageRange = viewRange(
+      counts.workflowMessages,
+      page?.kind === "workflow_messages" ? page.cursor : undefined,
+    );
     const loaded = this.runs.readRunView(runId, {
       steps: stepRange,
       trace: traceRange,
@@ -252,6 +288,16 @@ export class ServerViewStore {
       page?.kind === "updates" ? page.cursor : undefined,
       (update) => this.projectUpdate(runId, update),
     );
+    // Message content loads only for the rows the byte-bounded page shows.
+    const messageSummaries = this.workflowMessages.listRunSummaryPage(runId, messageRange);
+    const messagePage = byteBoundedCandidatePage(
+      messageSummaries,
+      messageRange.start,
+      counts.workflowMessages,
+      page?.kind === "workflow_messages" ? page.cursor : undefined,
+      (summary) =>
+        this.projectRecordField(runId, this.workflowMessages.materialize(summary), "content"),
+    );
     const followUpQueue =
       loaded.followUpQueue === null
         ? null
@@ -312,6 +358,9 @@ export class ServerViewStore {
       followUpTotal: followUpPage.total,
       updateStart: updatePage.start,
       updateTotal: updatePage.total,
+      workflowMessages: messagePage.items,
+      workflowMessageStart: messagePage.start,
+      workflowMessageTotal: messagePage.total,
       live: display.status === "running" || display.status === "waiting",
       possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
     };
@@ -320,52 +369,354 @@ export class ServerViewStore {
   session(
     sessionId: string,
     coordinator: { epoch: string; active: boolean; branchReportRequired: boolean } | null = null,
+    nodeCursor?: number,
   ): WorkflowSessionView {
     return this.state.readTransaction(() => {
       const activeQueue = this.queue.findSessionReservationView(sessionId);
       const retainedRunId =
         activeQueue === undefined ? this.retainedTerminalRunId(sessionId) : undefined;
       const runId = activeQueue?.runId ?? retainedRunId;
-      const pending = this.serverState.listPendingInteractions(sessionId);
-      const pendingInteractions = byteBoundedForwardPage(pending, (request) =>
-        this.projectRecordField(request.runId, request, "contract"),
-      );
-      const workflowMessages = this.workflowMessages.listSession(sessionId);
+      // Selection is one metadata read. The key must name the exact message,
+      // because a status or entry change can land in the same millisecond as the
+      // write that made it current, and then the aggregate facts stay equal. The
+      // message alone identifies the selection, including a session that holds
+      // no live or retained run.
+      const selected = this.currentWorkflowMessageSummary(sessionId);
+      const version = [
+        runId ?? "-",
+        runId === undefined ? "-" : this.runVersion(runId),
+        this.pendingSessionRevision(sessionId),
+        this.sessionMessageRevision(sessionId),
+        selected === undefined
+          ? "-"
+          : [selected.workflowMessageId, selected.status, selected.piSessionEntryId ?? "-"].join(
+              ":",
+            ),
+        this.openTurnRevision(sessionId),
+        coordinator?.epoch ?? "-",
+        coordinator?.active === true ? "active" : "idle",
+        coordinator?.branchReportRequired === true ? "report" : "reported",
+        nodeCursor === undefined ? "-" : `${nodeCursor}`,
+      ].join("|");
+      const cached = this.sessionCache.get(sessionId);
+      if (cached?.version === version) {
+        refreshCacheEntry(this.sessionCache, sessionId, cached);
+        return cached.view;
+      }
+      const message =
+        selected === undefined ? undefined : this.workflowMessages.materialize(selected);
       const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
-      const eligible = workflowMessages.find((message) => this.isMessageEligible(message));
-      const next =
-        openTurn === undefined &&
-        (coordinator === null || (coordinator.active && !coordinator.branchReportRequired))
-          ? eligible
-          : undefined;
-      const open =
-        openTurn === undefined
-          ? this.openWorkflowMessage(workflowMessages)
-          : workflowMessages.find(
-              (message) => message.workflowMessageId === openTurn.workflowMessageId,
-            );
-      return {
+      const view: WorkflowSessionView = {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
-        run: runId === undefined ? null : this.run(runId),
-        pendingInteractions,
-        pendingInteractionStart: 0,
-        pendingInteractionTotal: pending.length,
-        workflowMessages,
-        workflowMessageStart: 0,
-        workflowMessageTotal: workflowMessages.length,
-        workflowMessageWindowComplete: true,
-        nextWorkflowMessageId: next?.workflowMessageId ?? null,
-        openWorkflowMessageId: open?.workflowMessageId ?? null,
-        openWorkflowTurn: openTurn ?? null,
-        cancelledWorkflowMessageIds: workflowMessages
-          .filter((message) => this.hasCancelledSource(message))
-          .map((message) => message.workflowMessageId),
+        run: runId === undefined ? null : this.sessionRun(runId, nodeCursor),
+        interaction: this.currentInteraction(sessionId),
+        workflowMessage:
+          message === undefined
+            ? null
+            : this.sessionMessage(message, this.hasCancelledSource(message)),
+        openWorkflowTurn: openTurn === undefined ? null : openTurn,
         coordinatorEpoch: coordinator?.epoch ?? null,
         coordinatorActive: coordinator?.active ?? false,
         branchReportRequired: coordinator?.branchReportRequired ?? false,
       };
+      rememberCacheEntry(this.sessionCache, sessionId, { version, view });
+      return view;
     });
+  }
+
+  /** The one workflow message Pi must inspect, add, finish, or confirm next. */
+  currentWorkflowMessage(sessionId: string): WorkflowMessage | undefined {
+    const selected = this.currentWorkflowMessageSummary(sessionId);
+    return selected === undefined ? undefined : this.workflowMessages.materialize(selected);
+  }
+
+  /**
+   * Selection reads message metadata only. Content loads once, for the message
+   * the session must act on.
+   */
+  private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
+    const messages = this.workflowMessages.listSessionSummaries(sessionId);
+    if (messages.length === 0) return undefined;
+    const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
+    if (openTurn !== undefined) {
+      const open = messages.find(
+        (message) => message.workflowMessageId === openTurn.workflowMessageId,
+      );
+      if (open !== undefined) return open;
+    }
+    // Pi first checks whether the next message is already on its branch, then
+    // delivers it. A pending message therefore outranks a delivered one, which
+    // is how a reminder or resumed step replaces its own earlier message.
+    for (const message of messages) {
+      if (message.status === "pending" && this.isMessageEligible(message)) return message;
+    }
+    // Otherwise Pi keeps the newest delivered message it still owes work for.
+    for (const message of [...messages].reverse()) {
+      if (message.status === "sent" && this.needsPiWork(message)) return message;
+    }
+    // A cancelled step stays current while Pi holds it and has not confirmed a
+    // turn, because the extension must stop the turn it started from that
+    // message. A message Pi never received needs no stopping and must not become
+    // deliverable again, so only a delivered one stays current. Once Pi reports a
+    // turn, the delivery is reconciled and the message stops being current.
+    for (const message of [...messages].reverse()) {
+      if (message.status !== "sent" || message.kind !== "step") continue;
+      if (!this.hasCancelledSource(message)) continue;
+      if (this.workflowMessages.latestTurnForMessage(message.workflowMessageId) !== undefined) {
+        continue;
+      }
+      return message;
+    }
+    // A retained terminal message stays current until its delivery or first turn finishes.
+    const retainedRunId = this.retainedTerminalRunId(sessionId);
+    if (retainedRunId !== undefined) {
+      for (const message of messages) {
+        if (message.runId === retainedRunId && message.kind === "terminal") return message;
+      }
+    }
+    return undefined;
+  }
+
+  /** Whether Pi still owes delivery confirmation or a model turn for this message. */
+  private needsPiWork(message: WorkflowMessageSummary): boolean {
+    return this.openWorkflowMessage([message]) !== undefined;
+  }
+
+  private currentInteraction(sessionId: string): ClientInteractiveRequest | null {
+    const pending = this.serverState.listPendingInteractions(sessionId);
+    const first = pending[0];
+    if (first === undefined) return null;
+    return this.projectRecordField(
+      first.runId,
+      first,
+      "contract",
+    ) as unknown as ClientInteractiveRequest;
+  }
+
+  private sessionMessage(
+    message: WorkflowMessage,
+    deliveryCancelled: boolean,
+  ): WorkflowSessionMessage {
+    return {
+      schema: SESSION_MESSAGE_SCHEMA,
+      workflowMessageId: message.workflowMessageId,
+      runId: message.runId,
+      targetSessionId: message.targetSessionId,
+      kind: message.kind,
+      sourceId: message.sourceId,
+      order: message.order,
+      status: message.status,
+      piSessionEntryId: message.piSessionEntryId,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+      triggerTurn: message.content.triggerTurn,
+      customType: message.content.customType,
+      display: message.content.display,
+      content: this.projectValue(message.runId, toJson(message.content)),
+      contentDigest: message.contentDigest,
+      deliveryCancelled,
+    };
+  }
+
+  private sessionMessageRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(max(updated_at), 0) AS updatedAt,
+                COALESCE(sum(order_number), 0) AS orderSum
+         FROM workflow_messages WHERE target_session_id = ?`,
+      )
+      .get(sessionId);
+    if (!isObjectRecord(row)) throw new Error("Session message revision is invalid");
+    return `${row.count}:${row.updatedAt}:${row.orderSum}`;
+  }
+
+  private openTurnRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(max(started_at), 0) AS startedAt
+         FROM workflow_turns WHERE target_session_id = ? AND state = 'started'`,
+      )
+      .get(sessionId);
+    if (!isObjectRecord(row)) throw new Error("Session turn revision is invalid");
+    return `${row.count}:${row.startedAt}`;
+  }
+
+  /**
+   * Bounded current run projection for Pi. It carries the semantic facts for the
+   * status line and widget and leaves complete history to the detailed view.
+   */
+  sessionRun(runId: string, nodeCursor?: number): WorkflowSessionRunView | null {
+    const queue = this.queue.getWorkflowRunView(runId);
+    const counts = this.runs.readRunViewCounts(runId);
+    if (queue === undefined || counts === null) return null;
+    const empty = { start: 0, limit: 0 };
+    const loaded = this.runs.readRunView(runId, {
+      steps: viewRange(counts.steps),
+      trace: empty,
+      sessionEntries: empty,
+      sessionEvents: empty,
+      settings: empty,
+      followUps: empty,
+      // Progress and monitor facts come from their own bounded tail reads, so the
+      // compact run never loads the head of a long update set.
+      updates: empty,
+      graphCursor: 0,
+    });
+    if (loaded === null) return null;
+    const state = loaded.state;
+    const failureNodeId = this.sessionFailureNodeId(state);
+    const display = this.projectDisplay(runId, this.display(queue, state));
+    const rows = this.sessionNodeRows(runId, loaded.snapshot, state, failureNodeId);
+    const window = boundedNodeWindow(
+      rows,
+      nodeCursor ?? defaultNodeWindowStart(rows, state, failureNodeId),
+    );
+    return {
+      schema: SESSION_RUN_VIEW_SCHEMA,
+      runId,
+      revision: this.presentationRevision(runId),
+      runRevision: this.runs.runRevision(runId),
+      queue: projectQueue(queue),
+      display,
+      workflowName: boundSessionText(state.workflowName),
+      runTitle: state.runTitle === undefined ? null : boundSessionText(state.runTitle),
+      paused: state.paused === true,
+      currentNode: boundSessionNodeId(state.currentNode),
+      waitingOn: boundSessionNodeId(state.waitingOn),
+      error: state.error === undefined ? null : boundSessionText(state.error),
+      nodes: window.items,
+      nodeStart: window.start,
+      nodeTotal: window.total,
+      progressUpdates: sessionProgressUpdates(
+        this.runs.readCurrentUpdateTail(runId, {
+          type: "progress",
+          limit: MAX_SESSION_PROGRESS_UPDATES,
+        }),
+      ),
+      monitorEstimate: boundedSessionJson(toJson(state.outputs.estimate ?? null)),
+      monitorSchedule: sessionMonitorSchedule(
+        this.runs.readCurrentUpdateTail(runId, {
+          type: "monitor.schedule",
+          key: "next-check",
+          limit: 1,
+        }),
+      ),
+      live: display.status === "running" || display.status === "waiting",
+      possiblyInterrupted: queue.status === "parked" && display.status !== "paused",
+    };
+  }
+
+  /**
+   * One row per definition node, in definition order. Attempt facts come from
+   * durable attempts so the rows stay correct for long histories. Detailed text
+   * travels only for the current, waiting, and most recent failed node.
+   */
+  private sessionNodeRows(
+    runId: string,
+    snapshot: unknown,
+    state: WorkflowRunState,
+    failureNodeId: string | undefined,
+  ): WorkflowSessionNodeRow[] {
+    const attempts = this.state.connection
+      .prepare(
+        `SELECT node_id AS nodeId, status, attempt_number AS attemptNumber,
+                started_at AS startedAt, finished_at AS finishedAt,
+                settings_change_number AS settingsChangeNumber, error_hash AS errorHash
+         FROM node_attempts WHERE run_id = ? ORDER BY attempt_number`,
+      )
+      .all(runId)
+      .filter(isNodeAttemptRow);
+    const byNode = new Map<string, NodeAttemptFacts>();
+    for (const attempt of attempts) {
+      const facts = byNode.get(attempt.nodeId) ?? {
+        attempts: 0,
+        activeStatus: null,
+        lastStatus: null,
+        lastSettingsChangeNumber: null,
+        startedAt: null,
+        durationMs: null,
+        errorHash: null,
+      };
+      facts.attempts += 1;
+      if (attempt.startedAt !== null && attempt.finishedAt === null) {
+        facts.startedAt = new Date(attempt.startedAt).toISOString();
+      }
+      if (attempt.startedAt !== null && attempt.finishedAt !== null) {
+        facts.durationMs = Math.max(0, attempt.finishedAt - attempt.startedAt);
+      }
+      if (attempt.settingsChangeNumber !== null) {
+        facts.lastSettingsChangeNumber = attempt.settingsChangeNumber;
+      }
+      if (isActiveAttemptStatus(attempt.status)) facts.activeStatus = attempt.status;
+      else {
+        // Attempts are ordered by number, so a finished attempt means no earlier
+        // attempt is still active. A leftover unfinished row from a superseded
+        // attempt must not report the node as working after a later attempt
+        // succeeded.
+        facts.activeStatus = null;
+        facts.startedAt = null;
+        facts.lastStatus = attempt.status;
+        facts.errorHash = attempt.errorHash;
+      }
+      byNode.set(attempt.nodeId, facts);
+    }
+    const records = nodeRecords(snapshot);
+    const failure = failureNodeId;
+    const rows: WorkflowSessionNodeRow[] = [];
+    for (const [nodeId, node] of Object.entries(records)) {
+      const facts = byNode.get(nodeId);
+      const detail =
+        nodeId === state.currentNode || nodeId === state.waitingOn || nodeId === failure;
+      rows.push({
+        nodeId,
+        nodeType: typeof node.nodeType === "string" ? node.nodeType : "unknown",
+        actionExecution: sessionActionExecution(node),
+        state: nodeRowState(state, nodeId, facts),
+        attempts: facts?.attempts ?? 0,
+        settingsChangeNumber:
+          nodeId === state.currentNode
+            ? (state.currentSettingsChangeNumber ?? facts?.lastSettingsChangeNumber ?? null)
+            : (facts?.lastSettingsChangeNumber ?? null),
+        statusDetail:
+          nodeId === state.currentNode && typeof state.statusDetail === "string"
+            ? boundNodeText(state.statusDetail)
+            : null,
+        // The widget shows the current node, or the waiting node while the run
+        // is running, as the node it is working on. Both need their start time
+        // so the elapsed segment stays visible.
+        startedAt:
+          nodeId === state.currentNode || nodeId === state.waitingOn
+            ? (facts?.startedAt ?? null)
+            : null,
+        durationMs: facts?.durationMs ?? null,
+        error: detail ? boundNodeText(this.readAttemptError(facts?.errorHash ?? null)) : null,
+        humanDecision: sessionHumanDecision(node, state, nodeId),
+        summary:
+          nodeId === state.waitingOn && typeof node.summary === "string"
+            ? boundNodeText(node.summary)
+            : null,
+        assistantResponse: isAssistantResponseNode(node),
+        outcome: state.results[nodeId]?.outcome ?? null,
+      });
+    }
+    return rows;
+  }
+
+  private readAttemptError(hash: Buffer | null): string | null {
+    if (hash === null) return null;
+    const blob = this.state.readBlob(hash);
+    if (blob === undefined) return null;
+    return blob.content.toString("utf8").slice(0, 512);
+  }
+
+  /** The last node that did not finish cleanly, in completion order. */
+  private sessionFailureNodeId(state: WorkflowRunState): string | undefined {
+    let failed: string | undefined;
+    for (const [nodeId, result] of Object.entries(state.results)) {
+      if (result.outcome !== "ok") failed = nodeId;
+    }
+    return failed;
   }
 
   clearTerminal(sessionId: string, runId?: string, now: number = Date.now()): string | null {
@@ -627,7 +978,7 @@ export class ServerViewStore {
 
   private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
     const messages = this.workflowMessages
-      .listSession(sessionId)
+      .listSessionSummaries(sessionId)
       .filter((message) => message.kind === "terminal")
       .reverse();
     for (const message of messages) {
@@ -653,7 +1004,7 @@ export class ServerViewStore {
       if (message.status !== "sent") continue;
       const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
       if (
-        message.content.triggerTurn &&
+        message.triggerTurn &&
         !recoveryStopped(this.state, message.workflowMessageId) &&
         (turn === undefined || turn.state === "started")
       )
@@ -664,9 +1015,9 @@ export class ServerViewStore {
     return undefined;
   }
 
-  private hasCancelledSource(message: WorkflowMessage): boolean {
+  hasCancelledSource(message: WorkflowMessageSummary): boolean {
     if (message.kind === "terminal")
-      return message.content.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
+      return message.triggerTurn && recoveryStopped(this.state, message.workflowMessageId);
     if (message.kind === "step") {
       const request = this.state.connection
         .prepare("SELECT status FROM interactive_requests WHERE request_id = ? AND run_id = ?")
@@ -684,7 +1035,7 @@ export class ServerViewStore {
     return false;
   }
 
-  private isMessageEligible(message: WorkflowMessage): boolean {
+  private isMessageEligible(message: WorkflowMessageSummary): boolean {
     if (message.status !== "pending") return false;
     if (message.kind === "step" || message.kind === "decision") {
       const request = this.state.connection
@@ -712,7 +1063,7 @@ export class ServerViewStore {
       return (
         isObjectRecord(run) &&
         isTerminalStatus(run.status) &&
-        (!message.content.triggerTurn || !recoveryStopped(this.state, message.workflowMessageId))
+        (!message.triggerTurn || !recoveryStopped(this.state, message.workflowMessageId))
       );
     }
     const source = this.state.connection
@@ -734,11 +1085,11 @@ export class ServerViewStore {
       .get(source.runId);
     if (!isObjectRecord(run) || run.status !== "completed") return false;
     const terminal = this.workflowMessages
-      .listRun(source.runId)
+      .listRunSummaries(source.runId)
       .filter((candidate) => candidate.kind === "terminal" && candidate.status === "sent")
       .at(-1);
     if (terminal === undefined) return false;
-    if (terminal.content.triggerTurn) {
+    if (terminal.triggerTurn) {
       const turn = this.workflowMessages.latestTurnForMessage(terminal.workflowMessageId);
       if (
         turn?.state !== "ended" ||
@@ -781,7 +1132,9 @@ export class ServerViewStore {
     return reservation === undefined;
   }
 
-  private openWorkflowMessage(messages: readonly WorkflowMessage[]): WorkflowMessage | undefined {
+  private openWorkflowMessage(
+    messages: readonly WorkflowMessageSummary[],
+  ): WorkflowMessageSummary | undefined {
     for (const message of [...messages].reverse()) {
       if (message.status !== "sent") continue;
       if (message.kind === "step") {
@@ -797,7 +1150,7 @@ export class ServerViewStore {
       } else if (
         message.kind === "followUp" ||
         (message.kind === "terminal" &&
-          message.content.triggerTurn &&
+          message.triggerTurn &&
           !recoveryStopped(this.state, message.workflowMessageId))
       ) {
         const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
@@ -1042,11 +1395,199 @@ function manifest(
     status,
     traceSchema: "pi-workflows.trace-event.v1",
     paths: {
-      workflow: "host",
-      state: "host",
-      trace: "host",
+      workflow: "server",
+      state: "server",
+      trace: "server",
     },
   };
+}
+
+// The widget shows a bounded set of progress rows. A run keeps up to 1,024
+// current updates, so the newest keys are the ones that matter.
+const MAX_SESSION_PROGRESS_UPDATES = 16;
+
+type NodeRecord = {
+  nodeType?: unknown;
+  actionExecution?: unknown;
+  summary?: unknown;
+  humanDecision?: unknown;
+  expectedOutput?: unknown;
+};
+
+type NodeAttemptFacts = {
+  attempts: number;
+  activeStatus: string | null;
+  lastStatus: string | null;
+  lastSettingsChangeNumber: number | null;
+  startedAt: string | null;
+  durationMs: number | null;
+  errorHash: Buffer | null;
+};
+
+type NodeAttemptRow = {
+  nodeId: string;
+  status: string;
+  attemptNumber: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  settingsChangeNumber: number | null;
+  errorHash: Buffer | null;
+};
+
+function isNodeAttemptRow(value: unknown): value is NodeAttemptRow {
+  if (!isJsonObject(value)) return false;
+  return (
+    typeof value.nodeId === "string" &&
+    typeof value.status === "string" &&
+    typeof value.attemptNumber === "number" &&
+    (value.startedAt === null || typeof value.startedAt === "number") &&
+    (value.finishedAt === null || typeof value.finishedAt === "number") &&
+    (value.settingsChangeNumber === null || typeof value.settingsChangeNumber === "number") &&
+    (value.errorHash === null || Buffer.isBuffer(value.errorHash))
+  );
+}
+
+function isActiveAttemptStatus(status: string): boolean {
+  return status === "pending" || status === "running" || status === "waiting";
+}
+
+function nodeRecords(snapshot: unknown): Record<string, NodeRecord> {
+  if (!isJsonObject(snapshot) || !isJsonObject(snapshot.nodes)) return {};
+  const records: Record<string, NodeRecord> = {};
+  for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
+    if (isJsonObject(node)) records[nodeId] = node as NodeRecord;
+  }
+  return records;
+}
+
+function nodeRowState(
+  state: WorkflowRunState,
+  nodeId: string,
+  facts: NodeAttemptFacts | undefined,
+): WorkflowSessionNodeRow["state"] {
+  if (facts?.activeStatus === "running") return "running";
+  if (facts?.activeStatus === "waiting") return "waiting";
+  if (facts?.activeStatus === "pending") return "pending";
+  const result = state.results[nodeId];
+  if (result !== undefined) return result.outcome === "ok" ? "ok" : "failed";
+  if (facts?.lastStatus === "completed") return "ok";
+  if (facts !== undefined && facts.lastStatus !== null) return "failed";
+  return "pending";
+}
+
+function sessionActionExecution(node: NodeRecord): "function" | "shell" | null {
+  return node.actionExecution === "shell" || node.actionExecution === "function"
+    ? node.actionExecution
+    : null;
+}
+
+function isAssistantResponseNode(node: NodeRecord): boolean {
+  return (
+    node.nodeType === "agent" &&
+    isJsonObject(node.expectedOutput) &&
+    node.expectedOutput.kind === "assistant-message"
+  );
+}
+
+function sessionHumanDecision(
+  node: NodeRecord,
+  state: WorkflowRunState,
+  nodeId: string,
+): WorkflowSessionNodeRow["humanDecision"] {
+  const human = isJsonObject(node.humanDecision) ? node.humanDecision : undefined;
+  if (human === undefined) return null;
+  const request = humanDecisionRequest(state.finalOutput);
+  const current = request !== undefined && request.nodeId === nodeId ? request : undefined;
+  const audience =
+    current?.audience ?? (typeof human.audience === "string" ? human.audience : "human");
+  const choices = isJsonObject(human.choices)
+    ? sessionDecisionChoices(
+        Object.entries(human.choices).flatMap(([value, choice]) =>
+          isJsonObject(choice) && typeof choice.label === "string"
+            ? [{ value, label: choice.label }]
+            : [],
+        ),
+      )
+    : [];
+  const choiceValue =
+    state.humanDecision !== undefined && state.humanDecision.nodeId === nodeId
+      ? state.humanDecision.response.choice
+      : null;
+  return {
+    audience,
+    summary: current?.summary === undefined ? null : boundNodeText(current.summary),
+    choices,
+    choiceValue,
+    presentationDigest: current?.presentationDigest ?? null,
+  };
+}
+
+/**
+ * Decision choices one session node row may carry. The widget joins the labels
+ * into one line it truncates to the terminal width, and the 1 MiB frame budget
+ * requires the bound. The complete decision stays available through the detailed
+ * run view and its decision record.
+ */
+function sessionDecisionChoices(
+  entries: readonly { value: string; label: string }[],
+): { value: string; label: string }[] {
+  const choices: { value: string; label: string }[] = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    const label = boundSessionText(entry.label);
+    const size = Buffer.byteLength(label, "utf8") + Buffer.byteLength(entry.value, "utf8");
+    // Keep at least one choice so the row still names a choice the human sees.
+    if (choices.length > 0 && bytes + size > SESSION_DETAIL_JSON_BYTES) break;
+    bytes += size;
+    choices.push({ value: entry.value, label });
+  }
+  return choices;
+}
+
+function humanDecisionRequest(
+  value: unknown,
+):
+  | { nodeId: string; audience: string; summary: string | null; presentationDigest: string | null }
+  | undefined {
+  if (!isJsonObject(value)) return undefined;
+  if (value.schema !== "pi-workflows.human-decision-request.v1") return undefined;
+  if (typeof value.nodeId !== "string" || typeof value.audience !== "string") return undefined;
+  const presentation = isJsonObject(value.presentation) ? value.presentation : undefined;
+  return {
+    nodeId: value.nodeId,
+    audience: value.audience,
+    summary: typeof presentation?.summary === "string" ? presentation.summary : null,
+    presentationDigest:
+      typeof value.presentationDigest === "string" ? value.presentationDigest : null,
+  };
+}
+
+function sessionProgressUpdates(
+  updates: readonly WorkflowUpdateRecord[],
+): WorkflowSessionProgressUpdate[] {
+  const progress: WorkflowSessionProgressUpdate[] = [];
+  for (const update of updates) {
+    if (update.type !== "progress") continue;
+    const data = boundedSessionJson(toJson(update.data));
+    // A payload larger than one session detail is left out rather than cut, so
+    // the compact view never carries a value that looks complete but is not.
+    if (data === null) continue;
+    progress.push({ key: update.key, at: update.at, data });
+  }
+  // Updates arrive in run revision order, so a bounded set keeps the newest keys
+  // instead of the oldest ones.
+  return progress.slice(-MAX_SESSION_PROGRESS_UPDATES);
+}
+
+function sessionMonitorSchedule(
+  updates: readonly WorkflowUpdateRecord[],
+): { nextCheckAt: string; recordedAt: string } | null {
+  for (const update of updates) {
+    if (update.type !== "monitor.schedule" || update.key !== "next-check") continue;
+    if (!isJsonObject(update.data) || typeof update.data.nextCheckAt !== "string") continue;
+    return { nextCheckAt: update.data.nextCheckAt, recordedAt: update.at };
+  }
+  return null;
 }
 
 function projectQueue(
@@ -1054,7 +1595,7 @@ function projectQueue(
 ): WorkflowRunQueueView {
   return {
     runId: run.runId,
-    workflowName: run.workflowName,
+    workflowName: boundSessionText(run.workflowName),
     workflowSourceRef: run.workflowSourceRef,
     initialized: run.initialized,
     definitionDigest: run.definitionDigest,
@@ -1247,6 +1788,101 @@ export function workflowPageStart(total: number, cursor?: number): number {
 
 function clampCursor(cursor: number, total: number): number {
   return total === 0 ? 0 : Math.min(cursor, total - 1);
+}
+
+/** Text one session node row may carry, bounded by the client frame budget. */
+function boundNodeText(value: string | null): string | null {
+  return value === null ? null : boundSessionText(value);
+}
+
+/** Free-form session text, bounded for the single frame budget. */
+function boundSessionText(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= SESSION_TEXT_BYTES) return value;
+  // The cut must fall on a character boundary. A cut inside a multi-byte sequence
+  // would end the value with a replacement character the widget shows as text.
+  let end = SESSION_TEXT_BYTES;
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+/**
+ * A node identity the session run reports as the node it works on. The window
+ * leaves out a row whose own bytes exceed the frame budget, so an identity of
+ * that size is left out here too. A cut identity would match no row and would
+ * name a node that does not exist. The complete identity stays in the detailed
+ * run view.
+ */
+function boundSessionNodeId(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return Buffer.byteLength(canonicalJson(value), "utf8") > VIEW_PAGE_BYTES ? null : value;
+}
+
+/** One JSON detail, or null when the detail is too large for the session frame. */
+function boundedSessionJson(value: JsonValue): JsonValue {
+  return Buffer.byteLength(canonicalJson(value), "utf8") <= SESSION_DETAIL_JSON_BYTES
+    ? value
+    : null;
+}
+
+/**
+ * The window follows the node the widget shows as working, with a little lead.
+ * A run with no working node shows the node that carries the failure the widget
+ * highlights, or its end, so the useful rows are in the first window.
+ */
+function defaultNodeWindowStart(
+  rows: readonly WorkflowSessionNodeRow[],
+  state: WorkflowRunState,
+  failureNodeId?: string,
+): number {
+  // The widget projects the same rows, so a row that reports work is the row it
+  // shows as working even when the run state itself carries no working node.
+  let rowFocus: string | undefined;
+  for (const row of rows) {
+    if (row.state === "running" || row.state === "waiting") rowFocus = row.nodeId;
+  }
+  const focus =
+    state.currentNode ?? state.waitingOn ?? rowFocus ?? failureNodeId ?? rows.at(-1)?.nodeId;
+  const index = focus === undefined ? -1 : rows.findIndex((row) => row.nodeId === focus);
+  return index < 0 ? 0 : Math.max(0, index - SESSION_NODE_LEAD);
+}
+
+/**
+ * Byte- and item-bounded node rows that start at the requested row. Widget
+ * scrolling asks for the row after the last one it holds, so a window always
+ * begins where the caller asked and grows forward.
+ */
+function boundedNodeWindow(
+  rows: readonly WorkflowSessionNodeRow[],
+  start: number,
+): { start: number; total: number; items: WorkflowSessionNodeRow[] } {
+  const total = rows.length;
+  if (total === 0) return { start: 0, total: 0, items: [] };
+  const first = Math.min(Math.max(0, Math.floor(start)), total - 1);
+  const items: WorkflowSessionNodeRow[] = [];
+  let windowStart = first;
+  let bytes = 0;
+  for (let index = first; index < total && items.length < VIEW_PAGE_ITEMS; index += 1) {
+    const row = rows[index] as WorkflowSessionNodeRow;
+    const rowBytes = Buffer.byteLength(canonicalJson(toJson(row)), "utf8") + 1;
+    // A row must fit by itself, or the window would never move past it. A row
+    // whose own identity exceeds the budget is left out, and the window starts at
+    // the next row instead, so one long node id cannot break the frame the client
+    // needs. A window that already holds rows stops here, so its rows stay
+    // contiguous and the next cursor is exact. Complete node history stays in the
+    // detailed run view.
+    if (rowBytes > VIEW_PAGE_BYTES) {
+      if (items.length === 0) {
+        windowStart = index + 1;
+        continue;
+      }
+      break;
+    }
+    if (items.length > 0 && bytes + rowBytes > VIEW_PAGE_BYTES) break;
+    bytes += rowBytes;
+    items.push(row);
+  }
+  return { start: windowStart, total, items };
 }
 
 function toJson(value: unknown): JsonValue {

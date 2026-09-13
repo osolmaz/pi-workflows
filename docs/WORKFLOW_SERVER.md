@@ -1,6 +1,6 @@
 # Workflow server
 
-Status: the out-of-process server, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow run state](2026-09-04-workflow-run-state-plan.md) records the approved refactor for turn ownership, managed effects, restarts, terminal data, cancellation, and runner recovery. [Add automatic workflow state retention](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
+Status: the out-of-process server, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow run state](2026-09-04-workflow-run-state-plan.md) records the approved refactor for turn ownership, managed effects, restarts, terminal data, cancellation, and runner recovery. [Add automatic workflow state retention](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract. [Unify workflow messages and restore the earlier in-process run behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
 
 ## Purpose
 
@@ -115,13 +115,13 @@ Claim rejection uses `ClaimLostError` with one internal reason:
 
 Logs may show the run ID, generation, and reason. They must not show a raw token or token hash.
 
-## Worker scheduling
+## Runner scheduling
 
-`WorkflowRunQueueStore` in `src/workflows/queue.ts` owns run reservations, queue state, and execution claims. `SqliteResourceManagerStore` owns managed resources and reconcile state, not workflow scheduling. The host is the only reconciliation runtime; the separate `ResourceManagerRuntime` API has been removed. Reconcile results and failure requeues commit atomically, and a worker that loses its claim cannot write a failure or start a retry. They share the existing SQLite connection and revision helpers; neither introduces another database.
+`WorkflowRunQueueStore` in `src/workflows/queue.ts` owns run reservations, queue state, and execution claims. `SqliteResourceManagerStore` owns managed resources and reconcile state, not workflow scheduling. The workflow server is the only reconciliation runtime; the separate `ResourceManagerRuntime` API has been removed. Reconcile results and failure requeues commit atomically, and a runner that loses its claim cannot write a failure or start a retry. They share the existing SQLite connection and revision helpers; neither introduces another database.
 
 One scheduler admits workflow runners and resource-manager reconciles. Start and restart reserve a queued run; resume makes existing work eligible. Accepted responses, validation candidates, and expired interactive deadlines use the same admission path. Requests remain durable while capacity is full.
 
-The default capacity is four execution workers. Set `PI_WORKFLOWS_MAX_WORKERS` to a positive integer before starting the host to change it. Embedded test hosts can use `WorkflowServer({ maxWorkers })`. Capacity includes pending launches and live workers. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.
+The default capacity is four execution runners. Set `PI_WORKFLOWS_MAX_RUNNERS` to a positive integer before starting the workflow server to change it. Embedded test servers can use `WorkflowServer({ maxRunners })`. Capacity includes pending launches and live runners. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.
 
 An interactive run holds its origin-session reservation while queued, running, waiting, or paused. Independent headless runs do not reserve a Pi session. Only terminal completion or explicit cancellation releases an interactive reservation.
 
@@ -129,19 +129,19 @@ An interactive run holds its origin-session reservation while queued, running, w
 
 The run and queue projections follow these states:
 
-| Run state   | Queue state | Claim | Runner   | Meaning                                                 |
-| ----------- | ----------- | ----- | -------- | ------------------------------------------------------- |
-| `queued`    | `queued`    | none  | none     | Ready for server scheduling.                            |
-| `running`   | `starting`  | host  | starting | A runner launch is being recorded.                      |
-| `running`   | `running`   | host  | live     | A runner is executing one node.                         |
-| `running`   | `parked`    | none  | none     | Execution stopped at a durable boundary and can resume. |
-| `waiting`   | `parked`    | none  | none     | A checkpoint or interactive request needs input.        |
-| `completed` | `done`      | none  | none     | The run finished successfully.                          |
-| `failed`    | `failed`    | none  | none     | The run failed with a durable error.                    |
-| `timed_out` | `failed`    | none  | none     | The run exceeded a declared timeout.                    |
-| `cancelled` | `cancelled` | none  | none     | Cancellation completed.                                 |
+| Run state   | Queue state | Claim  | Runner   | Meaning                                                 |
+| ----------- | ----------- | ------ | -------- | ------------------------------------------------------- |
+| `queued`    | `queued`    | none   | none     | Ready for server scheduling.                            |
+| `running`   | `starting`  | server | starting | A runner launch is being recorded.                      |
+| `running`   | `running`   | server | live     | A runner is executing one node.                         |
+| `running`   | `parked`    | none   | none     | Execution stopped at a durable boundary and can resume. |
+| `waiting`   | `parked`    | none   | none     | A checkpoint or interactive request needs input.        |
+| `completed` | `done`      | none   | none     | The run finished successfully.                          |
+| `failed`    | `failed`    | none   | none     | The run failed with a durable error.                    |
+| `timed_out` | `failed`    | none   | none     | The run exceeded a declared timeout.                    |
+| `cancelled` | `cancelled` | none   | none     | Cancellation completed.                                 |
 
-The `host` claim-owner value and `pi-workflows.worker-launch.v1` launch schema are retained version-1 internal identifiers. They do not name public components.
+The `server` claim-owner value and the `pi-workflows.runner-launch.v1` launch schema are the current version-1 identifiers.
 
 A lifecycle transaction updates the run, queue, attempt, decision, lease, event, and viewer facts that belong to one transition. The database must not commit a failed event while the run remains running, or a terminal queue row while the run remains nonterminal.
 
@@ -155,7 +155,7 @@ A runner launch envelope contains:
 
 ```json
 {
-  "schema": "pi-workflows.worker-launch.v1",
+  "schema": "pi-workflows.runner-launch.v1",
   "runId": "run-id",
   "generation": 2,
   "runnerEpoch": "opaque-id",
@@ -257,34 +257,40 @@ The protocol owns four operation groups:
 
 The server returns one canonical `pi-workflows.run-view.v1` document. It contains the existing bounded workflow projection and page cursors plus a `display` object. The queue field contains display metadata only. It does not repeat the input, launch options, runner affinity, or claim capability; the complete input remains reachable through the state projection. The `display` object contains the effective status, current activity kind, allowed controls, and the stored reason when action is required. A reason above the shared 16 KiB inline-content threshold uses a small `reason` notice and a digest-bound `reasonContent` reference, so one diagnostic cannot exceed the 1 MiB protocol frame while the complete reason remains available. Renderers use this object directly. They must not combine separate queries or infer status from durable rows.
 
-The unfinished node-attempt row is the one durable source for the current node. A running run exposes it as `currentNode`. A parked interactive run exposes the same node as `waitingOn`. A checkpoint has no unfinished attempt, so its completed checkpoint node supplies `waitingOn`. During an exact origin-session model turn, the server `display` changes that waiting node to running for presentation only. It does not infer another node or change the durable run state.
+The unfinished node-attempt row is the one durable source for the current node. A running run exposes it as `currentNode`. A parked interactive run exposes the same node as `waitingOn`. A checkpoint has no unfinished attempt, so its completed checkpoint node supplies `waitingOn`. During an exact origin-session model turn, the server `display` changes that waiting node to running for presentation only. It does not infer another node or change the durable run state. A compact node row reports the node's newest attempt, so an unfinished attempt row that a later attempt superseded cannot keep a finished node reported as working.
 
 Generated referenced content is stored directly in `run_view_content` under its exact run ID, content digest, and media type. It does not share general state-blob media metadata. A content read must match all three values, so a reference from another run or another media representation is unavailable.
 
 The origin-session response contains the active run view. When no run is active, it keeps the most recent terminal run visible while its terminal workflow message is pending or its first model turn is open, and then for 60 seconds after that turn ends. A newer run or `sessionView.clearTerminal` removes the retained terminal view. `/workflow clear` and the matching `piw` action call that control without changing workflow state.
 
-The response also contains an ordered byte-bounded window of all nonterminal workflow messages and open sent messages needed for recovery, their complete count, and the next eligible pending message ID only for the active coordinator epoch. Message records include the source, content reference, order, state, and Pi entry needed by the shared coordinator. A branch report can name only IDs from this complete window. The server returns all these facts from one consistent read. The extension materializes the complete run revision and message content before it updates the widget or coordinator. After every server connection, it reports the active branch before it sends a workflow message or reports a model turn. Polling an idle session creates no durable command.
+The response also contains the one current workflow message, which is the message Pi must inspect, add, finish, or confirm next. A cancelled step message stays current while Pi holds it and has not reported its turn, so the extension learns that a message it already delivered is cancelled and stops that turn. A cancelled step that Pi never received does not stay current: no turn needs stopping, the extension must not deliver a cancelled step again, and the retained terminal view stays visible. Message selection reads stored message metadata only, so a long session history never loads every content blob. The server reads content for the selected message and sends it with its digest. A branch report can name that message ID, or null while the session holds no message yet. The server returns all these facts from one consistent read. The extension applies the bounded snapshot to the widget, status line, and coordinator immediately. It does not request run pages or hydrate workflow history first. Polling an idle session creates no durable command. Complete message history stays available through the `workflow_messages` run page and the verified content operation.
+
+The compact run carries a bounded window of node rows, its first row index, and the complete row count. With no row request, the window follows the node the widget shows as working. A run with no working node follows the most recent failed node, or the last row, which is the row the widget highlights. A node row carries the node's own facts, which include the exact action subtype, so an action that runs a shell keeps its own glyph and is never reported as a function action. The run also carries the node it currently works on as a fact, and that node keeps the highlight and the elapsed time while its attempt is still pending, which is the normal handoff to a workflow runner. `view.session.window` moves the window of the live session subscription, and `null` returns it to the default window. A change that arrives while a publish pass already writes queues one further pass, so an explicit request reaches its client without waiting for the next view poll. The window is item and byte bounded, and one row's free text is bounded by the client frame budget. A row whose own identity is larger than the window budget is left out and the window starts at the next row, so one long node id cannot break the frame either. The run leaves the same identity out of the current and the waiting node facts, because a cut identity would match no row, so no node id larger than one frame ever reaches a client. A window that already holds rows stops before such a row, so its rows stay contiguous and its first row index stays exact. Complete node text and complete node history stay available through the detailed run view. Widget scrolling asks for the adjacent window, so the widget never holds the complete topology. The compact run also carries the newest progress updates for its run, up to 16 keys, and the newest monitor `next-check` record. Both come from their own bounded tail reads of those update types, so a run with more update keys than one view page still carries its newest tracks and its schedule. A run's current updates already hold one record per type and key, so a key that publishes often replaces only its own record and never hides another track, and a monitor that schedules again replaces its own earlier schedule instead of adding a stale one. Complete update history stays on the run's update page.
+
+Every other free-form value in the compact run is bounded as well, because the whole origin-session response travels as one client frame. One workflow name, run title, run error, or decision choice label is cut at 4 KiB, on a character boundary so the cut cannot leave a replacement character, one monitor estimate or progress payload is left out above 8 KiB, and one decision carries labels only while they fit the 8 KiB detail budget. The widget renders each on one line it truncates to the terminal width, and it needs no complete value for layout. Complete values stay available through the detailed run view, its decision record, and its update page. The compact projection therefore stays far below the 1 MiB frame limit however large the workflow's own strings and payloads are.
 
 Each history page has both an item limit and an encoded byte budget. Oversized values become digest-bound content references. Large workflow topology uses bounded node, edge, graph-step, and transition projections plus references for the complete original definition and complete graph history. Before the server advertises a generated reference, it stores the bytes under the exact run ID, content digest, and media type in `run_view_content`. It does not share media metadata with general state blobs. Memory-cache eviction cannot make a reference unavailable. `view.content` returns bounded chunks until the client has the complete value. The client verifies the assembled bytes against both the response digest and the digest in the advertised reference. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition, complete graph history, and all referenced content before they emit a complete non-interactive view or update the Pi widget. Rust automatically requests and verifies the complete referenced definition and graph history, decodes the complete values, and then builds its graph layout. Session-event pages include the replay checkpoint immediately before the first event in the page. A large checkpoint is also a referenced value. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. A step-centered trace page selects the exact stored attempt first and uses the node ID only if that attempt has no trace event. The run list reads only status facts and never loads complete run histories.
 
 The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
 
-The server keeps execution status separate from worker and Pi activity:
+The server keeps execution status separate from runner and Pi activity:
 
 1. A durable terminal result keeps its terminal label, including during reporting or cleanup. An unresolved external effect still exposes a review action.
 2. A nonterminal run with an ambiguous external effect is `ambiguous`.
-3. A durable pause is `paused`, even while its worker or Pi turn stops.
+3. A durable pause is `paused`, even while its runner or Pi turn stops.
 4. A pending request is `waiting`. Its kind determines the response action: `submit` and `update` for an agent, `answer` for an ordinary checkpoint, `human-answer` for a protected decision, and no tool completion action for a visible-response request.
-5. Otherwise, active worker or Pi execution is `running`.
+5. Otherwise, active runner or Pi execution is `running`.
 6. Parked resumable work or admitted work that has not started is `queued`.
 
-`display.activity` reports the supervised worker or exact Pi turn independently. Waiting alone never permits an answer. Command handlers check the exact request again before they change state.
+`display.activity` reports the supervised runner or exact Pi turn independently. Waiting alone never permits an answer. Command handlers check the exact request again before they change state.
 
-Server connection failure is the client condition `unavailable`, not a `display.status` value. `paused` is never inferred from a parked queue, pending interaction, stale cursor, or missing activity report.
+Server connection failure is the client condition `unavailable`, not a `display.status` value. `paused` is never inferred from a parked queue, pending interaction, stale cursor, or missing activity report. A subscriber that loses its subscription keeps its last snapshot for display and loses every authority the snapshot carried. Its commands and branch reports are refused, its running workflow turn may not call tools, and the message coordinator is fenced, so a snapshot the server no longer confirms cannot start a Pi turn or answer a request. A fresh snapshot clears the fence and restores the coordinator epoch. The projection retry deadline is per session, so a new session starts with a fresh budget. The client reconnects with capped backoff and full jitter, and reports one `reconnect_exhausted` blocker when its bounded budget is spent. The budget resets only after a handshake and a restored subscription set both succeed, so a subscription the server keeps refusing counts toward the budget instead of looping forever.
 
 ### Origin-session activity
 
 `agent_start` has no message payload. The extension binds it through the current origin-session view. The latest sent step is open while its interaction remains pending and its run is not paused. Any turn that starts in that state is workflow work. A terminal or follow-up message is open only until its first turn ends. Decisions and notifications never open a turn. The server rejects a start against a closed message.
+
+The session view carries one pending request at a time, because the whole view travels as one client frame. The human answer path answers that request only. It needs the request's run and revision to answer a decision, and it must not guess the kind of a request the view does not carry. A later pending request becomes current as soon as this one is answered. The model path needs no such contract, so it forwards the request ID it was given and the server validates it against the exact stored request either way.
 
 Each report names the sent workflow message, workflow turn ID, run, and origin session. The extension creates the turn ID at start and keeps it through the matching end and server reconnect. If the session view or message receipt is still loading, it buffers start and end and reports them in order when the message becomes available.
 
@@ -360,7 +366,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Server commands
 
-`host_commands` stores request ID, client ID, operation, idempotency key, durable request fingerprint, run ID, accepted revision, outcome, receipt or error hash, and timestamps. The request ID is transport identity and is not part of the fingerprint. The request primary key prevents one request ID from naming two payloads. The client and idempotency-key uniqueness adopts the same durable payload across transport attempts.
+`server_commands` stores request ID, client ID, operation, idempotency key, durable request fingerprint, run ID, accepted revision, outcome, receipt or error hash, and timestamps. The request ID is transport identity and is not part of the fingerprint. The request primary key prevents one request ID from naming two payloads. The client and idempotency-key uniqueness adopts the same durable payload across transport attempts.
 
 ### Interactive requests
 
@@ -370,7 +376,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Runner epochs
 
-`run_workers` stores run ID, generation, runner epoch, launch envelope hash, process identity, status, start time, ready time, finish time, exit code, signal, and bounded diagnostic hash. One run and generation can have several sequential runner epochs, but only one may be active.
+`run_runners` stores run ID, generation, runner epoch, launch envelope hash, process identity, status, start time, ready time, finish time, exit code, signal, and bounded diagnostic hash. One run and generation can have several sequential runner epochs, but only one may be active.
 
 These tables remain part of `pi-workflows-state` schema version 1. The DDL digest changes in place under the alpha policy.
 
@@ -390,7 +396,7 @@ The server alone decides whether that Pi model turn belongs to the workflow mess
 
 Turn start and end use the exact message, run, session, and turn IDs. A matching repeat adopts the saved result. A conflicting repeat remains an error. When a run becomes terminal, the same transaction ends its open turns as `lost` and cancels pending step and decision messages. Failure and cancellation also cancel pending follow-ups. A committed notification stays eligible for delivery. A late matching end report adopts that terminal cleanup. A terminal run cannot start another step turn, and a later ordinary Pi turn cannot inherit its old workflow ownership.
 
-Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages. If Pi or the extension disappears after the send call but before inspection, the message stays `pending`. A replacement extension reports the branch before another send. The idle branch report settles an unproved open server turn as `lost`. Documented Pi APIs do not prove cross-branch absence or exactly-once model execution.
+Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages. One report names one message, so only that message's own source has branch evidence in it. A report of no message at all proves that the branch holds no workflow message, so it covers every source. A paused source is the one exception: its run acts on nothing, and the session view does not carry its delivered step while the run is paused, so a report of no message proves nothing about it and its recovery waits until the run runs again. If Pi or the extension disappears after the send call but before inspection, the message stays `pending`. A replacement extension reports the branch before another send. The idle branch report settles an unproved open server turn as `lost`. Documented Pi APIs do not prove cross-branch absence or exactly-once model execution.
 
 The extension subscribes to the active origin-session live run view and projects it into Pi's documented widget and status APIs. It never opens SQLite, runs workflow code, or derives a display status. `Shift+Up` and `Shift+Down` scroll the widget by default, and the optional `shortcuts.json` file described in [WORKFLOWS.md](WORKFLOWS.md#widget-scroll-shortcuts) remaps or removes them. When Herdr is available, the widget also shows `Ctrl+Shift+R piw`, and `/piw` remains the command fallback. Both actions open or focus the exact run from the same view.
 
@@ -400,7 +406,7 @@ An ordinary checkpoint accepts the model-facing `answer` action and starts a con
 
 The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema. A normal runner continuation leaves an active session capture open until the matching Pi turn ends. Only proved interruption can fail that capture; runner handoff alone cannot report that the server stopped.
 
-One session sends one workflow message at a time. Messages keep acceptance order, but an earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility. A reload clears only process-local queued state. `workflowMessage.reportBranch` adopts existing entries and closes lost turns. When a pending source has no entry on the active branch, it creates one message of that source's own kind: a step with reason `resumed` for an interaction, or a decision for a protected decision. Repeating a report or returning to a branch that already contains that source creates no new message.
+One session sends one workflow message at a time. Messages keep acceptance order, but an earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility. A reload clears only process-local queued state. `workflowMessage.reportBranch` adopts existing entries and closes lost turns. The report names one message of that session. An unknown message ID is refused, because such a report is stale or belongs to another session and must not stand in as branch evidence. When a pending source has no entry on the active branch, it creates one message of that source's own kind: a step with reason `resumed` for an interaction, or a decision for a protected decision. Repeating a report or returning to a branch that already contains that source creates no new message.
 
 A notify node creates a passive `notification` message in the same transaction as its node result. The final leaf of an interactive checkpoint-continuation chain creates one terminal message with its terminal outcome; parent runs settled by continuation do not. Initial, reminder, and resumed prompts are one `step` kind. Protected decisions and follow-ups use the same table and coordinator. Their feature records keep validation, authority, timeout, counters, and result state.
 
@@ -490,10 +496,10 @@ Resource manager reconcile code runs in a supervised resource runner, not in the
 Use separate states and messages for these failures:
 
 - `claimLost`: another generation owns the run, or the claim expired.
-- `workerCrashed`: the child exited without a terminal protocol message after it saved progress.
+- `runnerCrashed`: the child exited without a terminal protocol message after it saved progress.
 - `runnerNoProgress`: the child exited before the saved run revision advanced and needs explicit resume or cancellation.
-- `workerTimedOut`: the child exceeded a declared deadline.
-- `hostUnavailable`: the client cannot reach or start the server.
+- `runnerTimedOut`: the child exceeded a declared deadline.
+- `serverUnavailable`: the client cannot reach or start the server.
 - `sourceChanged`: the workflow source does not match the saved identity.
 - `effectAmbiguous`: an external action may have applied without a receipt.
 - `nodeFailed`: workflow code returned a normal failure.
