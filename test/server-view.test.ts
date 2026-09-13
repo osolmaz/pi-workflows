@@ -1853,6 +1853,63 @@ describe("current session state", () => {
     state.close();
   });
 
+  it("cuts bounded session text at a complete character", async () => {
+    const projectPath = await makeTempDir("session-text-project");
+    const databasePath = path.join(await makeTempDir("session-text-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A workflow name has no length limit, and the cut falls inside the last
+    // character, so the bound must not leave a replacement character behind.
+    const workflowName = `${"x".repeat(4 * 1024 - 1)}\u{1f642}more`;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: workflowName,
+        startAt: "only",
+        nodes: { only: compute({ run: () => 0 }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-session-text";
+    const sessionId = "session-session-text";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:session-text",
+      workflowSource: {
+        root: { kind: "builtin", id: "session-text", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-text",
+      claimToken: "claim-session-text",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-session-text"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.workflowName).toBe("x".repeat(4 * 1024 - 1));
+    expect(run.workflowName).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(run.workflowName, "utf8")).toBeLessThanOrEqual(4 * 1024);
+    state.close();
+  });
+
   it("reports a node whose leftover unfinished attempt was superseded", async () => {
     const projectPath = await makeTempDir("superseded-project");
     const databasePath = path.join(await makeTempDir("superseded-state"), "state.sqlite");

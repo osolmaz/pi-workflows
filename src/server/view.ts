@@ -1797,8 +1797,13 @@ function boundNodeText(value: string | null): string | null {
 
 /** Free-form session text, bounded for the single frame budget. */
 function boundSessionText(value: string): string {
-  if (Buffer.byteLength(value, "utf8") <= SESSION_TEXT_BYTES) return value;
-  return Buffer.from(value, "utf8").subarray(0, SESSION_TEXT_BYTES).toString("utf8");
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= SESSION_TEXT_BYTES) return value;
+  // The cut must fall on a character boundary. A cut inside a multi-byte sequence
+  // would end the value with a replacement character the widget shows as text.
+  let end = SESSION_TEXT_BYTES;
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
 /**
