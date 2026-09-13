@@ -82,7 +82,6 @@ fn check_socket_path(socket_path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let _ = socket_path;
-        return Ok(());
     }
     #[cfg(unix)]
     {
@@ -94,13 +93,12 @@ fn check_socket_path(socket_path: &Path) -> Result<()> {
             "workflow server socket path is {bytes} bytes, above the {limit}-byte operating system limit: {}",
             socket_path.display()
         );
-        return Ok(());
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = socket_path;
-        Ok(())
     }
+    Ok(())
 }
 
 async fn server_available(socket_path: &PathBuf) -> bool {
