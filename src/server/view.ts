@@ -378,14 +378,16 @@ export class ServerViewStore {
       const runId = activeQueue?.runId ?? retainedRunId;
       // Selection is one metadata read. The key must name the exact message,
       // because a status or entry change can land in the same millisecond as the
-      // write that made it current, and then the aggregate facts stay equal.
+      // write that made it current, and then the aggregate facts stay equal. The
+      // message alone identifies the selection, including a session that holds
+      // no live or retained run.
       const selected = this.currentWorkflowMessageSummary(sessionId);
       const version = [
         runId ?? "-",
         runId === undefined ? "-" : this.runVersion(runId),
         this.pendingSessionRevision(sessionId),
         this.sessionMessageRevision(sessionId),
-        selected === undefined || runId === undefined
+        selected === undefined
           ? "-"
           : [selected.workflowMessageId, selected.status, selected.piSessionEntryId ?? "-"].join(
               ":",
@@ -453,12 +455,14 @@ export class ServerViewStore {
     for (const message of [...messages].reverse()) {
       if (message.status === "sent" && this.needsPiWork(message)) return message;
     }
-    // A cancelled step whose delivery Pi has not confirmed stays current, so the
-    // extension can stop the turn it already started from that message. Once Pi
-    // reports a turn, the delivery is reconciled and the message stops being
-    // current.
+    // A cancelled step stays current while Pi holds it and has not confirmed a
+    // turn, because the extension must stop the turn it started from that
+    // message. A message Pi never received needs no stopping and must not become
+    // deliverable again, so only a delivered one stays current. Once Pi reports a
+    // turn, the delivery is reconciled and the message stops being current.
     for (const message of [...messages].reverse()) {
-      if (message.kind !== "step" || !this.hasCancelledSource(message)) continue;
+      if (message.status !== "sent" || message.kind !== "step") continue;
+      if (!this.hasCancelledSource(message)) continue;
       if (this.workflowMessages.latestTurnForMessage(message.workflowMessageId) !== undefined) {
         continue;
       }

@@ -58,6 +58,92 @@ const controlFixture = JSON.parse(
   agentSnapshot: { display: WorkflowDisplay };
 };
 
+/**
+ * A parked run that waits on one step message for its origin session. The run
+ * keeps its reservation unless the test cancels it.
+ */
+async function pendingStepFixture(label: string, delivered = false) {
+  const projectPath = await makeTempDir(`${label}-project`);
+  const databasePath = path.join(await makeTempDir(`${label}-state`), "state.sqlite");
+  const state = new StateDatabase({ filePath: databasePath });
+  const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+  const serverState = new ServerStateStore(databasePath, { state });
+  const workflow = compileWorkflowDefinition(rawWorkflow);
+  const snapshot = createDefinitionSnapshot(workflow);
+  const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+  const runId = `run-${label}`;
+  const sessionId = `session-${label}`;
+  claimTestRun(queue, {
+    runId,
+    workflowName: workflow.name,
+    workflowSourceRef: "builtin:echo",
+    workflowSource: {
+      root: { kind: "builtin", id: "echo", revision: "test" },
+      mounted: [],
+    },
+    definitionDigest,
+    definitionSnapshot: snapshot,
+    input: { task: label },
+    runnerId: label,
+    claimToken: `claim-${label}`,
+    leaseMs: 60_000,
+    originSessionId: sessionId,
+  });
+  const runs = new WorkflowRunStore(databasePath, {
+    state,
+    authorityProvider: () => queue.workflowRunAuthority(runId, `claim-${label}`),
+  });
+  const result = await new WorkflowEngine({
+    store: runs,
+    executor: new ScriptedExecutor().respond("reply", { output: { reply: label } }),
+  }).run(workflow, { task: label }, { runId });
+  const attemptId = result.state.steps[0]?.attemptId;
+  if (attemptId === undefined) throw new Error("attempt missing");
+  state.connection
+    .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+    .run(runId);
+  state.connection
+    .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+    .run(runId);
+  const requestId = `${label}-source`;
+  serverState.createInteractiveRequest({
+    requestId,
+    runId,
+    attemptId,
+    targetSessionId: sessionId,
+    kind: "agent",
+    contract: {
+      prompt: "Continue",
+      contract: {
+        requestId,
+        runId,
+        workflowName: workflow.name,
+        nodeId: "reply",
+        attemptId,
+        completion: "submit",
+      },
+    },
+  });
+  const pending = serverState.workflowMessages.latestForSource("step", requestId);
+  if (pending === undefined) throw new Error("step message missing");
+  if (delivered) {
+    serverState.workflowMessages.adoptBranch(
+      sessionId,
+      [{ workflowMessageId: pending.workflowMessageId, piSessionEntryId: `${label}-entry` }],
+      new Set([pending.workflowMessageId]),
+    );
+  }
+  const views = new ServerViewStore(
+    state,
+    queue,
+    serverState,
+    runs,
+    () => false,
+    () => false,
+  );
+  return { state, views, runId, sessionId, requestId, pending };
+}
+
 describe("workflow server display reducer", () => {
   it("keeps the server-owned control fixture aligned with the reducer", () => {
     expect(WORKFLOW_DISPLAY_CONTROLS).toEqual(controlFixture.controls);
@@ -1857,6 +1943,38 @@ describe("current session state", () => {
     });
     expect(views.session(sessionId, null).workflowMessage).toBeNull();
     state.close();
+  }, 60_000);
+
+  it("drops a cancelled step that Pi never received", async () => {
+    const fixture = await pendingStepFixture("cancelled-unreceived");
+    // The run is cancelled before Pi has the step message on its branch.
+    fixture.state.connection
+      .prepare(
+        "UPDATE interactive_requests SET status = 'cancelled', revision = revision + 1 WHERE request_id = ?",
+      )
+      .run(fixture.requestId);
+    // A message Pi never received cannot need stopping, and it must not become
+    // deliverable again, so it stays out of the current message.
+    expect(fixture.pending.status).toBe("pending");
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage).toBeNull();
+    fixture.state.close();
+  }, 60_000);
+
+  it("re-reads the session view when only the selected message changes", async () => {
+    const fixture = await pendingStepFixture("selected-message-cache");
+    // This session holds no live or retained run, so the run is not part of the
+    // cache key and the selected message alone must invalidate the view.
+    fixture.state.connection
+      .prepare("UPDATE run_queue SET status = 'cancelled' WHERE run_id = ?")
+      .run(fixture.runId);
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage?.status).toBe("pending");
+    // The status changes in the same millisecond, so the aggregate facts of the
+    // session stay equal while the selected message changes.
+    fixture.state.connection
+      .prepare("UPDATE workflow_messages SET status = 'cancelled' WHERE workflow_message_id = ?")
+      .run(fixture.pending.workflowMessageId);
+    expect(fixture.views.session(fixture.sessionId, null).workflowMessage).toBeNull();
+    fixture.state.close();
   }, 60_000);
 
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
