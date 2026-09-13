@@ -1138,10 +1138,17 @@ async function executeCommand(
       const pending = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.interaction;
       const interaction =
         pending === null || pending === undefined ? undefined : parseInteractiveRequest(pending);
-      // The session view carries the one request Pi must answer. A command that
-      // names another request is refused here and reported instead of guessed.
-      if (interaction === undefined || interaction.requestId !== command.requestId)
-        throw new Error("No matching checkpoint request is waiting in this session");
+      // The session view carries the one request Pi must answer, because the whole
+      // view travels as one client frame. The extension answers that request only:
+      // it needs the request's run and revision to answer a decision safely, and it
+      // must not guess the kind of a request it cannot see. A later pending request
+      // becomes current as soon as this one is answered.
+      if (interaction === undefined)
+        throw new Error("No checkpoint request is waiting in this session");
+      if (interaction.requestId !== command.requestId)
+        throw new Error(
+          `The session view carries one pending request at a time. Answer ${interaction.requestId} first, then ${command.requestId} becomes current.`,
+        );
       if (interaction.kind === "decision") {
         const response = await requestAccepted(client, {
           operation: "decision.answer",

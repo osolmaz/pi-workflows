@@ -460,6 +460,11 @@ Result after the closing vocabulary sweep:
   partly restored connection does not reset it ("keeps the reconnect budget after a view from a
   partly restored subscription"). The blocker message now says that the server did not return the
   session view, because the budget also counts a refused restore, and it names the recovery step.
+- Round 32 found that the human answer path can no longer answer a pending request that is not the
+  one in the session view. The one pending request is the plan's own bound, and the extension needs
+  the request's run and revision to answer a decision and must not guess the kind of a request the
+  view does not carry, so the refusal stays. The message now names the true state instead of
+  claiming that no request waits, and `docs/WORKFLOW_SERVER.md` records the rule.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
