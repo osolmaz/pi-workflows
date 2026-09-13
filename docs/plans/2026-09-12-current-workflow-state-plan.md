@@ -464,7 +464,12 @@ Result after the closing vocabulary sweep:
   one in the session view. The one pending request is the plan's own bound, and the extension needs
   the request's run and revision to answer a decision and must not guess the kind of a request the
   view does not carry, so the refusal stays. The message now names the true state instead of
-  claiming that no request waits, and `docs/WORKFLOW_SERVER.md` records the rule.
+  claiming that no request waits, `docs/WORKFLOW_SERVER.md` records the rule, and
+  `test/extension.test.ts` "answers only the pending request the session view carries" covers both
+  the refusal and the answer.
+- Round 33 found that the bounded session text cut could fall inside a multi-byte character and end
+  the value with a replacement character. `boundSessionText` now cuts on a character boundary;
+  `test/server-view.test.ts` "cuts bounded session text at a complete character" covers it.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
