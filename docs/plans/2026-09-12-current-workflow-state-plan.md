@@ -448,6 +448,18 @@ Result after the closing vocabulary sweep:
   The later rounds fixed a cancelled step that Pi never received, a session view cache that keyed
   the selected message on the run, a lost action subtype, a lost current node during a pending
   handoff, and an empty node window that could not page back.
+- Round 29 found that the compact run reported the current and waiting node as unbounded scalars,
+  while the window leaves out a row whose own bytes exceed the frame budget. `bcb952c` leaves such
+  an identity out of those two facts as well, so no node id larger than one frame reaches a client.
+  `test/server-view.test.ts` "leaves out a node identity that cannot fit the frame" covers it, and
+  the run stays complete through the row count and the detailed run view.
+- Round 31 asked whether a refused restore should stay retryable instead of spending the reconnect
+  budget. The rule is intended and already documented and tested: the budget resets only after a
+  handshake and a restored subscription set both succeed, a refused restore counts toward it
+  (`test/client.test.ts` "keeps the reconnect budget after a refused restore"), and a view from a
+  partly restored connection does not reset it ("keeps the reconnect budget after a view from a
+  partly restored subscription"). The blocker message now says that the server did not return the
+  session view, because the budget also counts a refused restore, and it names the recovery step.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.

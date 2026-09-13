@@ -804,7 +804,9 @@ export class WorkflowClient {
       this.reportSubscriptionFailure(
         {
           reasonCode: "reconnect_exhausted",
-          message: `Workflow server did not answer after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start the workflow server, then open or resume a session.`,
+          // The budget counts a stopped server and a refused restore, so the
+          // blocker must not claim that the server stayed silent.
+          message: `Workflow server did not return this session's view after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts. Start or restart the workflow server, then open or resume a session.`,
         },
         false,
       );
