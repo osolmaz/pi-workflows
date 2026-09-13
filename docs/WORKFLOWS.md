@@ -596,6 +596,8 @@ shows the adjacent window instead of the complete topology. A window request
 that fails stays retryable, and the widget keeps the loaded window until the
 next one arrives. A window that follows a node row too large for one frame holds
 no rows, so an upward step from it returns to the last window that held rows.
+The compact run also leaves out a current or waiting node identity that cannot
+fit one frame, so an unbounded node id never reaches the client.
 The extension remembers the window the user scrolled to, so a
 subscription it has to arm again after a connection loss returns that window
 instead of the default one. `Shift+Up` and
