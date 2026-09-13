@@ -1777,6 +1777,82 @@ describe("current session state", () => {
     60_000,
   );
 
+  it("leaves out a node identity that cannot fit the frame", async () => {
+    const projectPath = await makeTempDir("node-huge-scalar-project");
+    const databasePath = path.join(await makeTempDir("node-huge-scalar-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A valid node id has no length limit, so it can exceed one frame on its own.
+    // The window leaves such a row out, and the run facts leave the identity out
+    // for the same reason, so no unbounded scalar reaches the client.
+    const hugeId = `m${"x".repeat(200 * 1024)}`;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "node-huge-scalar",
+        startAt: hugeId,
+        nodes: { [hugeId]: compute({ run: () => 0 }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-node-huge-scalar";
+    const sessionId = "session-node-huge-scalar";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:node-huge-scalar",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-huge-scalar", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-huge-scalar",
+      claimToken: "claim-node-huge-scalar",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-node-huge-scalar"),
+    });
+    // A pending attempt makes the run report the node as the one it works on.
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts
+           (attempt_id, run_id, node_id, attempt_number, node_type, status, started_at, created_at, updated_at)
+         VALUES (?, ?, ?, 1, 'compute', 'pending', NULL, 1000, 1000)`,
+      )
+      .run(`attempt-${runId}`, runId, hugeId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session(sessionId, null);
+    const run = view.run;
+    if (run === null) throw new Error("session run missing");
+    expect(run.currentNode).toBeNull();
+    expect(run.waitingOn).toBeNull();
+    // The complete row count stays correct, and the identity is reachable in the
+    // detailed run view.
+    expect(run.nodeTotal).toBe(1);
+    expect(run.nodes).toEqual([]);
+    expect(Buffer.byteLength(canonicalJson(view), "utf8")).toBeLessThan(
+      MAX_PROTOCOL_MESSAGE_BYTES / 4,
+    );
+    state.close();
+  });
+
   it("reports a node whose leftover unfinished attempt was superseded", async () => {
     const projectPath = await makeTempDir("superseded-project");
     const databasePath = path.join(await makeTempDir("superseded-state"), "state.sqlite");

@@ -582,8 +582,8 @@ export class ServerViewStore {
       workflowName: boundSessionText(state.workflowName),
       runTitle: state.runTitle === undefined ? null : boundSessionText(state.runTitle),
       paused: state.paused === true,
-      currentNode: state.currentNode ?? null,
-      waitingOn: state.waitingOn ?? null,
+      currentNode: boundSessionNodeId(state.currentNode),
+      waitingOn: boundSessionNodeId(state.waitingOn),
       error: state.error === undefined ? null : boundSessionText(state.error),
       nodes: window.items,
       nodeStart: window.start,
@@ -1799,6 +1799,18 @@ function boundNodeText(value: string | null): string | null {
 function boundSessionText(value: string): string {
   if (Buffer.byteLength(value, "utf8") <= SESSION_TEXT_BYTES) return value;
   return Buffer.from(value, "utf8").subarray(0, SESSION_TEXT_BYTES).toString("utf8");
+}
+
+/**
+ * A node identity the session run reports as the node it works on. The window
+ * leaves out a row whose own bytes exceed the frame budget, so an identity of
+ * that size is left out here too. A cut identity would match no row and would
+ * name a node that does not exist. The complete identity stays in the detailed
+ * run view.
+ */
+function boundSessionNodeId(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return Buffer.byteLength(canonicalJson(value), "utf8") > VIEW_PAGE_BYTES ? null : value;
 }
 
 /** One JSON detail, or null when the detail is too large for the session frame. */
