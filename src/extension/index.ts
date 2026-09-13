@@ -68,6 +68,8 @@ const sessionSnapshots = new Map<string, WorkflowSessionView>();
 const staleSessionIds = new Set<string>();
 /** Whether the widget holds a node window the user scrolled to. */
 let sessionPagedWindow = false;
+/** The node window the user scrolled to, so a re-armed subscription keeps it. */
+let sessionNodeCursor: number | null = null;
 /** Run the current node window belongs to, so a new run follows its focus again. */
 let sessionWindowRunId: string | null = null;
 // Shortcut configuration problems wait for the first session so the user sees them once.
@@ -641,9 +643,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     sessionContext = ctx;
     serverUnavailableNotified = false;
     // A new session starts with a fresh projection retry budget, so backoff from
-    // a previous session cannot delay this one.
+    // a previous session cannot delay this one, and its widget starts at the
+    // default window instead of the window the last session scrolled to.
     sessionSubscriptionFailures = 0;
     sessionSubscriptionRetryAt = 0;
+    sessionNodeCursor = null;
     for (const notice of pendingShortcutNotices.splice(0)) ctx.ui.notify(notice, "warning");
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
@@ -656,6 +660,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       }
       const moved = await sessionClient.setSessionNodeWindow(sessionId, cursor);
       if (!moved) throw new Error("Workflow session subscription is not active");
+      // A re-armed subscription must keep the window the user scrolled to, and the
+      // server subscription that holds it is dropped when the connection is lost.
+      sessionNodeCursor = cursor;
       sessionPagedWindow = true;
     });
 
@@ -719,6 +726,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               const runId = session.run?.runId ?? null;
               if (sessionPagedWindow && runId !== sessionWindowRunId) {
                 sessionPagedWindow = false;
+                sessionNodeCursor = null;
                 void sessionClient.setSessionNodeWindow(sessionId, null).catch(() => undefined);
               }
               sessionWindowRunId = runId;
@@ -734,7 +742,12 @@ export default function piWorkflows(pi: ExtensionAPI): void {
                   : Promise.resolve();
               void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
             },
-            { coordinator: true },
+            {
+              coordinator: true,
+              // Re-arm the window the user scrolled to. The server subscription
+              // that held it is gone, so the extension keeps the cursor.
+              ...(sessionNodeCursor === null ? {} : { nodeCursor: sessionNodeCursor }),
+            },
           );
           if (generation !== sessionGeneration || sessionContext !== ctx || subscriptionDropped) {
             await unsubscribe().catch(() => undefined);
