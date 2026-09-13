@@ -27,6 +27,29 @@ describe("unified workflow client boundary", () => {
     }
   });
 
+  it("keeps the Rust client operations equal to the version-1 schema", () => {
+    const read = (file: string): string => fs.readFileSync(path.join(process.cwd(), file), "utf8");
+    const rust = /const OPERATIONS: &\[&str\] = &\[([\s\S]*?)\];/u.exec(
+      read("tui/src/protocol.rs"),
+    );
+    expect(rust).not.toBeNull();
+    const parsed = [...(rust?.[1] ?? "").matchAll(/"([^"]+)"/gu)].map(
+      (entry) => entry[1] as string,
+    );
+    const schema = JSON.parse(read("protocol/client.v1.schema.json")) as {
+      oneOf: { properties?: { operation?: { enum?: string[] } } }[];
+    };
+    const enumerated =
+      schema.oneOf.find((branch) => branch.properties?.operation?.enum !== undefined)?.properties
+        ?.operation?.enum ?? [];
+    expect(parsed.length).toBeGreaterThan(0);
+    // The schema describes the one version-1 protocol that both clients parse, so an
+    // operation missing from the Rust list would refuse a valid request.
+    expect([...parsed].sort()).toEqual([...enumerated].sort());
+    // The node window the widget pages with is part of that version-1 protocol.
+    expect(enumerated).toContain("view.session.window");
+  });
+
   it("keeps only the version-1 client protocol in production clients", () => {
     const roots = ["src/extension", "src/client", "src/viewer", "tui/src"];
     const source = roots

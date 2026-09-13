@@ -512,6 +512,14 @@ export class ServerStateStore {
     this.attemptTime.sample();
   }
 
+  /** Whether the run is durably paused, so it can act on nothing yet. */
+  isRunPaused(runId: string): boolean {
+    const row = this.state.connection
+      .prepare("SELECT paused FROM runs WHERE run_id = ?")
+      .get(runId) as { paused: number } | undefined;
+    return (row?.paused ?? 0) !== 0;
+  }
+
   beginInteractionModelTurn(requestId: string): void {
     const request = this.requireInteractiveRequest(requestId);
     if (request.status !== "pending" || !["agent", "assistant"].includes(request.kind)) {

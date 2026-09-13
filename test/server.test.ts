@@ -2147,6 +2147,15 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
           isIdle: true,
         }),
       ).toMatchObject({ receipt: { outcome: "absent" } });
+      console.log(
+        "AFTER-REPORT",
+        JSON.stringify(
+          observed.workflowMessages
+            .listSession(sessionId)
+            .filter((message) => message.sourceId === interaction.requestId)
+            .map((message) => `${message.kind}:${message.status}:${message.workflowMessageId}`),
+        ),
+      );
       await waitUntil(
         () =>
           observed.workflowMessages
@@ -2164,6 +2173,77 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
       expect(await currentWorkflowMessageId(client, sessionId)).toBe(
         recovered.find((message) => message.status === "pending")?.workflowMessageId,
       );
+    } finally {
+      observed.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("keeps a delivered step of a paused run when the branch reports no message", async () => {
+    const cwd = await makeTempDir("paused-branch-project");
+    const databasePath = path.join(await makeTempDir("paused-branch-state"), "state.sqlite");
+    const sessionId = "server-test-session";
+    const workflowPath = path.join(cwd, "paused-branch.workflow.ts");
+    await fs.writeFile(
+      workflowPath,
+      `
+import { agent, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "paused-branch", startAt: "work", nodes: {
+  work: agent({ prompt: () => "Return a result." })
+}, edges: [] });`,
+    );
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath, clientId: "paused-branch-client" });
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    await server.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "paused-branch",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => observed.listPendingInteractions(sessionId).length === 1, 30_000);
+      const interaction = observed.listPendingInteractions(sessionId)[0];
+      if (interaction === undefined) throw new Error("interaction missing");
+      const step = observed.workflowMessages
+        .listRun(interaction.runId)
+        .find((message) => message.sourceId === interaction.requestId);
+      if (step === undefined) throw new Error("step message missing");
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "paused-branch", sessionId, coordinator: true },
+      });
+      const authority = {
+        targetSessionId: sessionId,
+        coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
+      };
+      // A report that Pi holds the message, so the branch carries it.
+      await reportBranch(client, authority, {
+        workflowMessageId: step.workflowMessageId,
+        piSessionEntryId: "paused-entry",
+        isIdle: true,
+      });
+      await client.request({ operation: "run.pause", runId: interaction.runId });
+      await waitUntil(() => observed.isRunPaused(interaction.runId), 30_000);
+      // A paused run carries no current message, so Pi reports none while it still
+      // holds the step. The report must not cancel that message or create a second
+      // one, because a paused run acts on nothing.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: null,
+          piSessionEntryId: null,
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "absent" } });
+      expect(
+        observed.workflowMessages
+          .listSession(sessionId)
+          .filter((message) => message.sourceId === interaction.requestId)
+          .map((message) => message.status),
+      ).toEqual(["sent"]);
     } finally {
       observed.close();
       await client.close();
