@@ -443,9 +443,20 @@ Result after the closing vocabulary sweep:
 - Real-model live E2E: `20260913T015035278Z-live-model-e2e-69c3e9f4`, provider `openai`, model
   `gpt-5.6-luna`, cost $0.00340, result `passed`.
 - CI on the pull request at `c526ea5`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
-- Pi Reviewer rounds on the pull request reached no findings at round 28; every finding from an
-  earlier round was either fixed with a red-green test or answered with source and test evidence.
-  The later rounds fixed a cancelled step that Pi never received, a session view cache that keyed
+- Result on the final head `8079102`, after the reviewer rounds 29 to 34:
+  - `npm run check`: 111 files, 1346 tests, statements 90.93%, branches 85.47%.
+  - `npm run test:e2e`: 14 tests passed.
+  - `npx slophammer-ts@latest dry .` and the dependency-boundary check: no findings.
+  - `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
+  - Runtime live E2E: `20260913T024333887Z-live-runtime-e2e-06bab6bd`, result `passed`.
+  - Real-model live E2E: `20260913T024455807Z-live-model-e2e-f83c3600`, provider `openai`, model
+    `gpt-5.6-luna`, cost $0.00396, result `passed`.
+  - CI on the pull request at `8079102`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+- Pi Reviewer rounds on the pull request reached no findings at round 28. The model named by the
+  implementation workflow, `huggingface/deepseek-ai/DeepSeek-V4.1-Flash`, had answered with a rate
+  limit during the earlier rounds and returned findings again in rounds 29 to 34. Every finding was
+  either fixed with a red-green test or answered with source and test evidence. The later rounds
+  fixed a cancelled step that Pi never received, a session view cache that keyed
   the selected message on the run, a lost action subtype, a lost current node during a pending
   handoff, and an empty node window that could not page back.
 - Round 29 found that the compact run reported the current and waiting node as unbounded scalars,
@@ -470,6 +481,20 @@ Result after the closing vocabulary sweep:
 - Round 33 found that the bounded session text cut could fall inside a multi-byte character and end
   the value with a replacement character. `boundSessionText` now cuts on a character boundary;
   `test/server-view.test.ts` "cuts bounded session text at a complete character" covers it.
+- Round 34 raised three bounded-cost questions, and each one is already answered by the code, a test,
+  or both, so no further change was needed.
+  - The message count in `readRunViewCounts` is not an unindexed scan. `workflow_messages_run_idx`
+    covers `(run_id, order_number)` (`src/state/schema.ts:558`), and the shared counts helper serves
+    `readRunView`, which builds `workflowMessages` and `workflowMessageTotal` for every caller. A
+    split would add a branch to a hot path to save one index scan over the messages of one run.
+  - The paged node window cannot be dropped before use. The widget asks for a window only through
+    `scrollBy`, which needs a loaded run, so `sessionWindowRunId` already equals the incoming run ID
+    when a cursor exists. The reset fires only on a real run change, which is the intended behavior,
+    and `test/extension.test.ts` "keeps the paged window across a re-arm" covers the reconnect path.
+  - An entry-less branch report is accepted and reported as absent. `reportWorkflowBranch` accepts
+    every message the session stores, including a cancelled one, and only an ID outside that set is
+    refused. `test/server.test.ts` covers both: the refusal at line 2099 and the entry-less present
+    report at line 2140, which re-issues the step message.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
