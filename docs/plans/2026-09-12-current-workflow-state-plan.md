@@ -495,6 +495,18 @@ Result after the closing vocabulary sweep:
     every message the session stores, including a cancelled one, and only an ID outside that set is
     refused. `test/server.test.ts` covers both: the refusal at line 2099 and the entry-less present
     report at line 2140, which re-issues the step message.
+- Round 35 found two real defects and both are fixed.
+  - A report of no message re-issued the step of a paused run. The session view does not carry a
+    delivered step while its run is paused, so Pi reports no message while it still holds the step,
+    and the report cancelled that message and created a second one. `reportWorkflowBranch` now skips
+    a paused source, because a paused run acts on nothing and Pi's branch may still hold the message.
+    `test/server.test.ts` "keeps a delivered step of a paused run when the branch reports no message"
+    fails without the guard with `[ 'sent', 'pending' ]` and passes with it. `docs/WORKFLOW_SERVER.md`
+    records the exception.
+  - The Rust version-1 operation list lacked `view.session.window`, so a valid request naming it
+    would be refused by the Rust parser while the TypeScript client and the schema accepted it.
+    `tui/src/protocol.rs` now lists it, and `test/client-boundary.test.ts` "keeps the Rust client
+    operations equal to the version-1 schema" keeps the two lists equal.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.

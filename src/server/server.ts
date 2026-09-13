@@ -1068,6 +1068,10 @@ export class WorkflowServer {
           // An unreported source keeps its own recovery on the next report that
           // names it, so a missing entry is never assumed from another message.
           if (workflowMessageId !== null && interaction.requestId !== reportedSourceId) continue;
+          // A paused run acts on nothing, and the session view does not carry a
+          // delivered step while its run is paused, so a report of no message
+          // proves nothing about that source. Its recovery waits for the run.
+          if (this.serverState.isRunPaused(interaction.runId)) continue;
           const sourceMessages = refreshed.filter(
             (message) => message.sourceId === interaction.requestId,
           );

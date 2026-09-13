@@ -35,6 +35,7 @@ const OPERATIONS: &[&str] = &[
     "view.page",
     "view.content",
     "view.session.watch",
+    "view.session.window",
     "activity.report",
     "state.status",
     "state.verify",
