@@ -443,15 +443,17 @@ Result after the closing vocabulary sweep:
 - Real-model live E2E: `20260913T015035278Z-live-model-e2e-69c3e9f4`, provider `openai`, model
   `gpt-5.6-luna`, cost $0.00340, result `passed`.
 - CI on the pull request at `c526ea5`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
-- Result on the final head `8079102`, after the reviewer rounds 29 to 34:
-  - `npm run check`: 111 files, 1346 tests, statements 90.93%, branches 85.47%.
+- Result on the final head `bb36dd6`, after the reviewer rounds 29 to 36:
+  - `npm run check`: 111 files, 1348 tests, statements 90.93%, branches 85.48%.
   - `npm run test:e2e`: 14 tests passed.
+  - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`: passed.
   - `npx slophammer-ts@latest dry .` and the dependency-boundary check: no findings.
   - `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
-  - Runtime live E2E: `20260913T024333887Z-live-runtime-e2e-06bab6bd`, result `passed`.
-  - Real-model live E2E: `20260913T024455807Z-live-model-e2e-f83c3600`, provider `openai`, model
-    `gpt-5.6-luna`, cost $0.00396, result `passed`.
-  - CI on the pull request at `8079102`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+  - Runtime live E2E: `20260913T033457066Z-live-runtime-e2e-4e428b1a`, result `passed`.
+  - Real-model live E2E: `20260913T033616192Z-live-model-e2e-28b0ef64`, provider `openai`, model
+    `gpt-5.6-luna`, cost $0.00339, result `passed`.
+  - CI on the pull request at `bb36dd6`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+  - Pi Reviewer round 36, on `bb36dd6`: no findings.
 - Pi Reviewer rounds on the pull request reached no findings at round 28. The model named by the
   implementation workflow, `huggingface/deepseek-ai/DeepSeek-V4.1-Flash`, had answered with a rate
   limit during the earlier rounds and returned findings again in rounds 29 to 34. Every finding was
