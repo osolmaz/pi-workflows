@@ -2,7 +2,7 @@
 name = "pi-workflows"
 version = "0.17.1"
 edition = "2021"
-description = "Terminal client and live relay for hosted pi-workflows state"
+description = "Terminal client and live relay for pi-workflows server state"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/osolmaz/pi-workflows"
