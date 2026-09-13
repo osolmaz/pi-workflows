@@ -27,12 +27,14 @@ export type WidgetRunInput = {
  * session snapshot never has to carry complete run history.
  */
 export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
-  const runningNode = displayedRunningNode(run);
-  const runningRow = run.nodes.find((row) => row.nodeId === runningNode);
+  // The widget's active node, by the same rule as `activeNodeId` in widget.ts.
+  // The run facts decide, because a run can wait on an attempt that Pi has not
+  // started yet, and that node still owns the highlight and the elapsed time.
+  const activeNode = run.currentNode ?? (run.display.status === "running" ? run.waitingOn : null);
+  const activeRow = run.nodes.find((row) => row.nodeId === activeNode);
   const nodes: Record<string, WorkflowDefinitionSnapshot["nodes"][string]> = {};
   const results: WorkflowRunState["results"] = {};
   const steps: WorkflowStepRecord[] = [];
-  let currentNode: string | undefined;
   let waitingOn: string | undefined;
   let humanDecision: WorkflowRunState["humanDecision"];
   let finalOutput: unknown;
@@ -40,13 +42,12 @@ export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
 
   for (const row of run.nodes) {
     nodes[row.nodeId] = nodeSnapshot(row);
-    if (row.state === "running") currentNode = row.nodeId;
     if (row.state === "waiting") waitingOn = row.nodeId;
-    const isCurrent = row.nodeId === runningNode;
+    const isCurrent = row.nodeId === activeNode;
     if (row.state === "ok" || row.state === "failed") {
       results[row.nodeId] = nodeResult(row);
     }
-    // The widget counts one extra attempt for the node it shows as running and
+    // The widget counts one extra attempt for the node it shows as active and
     // reads the fixed settings number of the current node from the run state.
     const completed = Math.max(0, row.attempts - (isCurrent ? 1 : 0));
     for (let index = 0; index < completed; index += 1) {
@@ -81,13 +82,13 @@ export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
     steps,
     updates: sessionUpdates(run),
     ...(run.paused ? { paused: true } : {}),
-    ...(currentNode === undefined ? {} : { currentNode }),
+    ...(activeNode === null ? {} : { currentNode: activeNode }),
     ...(waitingOn === undefined ? {} : { waitingOn }),
     ...(currentSettingsChangeNumber === undefined ? {} : { currentSettingsChangeNumber }),
     // The widget appends the running node's elapsed segment from this value.
-    ...(runningRow?.startedAt === null || runningRow?.startedAt === undefined
+    ...(activeRow?.startedAt === null || activeRow?.startedAt === undefined
       ? {}
-      : { currentNodeStartedAt: runningRow.startedAt }),
+      : { currentNodeStartedAt: activeRow.startedAt }),
     ...(run.error === null ? {} : { error: run.error }),
     ...(humanDecision === undefined ? {} : { humanDecision }),
     ...(finalOutput === undefined ? {} : { finalOutput }),
@@ -106,14 +107,6 @@ export function widgetRunInput(run: WorkflowSessionRunView): WidgetRunInput {
   };
 }
 
-/** The node the widget shows as running: the same rule as the widget itself. */
-function displayedRunningNode(run: WorkflowSessionRunView): string | undefined {
-  const running = run.nodes.find((row) => row.state === "running")?.nodeId;
-  if (running !== undefined) return running;
-  if (run.display.status !== "running") return undefined;
-  return run.nodes.find((row) => row.state === "waiting")?.nodeId;
-}
-
 function nodeSnapshot(row: WorkflowSessionNodeRow): WorkflowDefinitionSnapshot["nodes"][string] {
   const humanDecision =
     row.humanDecision === null
@@ -130,7 +123,7 @@ function nodeSnapshot(row: WorkflowSessionNodeRow): WorkflowDefinitionSnapshot["
     ...(humanDecision === undefined ? {} : { humanDecision }),
     ...(row.summary === null ? {} : { summary: row.summary }),
     ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
-    ...(row.actionExecution ? { actionExecution: "function" as const } : {}),
+    ...(row.actionExecution === null ? {} : { actionExecution: row.actionExecution }),
   };
 }
 

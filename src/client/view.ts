@@ -150,7 +150,7 @@ export type WorkflowSessionNodeRow = {
   nodeId: string;
   nodeType: string;
   /** The node runs an action command rather than a model step. */
-  actionExecution: boolean;
+  actionExecution: "function" | "shell" | null;
   state: "pending" | "running" | "waiting" | "ok" | "failed";
   /** Completed attempts plus the current attempt. */
   attempts: number;

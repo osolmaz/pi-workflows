@@ -471,7 +471,7 @@ function widgetSessionSnapshot(
         {
           nodeId: "publish",
           nodeType: "agent",
-          actionExecution: false,
+          actionExecution: null,
           state: displayStatus === "running" ? "ok" : "waiting",
           attempts: stepTotal,
           settingsChangeNumber: null,
@@ -487,7 +487,7 @@ function widgetSessionSnapshot(
         {
           nodeId: "runReview",
           nodeType: "agent",
-          actionExecution: false,
+          actionExecution: null,
           state: displayStatus === "running" ? "running" : "pending",
           attempts: displayStatus === "running" ? 1 : 0,
           settingsChangeNumber: null,

@@ -1977,6 +1977,79 @@ describe("current session state", () => {
     fixture.state.close();
   }, 60_000);
 
+  it("carries the action subtype and the current node for a pending attempt", async () => {
+    const projectPath = await makeTempDir("action-subtype-project");
+    const databasePath = path.join(await makeTempDir("action-subtype-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = defineWorkflow({
+      name: "actions",
+      startAt: "build",
+      edges: [],
+      nodes: {
+        build: action({
+          effect: idempotentEffect("test.action-subtype"),
+          exec: () => ({ command: "true" }),
+        }),
+        check: action({
+          effect: idempotentEffect("test.action-subtype-function"),
+          run: () => ({ ok: true }),
+        }),
+      },
+    });
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-action-subtype";
+    const sessionId = "session-action-subtype";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:actions",
+      workflowSource: {
+        root: { kind: "builtin", id: "actions", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "action-subtype",
+      claimToken: "claim-action-subtype",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    state.connection
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    // The runner handoff: the run is running while its attempt is still pending.
+    state.connection
+      .prepare(
+        `INSERT INTO node_attempts(attempt_id, run_id, node_id, attempt_number, node_type, status,
+         started_at, created_at, updated_at) VALUES (?, ?, 'build', 1, 'action', 'pending', NULL, 1000, 1000)`,
+      )
+      .run("action-subtype-attempt", runId);
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-action-subtype"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const run = views.session(sessionId, null).run;
+    // The compact row keeps the subtype, because the widget renders a shell with
+    // its own glyph, and the run fact names the node that a pending attempt owns.
+    expect(run?.currentNode).toBe("build");
+    const rows = new Map((run?.nodes ?? []).map((row) => [row.nodeId, row]));
+    expect(rows.get("build")).toMatchObject({ actionExecution: "shell", state: "pending" });
+    expect(rows.get("check")?.actionExecution).toBe("function");
+    state.close();
+  }, 60_000);
+
   it("binds origin activity to one connection and gives durable pause precedence", async () => {
     const projectPath = await makeTempDir("server-view-project");
     const databasePath = path.join(await makeTempDir("server-view-state"), "state.sqlite");
