@@ -434,16 +434,20 @@ Result on `feat/current-workflow-state` after the rounds below:
 
 Result after the closing vocabulary sweep:
 
-- `npm run check`: 111 files, 1337 tests, statements 90.95%, branches 85.46%.
+- `npm run check`: 111 files, 1343 tests, statements 90.93%, branches 85.47%.
 - `npm run test:e2e`: 14 tests passed.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`: 87 tests passed.
 - `npx slophammer-ts@latest dry .` and the dependency-boundary check: no findings.
 - `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
-- Runtime live E2E: `20260913T003025320Z-live-runtime-e2e-abeb33e1`, result `passed`.
-- Real-model live E2E: `20260913T003430769Z-live-model-e2e-8458f277`, provider `openai`, model
-  `gpt-5.6-luna`, cost $0.00385, result `passed`.
-- Pi Reviewer rounds on the pull request reached no findings; every finding from an earlier round
-  was either fixed with a red-green test or refuted with source and test evidence.
+- Runtime live E2E: `20260913T014917509Z-live-runtime-e2e-f605c294`, result `passed`.
+- Real-model live E2E: `20260913T015035278Z-live-model-e2e-69c3e9f4`, provider `openai`, model
+  `gpt-5.6-luna`, cost $0.00340, result `passed`.
+- CI on the pull request at `c526ea5`: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+- Pi Reviewer rounds on the pull request reached no findings at round 28; every finding from an
+  earlier round was either fixed with a red-green test or answered with source and test evidence.
+  The later rounds fixed a cancelled step that Pi never received, a session view cache that keyed
+  the selected message on the run, a lost action subtype, a lost current node during a pending
+  handoff, and an empty node window that could not page back.
 
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
