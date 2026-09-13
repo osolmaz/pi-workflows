@@ -14,6 +14,7 @@ import {
 import type { ClientEvent } from "../src/client/protocol.js";
 import type { WorkflowDisplayStatus, WorkflowSessionView } from "../src/client/view.js";
 import piWorkflows from "../src/extension/index.js";
+import { SessionWorkflowView } from "../src/extension/session-view.js";
 import { WorkflowMessageCoordinator } from "../src/extension/workflow-message-coordinator.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
@@ -1930,6 +1931,27 @@ export default defineResourceManager({
       fake.notifications.filter((notice) => notice.message.includes("shortcuts.json")),
     ).toEqual([]);
     await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("pages back from an empty node window", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+    const view = new SessionWorkflowView();
+    const cursors: Array<number | null> = [];
+    view.setNodePager((cursor) => {
+      cursors.push(cursor);
+    });
+    const loaded = widgetSessionSnapshot(1, "running", "publish", 1);
+    if (loaded.run === null) throw new Error("run missing");
+    // The window that holds the last row, then the empty window that follows a
+    // node row too large for one client frame at the end of the topology.
+    const held = { ...loaded.run, nodeStart: 4, nodeTotal: 5 };
+    view.update({ ...loaded, run: held }, fake.ctx);
+    view.update({ ...loaded, run: { ...held, nodes: [], nodeStart: 5 } }, fake.ctx);
+    view.scrollUp(fake.ctx);
+    // The empty window has no row to count back from, so the view returns to the
+    // last window that held rows instead of asking for the same empty one.
+    expect(cursors).toEqual([4]);
   }, 60_000);
 
   it("binds the configured scroll key to the widget window and shows the same keys", async () => {

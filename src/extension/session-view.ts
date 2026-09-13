@@ -20,6 +20,8 @@ export class SessionWorkflowView {
   private pageNodes: ((cursor: number | null) => Promise<void> | void) | undefined;
   /** Window the widget already asked for, so repeated key presses ask once. */
   private requestedNodeCursor: number | null = null;
+  /** Start of the last loaded window that held a row, so an empty one can page back. */
+  private lastWindowStart: number | null = null;
   /** Position to show when the asked window arrives, applied only on success. */
   private pendingScroll: number | null = null;
 
@@ -51,6 +53,7 @@ export class SessionWorkflowView {
       if (previousRun?.runId !== run.runId) {
         this.requestedNodeCursor = null;
         this.pendingScroll = null;
+        this.lastWindowStart = null;
       }
     } else if (previousRun !== undefined && nodeWindowChanged(previousRun, run)) {
       // An asked-for window arrived: show its top after scrolling down or its
@@ -64,6 +67,9 @@ export class SessionWorkflowView {
     }
     this.session = session;
     this.staleReason = null;
+    // Keep the last window that holds rows, because a window that follows a row
+    // too large for the frame holds none and has no row to count back from.
+    if (run.nodes.length > 0) this.lastWindowStart = run.nodeStart;
     this.notifyTransition(previousRun, session, ctx);
     this.render(ctx);
   }
@@ -108,6 +114,7 @@ export class SessionWorkflowView {
     this.staleReason = null;
     this.lastNoticeKey = null;
     this.requestedNodeCursor = null;
+    this.lastWindowStart = null;
     this.pendingScroll = null;
     this.clearWidget(ctx);
   }
@@ -144,7 +151,12 @@ export class SessionWorkflowView {
       return;
     }
     if (delta < 0 && current <= 0 && run.nodeStart > 0) {
-      const start = Math.max(0, run.nodeStart - run.nodes.length);
+      // An empty window holds no row to count back from, so page back to the last
+      // window that held rows instead of asking for the same empty window again.
+      const start =
+        run.nodes.length === 0
+          ? (this.lastWindowStart ?? 0)
+          : Math.max(0, run.nodeStart - run.nodes.length);
       if (this.requestedNodeCursor !== start) {
         this.requestWindow(start, Number.MAX_SAFE_INTEGER);
       }
