@@ -559,6 +559,17 @@ record, because it describes the state at its date; a test, because a test may b
 value on purpose; and `package-lock.json`, because it is generated dependency metadata. The check
 failed first on a skill document, which the earlier, narrower version of the sweep did not read.
 
+An automated pass over the tree confirms every item above: 8 SQLite
+tables, 4 columns, 9 protocol schemas, 3 state paths, 3 options, 3 stored owner or type values, the
+`server-` identifier prefix, and the `managed-resource-` prefix. No `host.sock`, `host.lock.json`, or
+`host.children.json` name and no `maxHosts` or `executionHosts` option remains in a current surface.
+
+Three old names stay on purpose, and each one names a fact about an earlier layout rather than the
+current one: the dated plan file names, the `apply_patch` and `PatchOp` protocol helpers, and the
+legacy state directories `runs`, `decisions`, and `controllers` that `assertNoLegacyState` refuses.
+`PI_WORKFLOWS_RUNS_DIR` and `PI_WORKFLOWS_CONTROLLER_DIR` exist only in a dated record that states
+they were removed.
+
 The stored database changes shape. This repository is in alpha, so the server reports the existing
 reset instruction when it opens an older database. No migration is added.
 
