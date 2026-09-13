@@ -417,6 +417,21 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 Then run one real-model live end-to-end test with an authenticated low-cost model and an exact
 provider and model ID, as required by this repository.
 
+Result on `feat/current-workflow-state` after the rounds below:
+
+- `npm run check`: 110 files, 1327 tests, statements 90.93%, branches 85.41%.
+- `npm run test:e2e`: 14 tests passed.
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `tui`.
+- `npx slophammer-ts@latest dry .`: no findings.
+- `npx slophammer-ts@latest check . --only ts.dependency-boundaries-required`: no findings.
+- `npx -y @simpledoc/simpledoc check`: repo matches SimpleDoc conventions.
+- Runtime live E2E: `20260913T001425191Z-live-runtime-e2e-302519f1`, result `passed`.
+- Real-model live E2E: `20260913T001754183Z-live-model-e2e-abc4df03`, provider `openai`, model
+  `gpt-5.6-luna`, cost $0.00384, result `passed`.
+- CI on the pull request: `check`, `e2e`, `installed-e2e`, and `tui` passed.
+- Pi Reviewer rounds on the pull request reached no findings; every finding from an earlier round
+  was either fixed with a red-green test or refuted with source and test evidence.
+
 The automated tests must not call a real model, modify live workflow state, or write outside their
 temporary directories.
 
