@@ -192,6 +192,90 @@ export class WorkflowMessageStore {
     return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));
   }
 
+  /**
+   * A bounded metadata batch of one session's messages in one status, without
+   * content. The caller walks batches in the order it needs, so a long session
+   * history never loads into memory at once.
+   */
+  listSessionSummaryBatch(
+    targetSessionId: string,
+    options: {
+      status: string | null;
+      kind?: string;
+      newestFirst?: boolean;
+      lastOrder?: number;
+      limit: number;
+    },
+  ): WorkflowMessageSummary[] {
+    if (options.limit <= 0) return [];
+    const newestFirst = options.newestFirst === true;
+    const rows = this.state.connection
+      .prepare(
+        `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
+                target_session_id AS targetSessionId, kind, source_id AS sourceId,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
+                pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM workflow_messages
+         WHERE target_session_id = ? AND (? IS NULL OR status = ?)
+           AND order_number ${newestFirst ? "<" : ">"} ?
+           AND (? IS NULL OR kind = ?)
+         ORDER BY order_number ${newestFirst ? "DESC" : "ASC"} LIMIT ?`,
+      )
+      .all(
+        targetSessionId,
+        options.status,
+        options.status,
+        options.lastOrder ?? (newestFirst ? Number.MAX_SAFE_INTEGER : -1),
+        options.kind ?? null,
+        options.kind ?? null,
+        options.limit,
+      );
+    return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));
+  }
+
+  /** Read one session message's metadata by its id, without content. */
+  readSessionSummary(
+    targetSessionId: string,
+    workflowMessageId: string,
+  ): WorkflowMessageSummary | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
+                target_session_id AS targetSessionId, kind, source_id AS sourceId,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
+                pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM workflow_messages WHERE target_session_id = ? AND workflow_message_id = ?`,
+      )
+      .get(targetSessionId, workflowMessageId);
+    return isWorkflowMessageRow(row) ? this.mapMessageSummary(row) : undefined;
+  }
+
+  /** Read one session message's metadata by run and kind, without content. */
+  readSessionSummaryByRun(
+    targetSessionId: string,
+    runId: string,
+    kind: string,
+  ): WorkflowMessageSummary | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
+                target_session_id AS targetSessionId, kind, source_id AS sourceId,
+                content_hash AS contentHash, trigger_turn AS triggerTurn,
+                order_number AS orderNumber, status,
+                pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM workflow_messages
+         WHERE target_session_id = ? AND run_id = ? AND kind = ?
+         ORDER BY order_number LIMIT 1`,
+      )
+      .get(targetSessionId, runId, kind);
+    return isWorkflowMessageRow(row) ? this.mapMessageSummary(row) : undefined;
+  }
+
   /** Message metadata count for one run, without reading content. */
   countForRun(runId: string): number {
     const row = this.state.connection

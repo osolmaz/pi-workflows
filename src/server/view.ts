@@ -88,6 +88,7 @@ const SESSION_NODE_LEAD = 4;
  * through the detailed run view and its node history.
  */
 const SESSION_TEXT_BYTES = 4 * 1024;
+const SESSION_MESSAGE_BATCH = 32;
 /**
  * JSON one session detail may carry, such as a monitor estimate, one progress
  * payload, or the choice labels of one decision. A larger value is reported as
@@ -438,33 +439,24 @@ export class ServerViewStore {
    * the session must act on.
    */
   private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
-    const messages = this.workflowMessages.listSessionSummaries(sessionId);
-    if (messages.length === 0) return undefined;
     const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
     if (openTurn !== undefined) {
-      const open = messages.find(
-        (message) => message.workflowMessageId === openTurn.workflowMessageId,
-      );
+      const open = this.workflowMessages.readSessionSummary(sessionId, openTurn.workflowMessageId);
       if (open !== undefined) return open;
     }
-    // Pi first checks whether the next message is already on its branch, then
-    // delivers it. A pending message therefore outranks a delivered one, which
-    // is how a reminder or resumed step replaces its own earlier message.
-    for (const message of messages) {
-      if (message.status === "pending" && this.isMessageEligible(message)) return message;
+    // Selection walks one bounded batch of metadata at a time, in the order each
+    // step needs, so a long session history never loads into memory at once. A
+    // step stops at the first message that satisfies it, so the walk costs no more
+    // than the position of the answer.
+    for (const message of this.walkSessionSummaries(sessionId, "pending", false)) {
+      if (this.isMessageEligible(message)) return message;
     }
-    // Otherwise Pi keeps the newest delivered message it still owes work for.
-    for (const message of [...messages].reverse()) {
-      if (message.status === "sent" && this.needsPiWork(message)) return message;
+    for (const message of this.walkSessionSummaries(sessionId, "sent", true)) {
+      if (!this.needsPiWork(message)) continue;
+      return message;
     }
-    // A cancelled step stays current while Pi holds it and has not confirmed a
-    // turn, because the extension must stop the turn it started from that
-    // message. A message Pi never received needs no stopping and must not become
-    // deliverable again, so only a delivered one stays current. Once Pi reports a
-    // turn, the delivery is reconciled and the message stops being current.
-    for (const message of [...messages].reverse()) {
-      if (message.status !== "sent" || message.kind !== "step") continue;
-      if (!this.hasCancelledSource(message)) continue;
+    for (const message of this.walkSessionSummaries(sessionId, "sent", true)) {
+      if (message.kind !== "step" || !this.hasCancelledSource(message)) continue;
       if (this.workflowMessages.latestTurnForMessage(message.workflowMessageId) !== undefined) {
         continue;
       }
@@ -473,11 +465,35 @@ export class ServerViewStore {
     // A retained terminal message stays current until its delivery or first turn finishes.
     const retainedRunId = this.retainedTerminalRunId(sessionId);
     if (retainedRunId !== undefined) {
-      for (const message of messages) {
-        if (message.runId === retainedRunId && message.kind === "terminal") return message;
-      }
+      return this.workflowMessages.readSessionSummaryByRun(sessionId, retainedRunId, "terminal");
     }
     return undefined;
+  }
+
+  /**
+   * Walk one session's message metadata in bounded batches, in durable order or
+   * newest first. The caller stops at the first message it needs.
+   */
+  private *walkSessionSummaries(
+    sessionId: string,
+    status: string | null,
+    newestFirst: boolean,
+    kind?: string,
+  ): Generator<WorkflowMessageSummary> {
+    let lastOrder: number | undefined;
+    for (;;) {
+      const batch = this.workflowMessages.listSessionSummaryBatch(sessionId, {
+        status,
+        newestFirst,
+        ...(kind === undefined ? {} : { kind }),
+        ...(lastOrder === undefined ? {} : { lastOrder }),
+        limit: SESSION_MESSAGE_BATCH,
+      });
+      for (const message of batch) yield message;
+      if (batch.length < SESSION_MESSAGE_BATCH) return;
+      lastOrder = batch[batch.length - 1]?.order;
+      if (lastOrder === undefined) return;
+    }
   }
 
   /** Whether Pi still owes delivery confirmation or a model turn for this message. */
@@ -987,11 +1003,9 @@ export class ServerViewStore {
   }
 
   private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
-    const messages = this.workflowMessages
-      .listSessionSummaries(sessionId)
-      .filter((message) => message.kind === "terminal")
-      .reverse();
-    for (const message of messages) {
+    // The walk reads bounded batches of terminal message metadata, newest first,
+    // and stops at the first retained run.
+    for (const message of this.walkSessionSummaries(sessionId, null, true, "terminal")) {
       const run = this.state.connection
         .prepare("SELECT status FROM runs WHERE run_id = ?")
         .get(message.runId);

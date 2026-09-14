@@ -389,6 +389,7 @@ CREATE TABLE node_attempts (
 CREATE UNIQUE INDEX node_attempts_active_idx ON node_attempts(run_id)
 WHERE status IN ('pending', 'running', 'waiting');
 CREATE INDEX node_attempts_run_idx ON node_attempts(run_id, created_at);
+CREATE INDEX node_attempts_order_idx ON node_attempts(run_id, attempt_number);
 -- NULL means not configured; zero is an explicitly unlimited timeout.
 CREATE TABLE attempt_active_intervals (
   attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
