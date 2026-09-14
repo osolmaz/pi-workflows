@@ -162,7 +162,7 @@ This work does not add cron expressions, calendar schedules, a background servic
 - A 30-minute sleep is not stopped by the default 15-minute node timeout.
 - Cancelling during sleep stops the shell child and ends the workflow.
 - Project and global workflows override the built-in `monitor` name.
-- Existing workflow, controller, host, viewer, and run-bundle tests continue to pass.
+- Existing workflow, controller, server, viewer, and run-bundle tests continue to pass.
 - OnurPi loads the updated wrapper and Pi starts successfully.
 
 ## Verification

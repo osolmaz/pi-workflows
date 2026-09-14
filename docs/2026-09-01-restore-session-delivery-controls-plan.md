@@ -25,15 +25,15 @@ The affected live run remained durably parked at its interactive request. No wor
 
 ## Root cause
 
-The out-of-process redesign removed the embedded extension executor. The old widget and `agent_end` pause handler were coupled to that executor, so both were removed with it. The redesign did not add host-backed replacements.
+The out-of-process redesign removed the embedded extension executor. The old widget and `agent_end` pause handler were coupled to that executor, so both were removed with it. The redesign did not add server-backed replacements.
 
-The delivery coordinator checks Pi again after an asynchronous host claim. If Pi becomes busy during that claim, the coordinator currently drops the claim. The next poll tries to claim the same interaction before its ten-second presentation lease expires. The host correctly rejects that second claim. The extension incorrectly exposes the expected rejection as a workflow tool failure.
+The delivery coordinator checks Pi again after an asynchronous server claim. If Pi becomes busy during that claim, the coordinator currently drops the claim. The next poll tries to claim the same interaction before its ten-second presentation lease expires. The server correctly rejects that second claim. The extension incorrectly exposes the expected rejection as a workflow tool failure.
 
 The coordinator also removes its local queued guard before durable settlement finishes. A settlement error can therefore make later polling treat a message that is already visible in Pi as sendable work.
 
 ## Requirements
 
-- Keep one global host as the normal workflow state writer.
+- Keep one global server as the normal workflow state writer.
 - Keep workflow and resource manager code in supervised child processes.
 - Use documented Pi extension APIs only.
 - Preserve one ordered session delivery path for steps, decisions, notifications, and final results.
@@ -41,18 +41,18 @@ The coordinator also removes its local queued guard before durable settlement fi
 - Never resend a message that is visible in Pi only because its durable receipt failed.
 - Pause a presented workflow interaction when its Pi model turn ends with stop reason `aborted`.
 - Reject workflow updates and submissions while that interaction is paused.
-- Restore the widget as a read-only view of durable host state.
+- Restore the widget as a read-only view of durable server state.
 - Keep schema identifiers at version 1 and add no compatibility path.
 
 ## Delivery coordinator
 
 The coordinator will have three in-memory states for one delivery:
 
-1. `claimed`: the host granted a lease, but Pi became busy before send;
+1. `claimed`: the server granted a lease, but Pi became busy before send;
 2. `queued`: `pi.sendMessage()` was called and the matching Pi entry is not yet durably settled;
-3. settled or ambiguous: the host accepted the public Pi entry ID, or settlement could not be proved.
+3. settled or ambiguous: the server accepted the public Pi entry ID, or settlement could not be proved.
 
-The coordinator records `claimExpiresAt` with every claim. A later poll can use the same claim while it is live. Immediately before send, the extension revalidates that exact claim and durable resource through the host, then checks Pi and the lease again. It discards cancelled, paused, replaced, or expired work. It does not request another claim while a live claim is remembered.
+The coordinator records `claimExpiresAt` with every claim. A later poll can use the same claim while it is live. Immediately before send, the extension revalidates that exact claim and durable resource through the server, then checks Pi and the lease again. It discards cancelled, paused, replaced, or expired work. It does not request another claim while a live claim is remembered.
 
 The extension reads the presentation claim owner and expiry from the existing version-1 interaction row. A live claim held by any extension is normal unavailable work. It is not a tool error. Notification and terminal-turn claim receipts also include their exact expiry.
 
@@ -79,7 +79,7 @@ The extension will use Pi's documented `agent_end` event and public extension co
 - the same `agent_end` event contains that interaction's workflow prompt; and
 - the run is not already paused.
 
-The extension will send `run.pause` to the host. A live worker uses the existing exact-claim pause transaction. A waiting interaction has no worker and no live run claim, so the host will atomically set `paused = 1` on the parked run. The host will reject updates, submissions, and decision answers while paused.
+The extension will send `run.pause` to the server. A live worker uses the existing exact-claim pause transaction. A waiting interaction has no worker and no live run claim, so the server will atomically set `paused = 1` on the parked run. The server will reject updates, submissions, and decision answers while paused.
 
 Resume will clear the pause on the same pending interaction without creating a worker or a second prompt. Other paused work will keep the existing behavior: take a new claim generation and resume in a supervised child.
 
@@ -87,9 +87,9 @@ Resume will clear the pause on the same pending interaction without creating a w
 
 The change may update:
 
-- the extension delivery coordinator and host client integration;
+- the extension delivery coordinator and server client integration;
 - the read-only workflow widget projection;
-- host pause and resume handling for parked interactions;
+- server pause and resume handling for parked interactions;
 - existing version-1 interaction response fields;
 - focused unit, integration, and live Pi tests;
 - the workflow server and authoring documentation.
@@ -121,11 +121,11 @@ The change may update:
 - A visible message with a failed receipt remains blocked from resend.
 - A competing live presentation claim does not appear as a workflow tool failure.
 - The widget appears for an active origin-session run and shows paused state after Escape.
-- Escape pauses the matching waiting run through the host.
+- Escape pauses the matching waiting run through the server.
 - A paused interaction rejects `update` and `submit`.
 - Resume keeps the same request and allows submission without another prompt.
 - Non-aborted turns and unrelated sessions do not pause the workflow.
-- The extension and host execute no workflow or resource manager code in their own event loops.
+- The extension and server execute no workflow or resource manager code in their own event loops.
 
 ## Verification
 

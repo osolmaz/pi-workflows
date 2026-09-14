@@ -321,7 +321,7 @@ Direct RPC clients can support assistant completion because RPC exposes `message
 - `src/server/runner.ts`
 - `src/server/rpc-executor.ts`
 - `src/server/rpc-bridge.ts` only if the bridge needs completion metadata
-- Queue and host tests
+- Queue and server tests
 
 ### Verification
 
@@ -329,7 +329,7 @@ Tests prove:
 
 - interactive TUI works;
 - direct RPC captures the assistant response;
-- a detached host parks before visible output;
+- a detached server parks before visible output;
 - the origin session resumes and emits it once;
 - a detached run without an origin session fails clearly;
 - no assistant response is silently converted into a notification.
@@ -679,17 +679,17 @@ Do not update OnurPi, install the release, or change another repository as part 
 
 ## Main risks
 
-| Risk                                                   | Mitigation                                                                                                                                                                    |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Duplicate assistant response after a crash             | Bind prompt and response to run/node/attempt IDs and reconcile the session branch before redelivery.                                                                          |
-| Parent advances before the assistant finishes          | Resolve assistant mode only from `agent_settled`.                                                                                                                             |
-| Tool-only response completes the node                  | Require non-empty final visible text after tool activity settles.                                                                                                             |
-| A workflow receives more text than it needs            | Set `maxChars` explicitly for that workflow. Keep the general API unlimited by default and do not retry an already visible response.                                          |
-| Detached host produces an invisible assistant response | Park before the node and require the origin Pi session.                                                                                                                       |
-| Summary bypasses human approval                        | Keep it as an agent output; human decisions remain protected checkpoints.                                                                                                     |
-| “All plans” implies hidden reasoning                   | Include every explicit candidate record and never request hidden reasoning.                                                                                                   |
-| Generic summary leaks source data into chat            | Document that callers choose the source and that the assistant response becomes normal session state.                                                                         |
-| Extra model cost                                       | Autoplan replaces its existing final presentation turn, so standalone use should not add a second final model call. Included use intentionally adds one visible summary turn. |
+| Risk                                                     | Mitigation                                                                                                                                                                    |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Duplicate assistant response after a crash               | Bind prompt and response to run/node/attempt IDs and reconcile the session branch before redelivery.                                                                          |
+| Parent advances before the assistant finishes            | Resolve assistant mode only from `agent_settled`.                                                                                                                             |
+| Tool-only response completes the node                    | Require non-empty final visible text after tool activity settles.                                                                                                             |
+| A workflow receives more text than it needs              | Set `maxChars` explicitly for that workflow. Keep the general API unlimited by default and do not retry an already visible response.                                          |
+| Detached server produces an invisible assistant response | Park before the node and require the origin Pi session.                                                                                                                       |
+| Summary bypasses human approval                          | Keep it as an agent output; human decisions remain protected checkpoints.                                                                                                     |
+| “All plans” implies hidden reasoning                     | Include every explicit candidate record and never request hidden reasoning.                                                                                                   |
+| Generic summary leaks source data into chat              | Document that callers choose the source and that the assistant response becomes normal session state.                                                                         |
+| Extra model cost                                         | Autoplan replaces its existing final presentation turn, so standalone use should not add a second final model call. Included use intentionally adds one visible summary turn. |
 
 ## Contract impact
 

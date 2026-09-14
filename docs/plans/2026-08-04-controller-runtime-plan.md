@@ -41,9 +41,9 @@ The first release must provide:
 
 ## Assumptions
 
-The default controller store will use SQLite and local filesystem permissions that match the private run-bundle directory. The public store and queue contracts will allow another host to provide remote storage later.
+The default controller store will use SQLite and local filesystem permissions that match the private run-bundle directory. The public store and queue contracts will allow another server to provide remote storage later.
 
-The first release will support several workers in one process. Queue claims will survive process failure, but cross-host leader election will wait for a real remote deployment.
+The first release will support several workers in one process. Queue claims will survive process failure, but cross-server leader election will wait for a real remote deployment.
 
 Existing workflow definitions and run bundles remain valid. ResourceManager resources use a separate schema and store. Child workflow attempts use the current run-bundle format; their parent links live in the controller store.
 
@@ -113,13 +113,13 @@ Implement `ctx.workflows.ensure()` with a stable request key and input fingerpri
 
 Keep run attempts immutable. Add an explicit interrupted outcome for an abandoned child attempt. Route action nodes through the effect interface when they participate in a controller operation. Document the recovery rule for each node type.
 
-Test duplicate child requests, changed fingerprints, completion races, parent generation changes, and host restart between run creation and parent status update.
+Test duplicate child requests, changed fingerprints, completion races, parent generation changes, and server restart between run creation and parent status update.
 
 ### Extension and viewer
 
 Add controller discovery and a `/resource-manager` command for listing resources, inspecting conditions, requesting reconciliation, and cancelling active local work. Use only documented Pi extension APIs.
 
-Start local sources from `session_start` and close them idempotently during `session_shutdown`. Pi exit must leave durable resources and queue rows ready for another host. No background service is installed.
+Start local sources from `session_start` and close them idempotently during `session_shutdown`. Pi exit must leave durable resources and queue rows ready for another server. No background service is installed.
 
 Add a resource list and detail view to the TypeScript viewer first. Extend the Rust viewer only after the text model and fixtures settle. Keep both views read-only.
 
@@ -127,7 +127,7 @@ Add a resource list and detail view to the TypeScript viewer first. Extend the R
 
 Build a local pull request controller against a fake GitHub-compatible server. Its spec names a repository, pull request, expected head, requested workflow, and approved mutations. Its status reports the observed head and child run together with check results and readiness conditions.
 
-The controller must re-read the pull request before each effect. A changed head blocks the mutation. Duplicate webhooks and scheduled polls must converge on the same resource and child workflow request. No credential belongs in the child request. Strict credential isolation requires a separate authenticated effect broker because the Pi host and agent tools share a process environment.
+The controller must re-read the pull request before each effect. A changed head blocks the mutation. Duplicate webhooks and scheduled polls must converge on the same resource and child workflow request. No credential belongs in the child request. Strict credential isolation requires a separate authenticated effect broker because the Pi server and agent tools share a process environment.
 
 Keep this controller as an example or integration package. GitHub-specific policy must stay outside the controller core.
 

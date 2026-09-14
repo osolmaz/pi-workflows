@@ -26,7 +26,7 @@ Interactive agent steps will keep their full model prompts while appearing as co
 - Add the latest update projection to run state.
 - Preserve update ordering and idempotency.
 - Apply payload and key-count limits plus update rate limits.
-- Expose update publication to claimed hosts and controllers.
+- Expose update publication to claimed servers and resource managers.
 
 ### Node and tool APIs
 
@@ -192,7 +192,7 @@ Work:
 6. Reject mismatched and expired step contracts.
 7. Add shell stream selection, line framing, parser execution, and publication backpressure.
 8. Terminate shell actions on parser or publication failure.
-9. Expose the same claimed-run operation to the standalone host and controller scheduler boundary.
+9. Expose the same claimed-run operation to the standalone server and controller scheduler boundary.
 10. Include the current update projection in `status` details.
 
 Verification:
@@ -395,7 +395,7 @@ The shipped docs must describe actual field names and limits along with lifecycl
 - action to trace to state to widget
 - agent tool update followed by submit
 - shell stream to update publication
-- host park and resume
+- server park and resume
 - notification outbox delivery to the origin session
 - `status` with current updates
 

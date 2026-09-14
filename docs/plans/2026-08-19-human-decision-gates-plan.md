@@ -104,9 +104,9 @@ The new behavior applies only when a checkpoint carries a human decision contrac
 
 ### Separate workflow intent from delivery
 
-A workflow declares its question and choices together with the subject and audience. Private host configuration maps the audience to Pi, Telegram, or later channels. This keeps workflow files portable and lets one Telegram adapter serve every workflow.
+A workflow declares its question and choices together with the subject and audience. Private server configuration maps the audience to Pi, Telegram, or later channels. This keeps workflow files portable and lets one Telegram adapter serve every workflow.
 
-### Verify the answer source in the host
+### Verify the answer source in the server
 
 The model-facing workflow tool is not a human channel. It must reject `answer` while a human decision is waiting. The Pi UI path and Telegram adapter call an internal submission API that assigns the source and actor. Callers cannot supply a trusted source label themselves.
 

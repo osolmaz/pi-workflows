@@ -8,7 +8,7 @@ date: 2026-09-02
 
 ## Goal
 
-Add one black-box test runner that starts base Pi with only the packed Pi Workflows package. The runner will execute a workflow through the package-owned host and check Pi's workflow widget throughout its lifecycle. It will also check the Rust `piw` client. A separate phase can use a real model.
+Add one black-box test runner that starts base Pi with only the packed Pi Workflows package. The runner will execute a workflow through the package-owned server and check Pi's workflow widget throughout its lifecycle. It will also check the Rust `piw` client. A separate phase can use a real model.
 
 The runner must keep the Pi provider and model as separate exact values. It must work with Pi's built-in providers instead of containing OpenAI-specific model logic.
 
@@ -80,11 +80,11 @@ Before a model call, the runner will execute Pi's documented `auth check` comman
 
 ## Startup recovery
 
-Before Pi starts, the runner creates an incompatible state fixture inside the guarded temporary home. It then starts Pi and waits for the extension's one bounded host-unavailable warning. The runner moves the fixture intact, as the alpha reset instruction requires, and starts the host through the installed client.
+Before Pi starts, the runner creates an incompatible state fixture inside the guarded temporary home. It then starts Pi and waits for the extension's one bounded server-unavailable warning. The runner moves the fixture intact, as the alpha reset instruction requires, and starts the server through the installed client.
 
-The same Pi process must establish its origin-session subscription without a restart. An observer subscription verifies that the host has a coordinator epoch for that session. More polling must not produce a second host-unavailable warning. The normal runtime workflow then proves that the recovered session receives live widget updates.
+The same Pi process must establish its origin-session subscription without a restart. An observer subscription verifies that the server has a coordinator epoch for that session. More polling must not produce a second server-unavailable warning. The normal runtime workflow then proves that the recovered session receives live widget updates.
 
-This check reproduces the case where Pi starts before the host can open durable state. It changes no operator database or Pi session.
+This check reproduces the case where Pi starts before the server can open durable state. It changes no operator database or Pi session.
 
 ## Runtime workflow
 
@@ -92,7 +92,7 @@ The first workflow does not call a model. It has one delayed compute step and a 
 
 The runner will start it through Pi RPC and check the following sequence:
 
-1. The package-owned host starts on demand.
+1. The package-owned server starts on demand.
 2. RPC emits `setWidget` and `setStatus` for the `pi-workflows` key with `running` state.
 3. `/workflow pause` is accepted.
 4. The widget and status change to `paused`.
@@ -103,7 +103,7 @@ The runner will start it through Pi RPC and check the following sequence:
 9. RPC clears the widget and status after completion.
 10. No `extension_error` event appears.
 
-This run proves package loading and client-to-host startup. It also proves supervised worker control and the RPC widget contract. The complete check uses no model usage.
+This run proves package loading and client-to-server startup. It also proves supervised worker control and the RPC widget contract. The complete check uses no model usage.
 
 ## Real-model workflow
 
@@ -171,11 +171,11 @@ The standalone runner will own one temporary root and remove it in a `finally` p
 
 - close the Pi RPC process;
 - stop the workflow server through the installed client;
-- wait for the host endpoint to disappear;
+- wait for the server endpoint to disappear;
 - stop child workers started for the smoke workflows;
 - remove the npm consumer installation, sessions, workflow state, and fixture project.
 
-A normal failure will print a small diagnostic summary before cleanup. The summary will identify the failed phase and the software versions. It will also show the exact provider, model name, run id, host status, recent RPC event types, and bounded `piw` output. It will not print credentials, arbitrary environment values, or unrelated session content.
+A normal failure will print a small diagnostic summary before cleanup. The summary will identify the failed phase and the software versions. It will also show the exact provider, model name, run id, server status, recent RPC event types, and bounded `piw` output. It will not print credentials, arbitrary environment values, or unrelated session content.
 
 An explicit `--keep` option can preserve the one temporary root for manual debugging. Without that option, failures must not leave stale test directories.
 
@@ -184,17 +184,17 @@ An explicit `--keep` option can preserve the one temporary root for manual debug
 Add tests for:
 
 - `piw --once` argument handling and one-frame rendering;
-- timeout, missing-run, and host connection failures;
+- timeout, missing-run, and server connection failures;
 - packed npm installation with production dependencies;
 - extension source isolation in base Pi;
-- origin-session reconnection after initial host startup fails;
+- origin-session reconnection after initial server startup fails;
 - one warning during the simulated outage;
 - RPC widget and status transitions;
 - pause with no active worker;
 - abort of an active origin-session model turn;
 - one new resumed step message and one fresh model turn after resume;
 - protected decision revision stability across pause and resume;
-- a complete session capture with no false host-interruption diagnostic;
+- a complete session capture with no false server-interruption diagnostic;
 - resume and completion;
 - exact provider and model validation;
 - model fallback rejection;
@@ -211,7 +211,7 @@ Before a release:
 2. Run the installed-package test in `--runtime-only` mode.
 3. Run one real-model check with an explicit provider and model.
 4. Record the exact Pi version, package version, Rust version, provider, model id, API, and run result.
-5. Do not release after fallback, ambiguous delivery, duplicate session delivery, extension error, cleanup failure, or disagreement between Pi, the host, and `piw`.
+5. Do not release after fallback, ambiguous delivery, duplicate session delivery, extension error, cleanup failure, or disagreement between Pi, the server, and `piw`.
 
 The GitHub publish jobs will continue to use deterministic checks. They must not receive a personal subscription credential or a broad API key.
 
@@ -236,4 +236,4 @@ The implementation uses documented Pi package installation and CLI model selecti
 
 ## Completion criteria
 
-The work is complete when a clean base Pi process loads only the packed Pi Workflows package. The same Pi process must recover after the temporary incompatible-state gate is removed. The deterministic runtime workflow must pass every widget and lifecycle check, while `piw --once` must agree with Pi and the host. The full Pi mock-provider test must abort an active origin-session workflow turn, resume it through a distinct resumed step message, complete through one fresh model turn, and leave a complete session capture. The installed real-model check must reject a false host-interruption diagnostic. An explicitly selected built-in model must complete the structured agent workflow. Cleanup must leave no process or large temporary directory, and all repository checks must pass.
+The work is complete when a clean base Pi process loads only the packed Pi Workflows package. The same Pi process must recover after the temporary incompatible-state gate is removed. The deterministic runtime workflow must pass every widget and lifecycle check, while `piw --once` must agree with Pi and the server. The full Pi mock-provider test must abort an active origin-session workflow turn, resume it through a distinct resumed step message, complete through one fresh model turn, and leave a complete session capture. The installed real-model check must reject a false server-interruption diagnostic. An explicitly selected built-in model must complete the structured agent workflow. Cleanup must leave no process or large temporary directory, and all repository checks must pass.

@@ -11,18 +11,18 @@ status: implemented
 
 ## Goal
 
-Several Pi Workflows failures appeared together after the out-of-process host change. A provider error left old workflow-turn ownership behind. A composed workflow reused an effect key. Restart treated a failed run as a checkpoint continuation. Terminal code read a text error as JSON. That read error blocked cancellation, while the host repeatedly started a worker that could not make progress.
+Several Pi Workflows failures appeared together after the out-of-process server change. A provider error left old workflow-turn ownership behind. A composed workflow reused an effect key. Restart treated a failed run as a checkpoint continuation. Terminal code read a text error as JSON. That read error blocked cancellation, while the server repeatedly started a worker that could not make progress.
 
 These failures have the same architectural cause. Important facts are inferred in more than one place. Local node names stand in for compiled identities. A parent run ID stands in for the kind of child run. Callers guess the type of stored data. Process activity stands in for workflow progress. Presentation work can determine whether a control command commits.
 
-The approved design gives each fact one owner and one typed path. The compiler and engine create execution identities. The host state store commits workflow state. A worker executes one explicit run command. The Pi extension delivers messages and reports public Pi events. Renderers display the host view.
+The approved design gives each fact one owner and one typed path. The compiler and engine create execution identities. The server state store commits workflow state. A worker executes one explicit run command. The Pi extension delivers messages and reports public Pi events. Renderers display the server view.
 
 This plan replaces the narrower workflow-turn ownership plan. It keeps that fix and adds the effect, restart, terminal-data, cancellation, and worker-retry work needed to remove the shared cause.
 
 ## User requirements
 
 - Use the most direct, long-term design instead of separate guards for each symptom.
-- Keep one global out-of-process host as the normal state writer.
+- Keep one global out-of-process server as the normal state writer.
 - Keep one client protocol and one production runtime.
 - Use documented Pi extension APIs only.
 - Do not change Pi core or Pi session schemas.
@@ -53,7 +53,7 @@ Terminal-message creation calls this reader. As a result, the error can block ch
 
 ### A worker can restart forever without progress
 
-When an uninitialized worker exits, the host parks and claims the same run again. The failed restart never changes its saved workflow revision, but the host keeps launching it. The UI reports `running` because a process is active even though the workflow makes no progress.
+When an uninitialized worker exits, the server parks and claims the same run again. The failed restart never changes its saved workflow revision, but the server keeps launching it. The UI reports `running` because a process is active even though the workflow makes no progress.
 
 ### Presentation can roll back control state
 
@@ -65,13 +65,13 @@ Cancellation and terminal-message creation currently share a transaction path. I
 
 The compiler assigns complete node paths. The engine uses those paths to identify logical work. Child workflows can receive a local view of inputs and outputs, but that local view cannot replace the compiled identity.
 
-The host state store owns every durable transition. Server orchestration code asks the store to start, pause, finish, cancel, or recover work. It does not update lifecycle tables directly.
+The server state store owns every durable transition. Server orchestration code asks the store to start, pause, finish, cancel, or recover work. It does not update lifecycle tables directly.
 
 The worker receives one explicit command and executes it. It does not infer the command from nullable fields.
 
-The Pi extension keeps only temporary state for the current Pi turn. A host response decides whether that turn belongs to a workflow.
+The Pi extension keeps only temporary state for the current Pi turn. A server response decides whether that turn belongs to a workflow.
 
-Renderers use the host view. They do not infer workflow progress from process presence, messages, or local timers.
+Renderers use the server view. They do not infer workflow progress from process presence, messages, or local timers.
 
 ### Complete execution identity
 
@@ -91,7 +91,7 @@ The effect store keeps its request fingerprint check. Reusing one logical effect
 
 ### One run command
 
-The host sends the worker one tagged command:
+The server sends the worker one tagged command:
 
 - `start` begins a root run.
 - `resume` continues the same interrupted run from saved state.
@@ -108,7 +108,7 @@ The engine should expose one internal entry point that accepts this tagged comma
 
 ### One durable transition interface
 
-The existing run store becomes the only interface used by host orchestration for durable run changes. It can use focused internal modules, but callers see typed operations rather than SQL or booleans.
+The existing run store becomes the only interface used by server orchestration for durable run changes. It can use focused internal modules, but callers see typed operations rather than SQL or booleans.
 
 The interface covers:
 
@@ -133,11 +133,11 @@ A boolean result is not sufficient for a lifecycle change. Callers must know whe
 
 `workflowTurn.report` remains the single version-1 operation for Pi model turns.
 
-At Pi `agent_start`, the extension proposes the exact sent workflow message and a stable turn request ID. The host atomically returns an active turn or reports that no workflow owns the Pi turn. The extension starts workflow recording only after an active result.
+At Pi `agent_start`, the extension proposes the exact sent workflow message and a stable turn request ID. The server atomically returns an active turn or reports that no workflow owns the Pi turn. The extension starts workflow recording only after an active result.
 
 At Pi `agent_end`, the extension ends the exact active turn. Matching repeated reports return the saved result. Conflicting evidence remains an error.
 
-When a run becomes terminal, the same state transaction ends its remaining open turns as `lost` and cancels still-pending workflow messages. A late report cannot revive the run. If a connection closes at an uncertain point, the extension does not attach the next Pi turn. The existing branch and idle report lets the host settle an unproved open turn as `lost`.
+When a run becomes terminal, the same state transaction ends its remaining open turns as `lost` and cancels still-pending workflow messages. A late report cannot revive the run. If a connection closes at an uncertain point, the extension does not attach the next Pi turn. The existing branch and idle report lets the server settle an unproved open turn as `lost`.
 
 ### Typed run data
 
@@ -157,17 +157,17 @@ The underlying content-addressed blob store remains general. The run store owns 
 
 Finishing or cancelling a run commits its execution state first. That transaction saves the final status and ends open turns. It cancels pending interactions and messages before it releases the claim. It also records the terminal facts needed for presentation.
 
-Terminal Pi-message creation is an idempotent follow-up transition derived from those saved facts. A host restart can create a missing terminal message later. A presentation error is recorded for repair, but it cannot undo the terminal state or retain execution authority.
+Terminal Pi-message creation is an idempotent follow-up transition derived from those saved facts. A server restart can create a missing terminal message later. A presentation error is recorded for repair, but it cannot undo the terminal state or retain execution authority.
 
 This separation applies to completion, failure, timeout, and cancellation.
 
 ### Retry only after progress
 
-Every worker launch records the run revision it received. A normal worker exit reports a typed outcome to the host. Known bootstrap and workflow errors include the phase and error text.
+Every worker launch records the run revision it received. A normal worker exit reports a typed outcome to the server. Known bootstrap and workflow errors include the phase and error text.
 
-If a worker process disappears without a report, the host compares the current run revision with the launch revision. It may resume automatically only when durable progress or a saved recovery transition changed that revision.
+If a worker process disappears without a report, the server compares the current run revision with the launch revision. It may resume automatically only when durable progress or a saved recovery transition changed that revision.
 
-If no revision changed, the host parks the run with the worker failure and stops automatic launch. The user can inspect, cancel, or explicitly resume it. This rule has no arbitrary retry count. The same unchanged state is never executed in a tight loop.
+If no revision changed, the server parks the run with the worker failure and stops automatic launch. The user can inspect, cancel, or explicitly resume it. This rule has no arbitrary retry count. The same unchanged state is never executed in a tight loop.
 
 The display reports `running` only while one accepted worker or origin-session turn is doing current work. A parked no-progress failure reports its recovery reason.
 
@@ -197,7 +197,7 @@ Add focused tests that reproduce the current behavior before changing it:
 - Restart a failed workflow and prove the worker selects checkpoint continuation.
 - Build terminal ancestry with a failed parent and prove ancestor reading uses the wrong media type.
 - Cancel a child of a failed run and prove presentation failure rolls back cancellation.
-- Crash an uninitialized worker without a revision change and prove the host repeatedly claims it.
+- Crash an uninitialized worker without a revision change and prove the server repeatedly claims it.
 - End a workflow turn during a terminal race and prove a later ordinary Pi turn can inherit old ownership.
 
 The final versions of these tests must assert the corrected behavior. Do not preserve assertions for the defects.
@@ -212,7 +212,7 @@ Update authoring docs and all built-in workflows in the same change. Keep no ali
 
 ### Make worker commands explicit
 
-Add the tagged run command to `src/server/workflow-runner-protocol.ts`, the host bootstrap response, and `src/server/workflow-runner-entry.ts`.
+Add the tagged run command to `src/server/workflow-runner-protocol.ts`, the server bootstrap response, and `src/server/workflow-runner-entry.ts`.
 
 Replace the `initialized` and `parentRunId` dispatch heuristic with an exhaustive command switch. Add the engine path for a fresh restart and keep checkpoint continuation separate. Remove the superseded dispatch code.
 
@@ -232,7 +232,7 @@ After this change, the currently paused failed-child case must cancel without a 
 
 ### Finish workflow-turn ownership
 
-Implement the approved host-owned turn contract in the state store and host runner. Apply it to the extension coordinator and session view. Then connect it to recorder integration.
+Implement the approved server-owned turn contract in the state store and server runner. Apply it to the extension coordinator and session view. Then connect it to recorder integration.
 
 A terminal run must have no open workflow turn. A later ordinary Pi turn must produce no workflow-turn report for the terminal run.
 
@@ -249,10 +249,10 @@ Delete:
 - effect keys derived from projected local node names;
 - restart dispatch based only on `parentRunId`;
 - direct error-hash JSON reads;
-- lifecycle SQL in host orchestration where a typed store operation replaces it;
+- lifecycle SQL in server orchestration where a typed store operation replaces it;
 - cancellation paths that depend on successful terminal presentation;
 - automatic relaunch of the same unchanged worker state;
-- extension turn ownership that has not been accepted by the host.
+- extension turn ownership that has not been accepted by the server.
 
 Do not keep feature flags or fallback behavior.
 
@@ -320,7 +320,7 @@ Automated tests use temporary directories and deterministic providers. They do n
 - No raw SQLite uniqueness or media-type error reaches normal recovery paths.
 - Server, extension, widget, CLI, Herdr, and `piw` agree on run activity.
 - Pi core and private Pi APIs remain unchanged. Pi session schemas also remain unchanged.
-- One host and one database remain. The system keeps one client protocol and one production runtime.
+- One server and one database remain. The system keeps one client protocol and one production runtime.
 
 ## Verification
 
@@ -345,7 +345,7 @@ Run Pi Reviewer against `main` until no P0 or P1 finding remains. Check pull-req
 
 ## Scope
 
-The implementation may change Pi Workflows engine, compiler, worker protocol, host state methods, extension coordination, viewer projection, built-in workflows, tests, and documentation in this repository.
+The implementation may change Pi Workflows engine, compiler, worker protocol, server state methods, extension coordination, viewer projection, built-in workflows, tests, and documentation in this repository.
 
 ## Non-goals
 
@@ -360,6 +360,6 @@ The implementation may change Pi Workflows engine, compiler, worker protocol, ho
 ## Assumptions
 
 - Pi continues to provide the documented extension lifecycle events and session APIs.
-- The host remains the only production process that opens live SQLite state.
+- The server remains the only production process that opens live SQLite state.
 - A package update can require the documented backup and reset when version-1 DDL changes.
 - External systems remain responsible for their own stable idempotency keys or read-back checks.

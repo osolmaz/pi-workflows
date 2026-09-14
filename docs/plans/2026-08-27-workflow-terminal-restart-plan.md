@@ -242,7 +242,7 @@ Tests must cover:
 
 Key the selected launch to the source terminal turn intent and tool call.
 
-If the host repeats the same tool call after a crash or reload, return the existing reservation or new run instead of creating another one.
+If the server repeats the same tool call after a crash or reload, return the existing reservation or new run instead of creating another one.
 
 The terminal turn intent, launch reservation, and resulting run must have one inspectable chain.
 

@@ -33,20 +33,20 @@ These points were open in the first draft. External review showed each one is lo
 2. **Explicit resume protocol.** Resume is a named operation, not a restart. It truncates a torn trace tail to the last complete line, rebuilds run state from the trace, seeds the trace sequence from the tail, accounts for already-executed steps against the step limit, and records a resume boundary event before continuing.
 3. **Resume scope.** User-started runs get node-level resume. ResourceManager child runs keep their current new-attempt semantics, because attempt immutability and parent-side retry already work and are tested. Both behaviors are explicit; nothing mixes silently.
 4. **A dedicated run queue.** Interactive runs do not fit the controller queue, which is keyed to managed resources. A new `workflow_run_queue` table shares the claim, lease, and fencing pattern and adds runner affinity fields. Runs stay out of `/resource-manager list`.
-5. **Origin affinity.** An interactively started run is inserted and claimed in one transaction, so the session that started it owns it from birth. The standalone host takes over only when that claim is released or expires. This guarantees a watched run's conversation happens in the watching session.
+5. **Origin affinity.** An interactively started run is inserted and claimed in one transaction, so the session that started it owns it from birth. The standalone server takes over only when that claim is released or expires. This guarantees a watched run's conversation happens in the watching session.
 6. **Close-to-park shutdown.** `session_shutdown` stops writing a terminal cancel event for queued runs. It aborts in-flight work without a terminal event and releases the claim, leaving a resumable bundle. A clean close releases claims explicitly; a crash relies on lease expiry.
-7. **Per-attempt capture.** Session capture becomes segmented per attempt, keyed by attempt ID, so a run handed off to the host or a new session starts a fresh capture segment instead of failing integrity checks.
+7. **Per-attempt capture.** Session capture becomes segmented per attempt, keyed by attempt ID, so a run handed off to the server or a new session starts a fresh capture segment instead of failing integrity checks.
 8. **Continuation runs for waiting.** A run that needs human input ends at a checkpoint with status `waiting`, preserving bundle immutability. An answered checkpoint starts a continuation run with a new run ID chained to its parent, carrying forward prior outputs. The parent link makes the chain inspectable.
 9. **Source pinning.** The manifest stores a content hash of the workflow source at run start. Resume refuses to continue against changed source unless forced, and a forced resume records the mismatch in the trace.
 10. **Snapshot catch-up.** Notifications are idempotent snapshots of run state as of a store sequence number, recomputed from the store, not a stream of one-off messages. The watermark persists per session before sending. A skipped incremental notification is subsumed by the next snapshot.
 11. **A run-level event feed.** Run lifecycle transitions write rows into a store table, so one watermark covers both controller and run events. Tailing `trace.ndjson` is reserved for the single actively watched run.
-12. **Store-error backoff.** Runner loops treat store errors such as `SQLITE_BUSY` as transient and back off instead of letting a worker die silently. The host's advisory lock guards host-versus-host only; the embedded runner does not take it, and a second host refuses to start.
-13. **Orphan reaping.** The host spawns `pi --mode rpc` children in their own process group, records child PIDs in the bundle, and reaps known orphans on startup. Consequential actions stay behind guarded effects regardless.
+12. **Store-error backoff.** Runner loops treat store errors such as `SQLITE_BUSY` as transient and back off instead of letting a worker die silently. The server's advisory lock guards server-versus-server only; the embedded runner does not take it, and a second server refuses to start.
+13. **Orphan reaping.** The server spawns `pi --mode rpc` children in their own process group, records child PIDs in the bundle, and reaps known orphans on startup. Consequential actions stay behind guarded effects regardless.
 
 ## Requirements
 
 - Starting `/workflow run` in a Pi session creates a durable queued run claimed by that session, and shows its progress live.
-- Closing Pi mid-run never loses the run and never writes a spurious terminal event. With the standalone host alive, the host reclaims and resumes the run. Without a host, the run waits and resumes when a runner returns.
+- Closing Pi mid-run never loses the run and never writes a spurious terminal event. With the standalone server alive, the server reclaims and resumes the run. Without a server, the run waits and resumes when a runner returns.
 - Reopening a session brings it up to date with an idempotent snapshot: what finished, what failed, what waits for input. No state is duplicated and no information is permanently lost.
 - A run that needs human input ends at a checkpoint. The user answers with a command, and a continuation run carries the work forward. The wait survives any process lifetime.
 - Killing any process at any point recovers without duplicate trace sequences, duplicate notifications of record, or duplicate external effects. A stalled runner that loses its claim can never write again.
@@ -59,13 +59,13 @@ These points were open in the first draft. External review showed each one is lo
 3. **Close-to-park and capture segments.** Change `session_shutdown` to abort-without-terminal plus claim release for queued runs. Split session capture into per-attempt segments the integrity checker understands.
 4. **Continuation runs.** Chain an answered checkpoint to a new run ID with a parent link and carried-forward outputs. Render the chain as one logical run in views.
 5. **Session sync.** Add the run-level event feed, per-session watermarks, snapshot catch-up on `session_start`, and noteworthy-event messages. Live watching tails `trace.ndjson` from a remembered byte offset with `fs.watch`, reusing the TUI viewer's file-tail path.
-6. **Standalone host.** A `pi-workflows` CLI subcommand loads resource manager definitions, opens the project store, and runs claiming in a loop with store-error backoff. Conversation child nodes run in spawned headless `pi --mode rpc` sessions with orphan reaping. The host takes an advisory lock against other hosts, drains on SIGTERM, and recovers on restart. It is a foreground process the user runs in a terminal; it is not a service.
+6. **Standalone server.** A `pi-workflows` CLI subcommand loads resource manager definitions, opens the project store, and runs claiming in a loop with store-error backoff. Conversation child nodes run in spawned headless `pi --mode rpc` sessions with orphan reaping. The server takes an advisory lock against other servers, drains on SIGTERM, and recovers on restart. It is a foreground process the user runs in a terminal; it is not a service.
 
 ## Non-goals
 
 - Pi core changes of any kind. Every integration uses public APIs: commands, session events, widgets, `sendUserMessage`, and `pi --mode rpc`.
 - Multi-machine execution, a remote store, or leader election. SQLite and one machine are in scope; the store contracts leave room for a remote implementation later.
-- Installing or configuring a system or user service. The host is a process the user starts and stops.
+- Installing or configuring a system or user service. The server is a process the user starts and stops.
 - A push channel from an external process into a live session. Polling the shared store is the mechanism, and it is fast enough.
 - Exactly-once chat notifications. The guarantee is no duplicated state and no permanently lost information, delivered through idempotent snapshots.
 - Exactly-once external side effects beyond the existing guarded effect records.
@@ -73,14 +73,14 @@ These points were open in the first draft. External review showed each one is lo
 ## Assumptions
 
 - One machine and one user, with the store and run bundles on the local filesystem.
-- Spawning `pi --mode rpc` per conversation child run is acceptable at the expected cadence. If startup cost proves too high, the host keeps a small pool of persistent RPC sessions instead. Both options stay outside Pi core.
+- Spawning `pi --mode rpc` per conversation child run is acceptable at the expected cadence. If startup cost proves too high, the server keeps a small pool of persistent RPC sessions instead. Both options stay outside Pi core.
 - A polling interval of a few seconds is responsive enough for the session view. File watching covers the live tail of a watched run.
 - The user does not need machine-sleep or power-loss coverage beyond crash recovery. A stopped machine stops work until a runner returns.
 
 ## Open questions
 
 - Which events deserve a chat message and which belong only in the widget. The default should be quiet.
-- The exact host command shape, for example `pi-workflows run --project <dir>` versus a subcommand under `controllers`.
+- The exact server command shape, for example `pi-workflows run --project <dir>` versus a subcommand under `controllers`.
 
 ## Departures from the decisions
 
@@ -89,7 +89,7 @@ The implementation matches the decisions above with these refinements:
 - Graph validation now allows outgoing edges from checkpoint nodes. The old
   rejection encoded terminal-forever checkpoints; continuations make those
   edges live. This is a deliberate contract change for workflow authors.
-- The host command is `pi-workflows server`, chosen over `run` because the
+- The server command is `pi-workflows server`, chosen over `run` because the
   viewer CLI's vocabulary already uses runs for bundles.
 - The first capture stays flat at `session/`; only binds from the second
   recorder onward write segments under `session/segments/`. This keeps the
@@ -97,24 +97,24 @@ The implementation matches the decisions above with these refinements:
 - Resume always starts unpaused; the operator can pause again.
 - Headless conversation children keep the exact tool contract: a bridge
   extension loaded with `-e` registers the `workflow` tool and reports
-  submissions to the host over stderr, so no engine prompt changes were
+  submissions to the server over stderr, so no engine prompt changes were
   needed.
-- The host accepts explicit `storeFile` and `runsDir` options. Its defaults
+- The server accepts explicit `storeFile` and `runsDir` options. Its defaults
   resolve from the project and environment like every other entry point.
 
 ## Acceptance criteria
 
-- Start a run in Pi, then close Pi while a conversation node is mid-response and the host is running. The host reclaims and resumes the run, and reopening Pi shows the catch-up snapshot and allows normal conversation about the result.
-- The same flow without the host: the run resumes at the interrupted node when Pi reopens and completes.
+- Start a run in Pi, then close Pi while a conversation node is mid-response and the server is running. The server reclaims and resumes the run, and reopening Pi shows the catch-up snapshot and allows normal conversation about the result.
+- The same flow without the server: the run resumes at the interrupted node when Pi reopens and completes.
 - A stalled runner that loses its claim cannot write to the bundle afterward; fencing rejects its writes.
-- An open session reflects host-driven progress within a few seconds. Two sessions on one project each get complete catch-up; neither starves the other.
+- An open session reflects server-driven progress within a few seconds. Two sessions on one project each get complete catch-up; neither starves the other.
 - A waiting-for-input run survives closing and reopening. Answering it starts a continuation run that carries forward prior outputs.
-- `kill -9` on the host mid-append, followed by a restart, repairs the torn trace tail and recovers without duplicate trace sequence numbers and without repeating an applied external effect. Orphaned RPC children are reaped.
+- `kill -9` on the server mid-append, followed by a restart, repairs the torn trace tail and recovers without duplicate trace sequence numbers and without repeating an applied external effect. Orphaned RPC children are reaped.
 - No changes to Pi core; the diff touches only this package.
 
 ## Verification
 
-- `npm run check` and `npm run test:e2e`, including new real-Pi E2E tests that start a run, kill the host, restart it, and assert continuation.
+- `npm run check` and `npm run test:e2e`, including new real-Pi E2E tests that start a run, kill the server, restart it, and assert continuation.
 - A fencing test with both runners alive and a forced lease loss.
 - A two-session watermark test on one project.
 - A `kill -9` mid-append torn-tail resume test.
@@ -122,4 +122,4 @@ The implementation matches the decisions above with these refinements:
 - Extension tests with fake timers for the polling loop, watermark, and snapshot catch-up.
 - `npx slophammer-ts@latest dry .` and the dependency-boundary check.
 - `npx -y @simpledoc/simpledoc check` for documentation changes.
-- Manual pass through both usage patterns from the user's request with the host in a terminal.
+- Manual pass through both usage patterns from the user's request with the server in a terminal.

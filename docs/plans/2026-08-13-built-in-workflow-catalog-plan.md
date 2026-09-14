@@ -16,7 +16,7 @@ A long-lived Pi process must never combine an old workflow engine with a new bui
 - Record a built-in revision and refuse resume when the loaded revision differs.
 - Keep project and global workflow files hot-reloadable and path-based.
 - Keep project and global workflows able to override a built-in by name.
-- Let the Pi extension and standalone host resolve the same stable reference.
+- Let the Pi extension and standalone server resolve the same stable reference.
 - Preserve existing nonterminal built-in runs through one bounded migration.
 - Remove old built-in file paths from active run bundles and queue records after migration.
 - Apply the design to all built-ins, not only the monitor.
@@ -38,7 +38,7 @@ This is a deliberate in-place change to the version 1 run-state and controller-s
 
 ## Architecture
 
-The workflow layer will define a generic `BuiltinWorkflowCatalog`. The built-ins layer will create the catalog from imported workflow definitions. The Pi extension and standalone host will receive or import that catalog and pass it to the generic resolver. The workflow engine will receive a resolved `WorkflowSource`; it will not know how built-ins were registered.
+The workflow layer will define a generic `BuiltinWorkflowCatalog`. The built-ins layer will create the catalog from imported workflow definitions. The Pi extension and standalone server will receive or import that catalog and pass it to the generic resolver. The workflow engine will receive a resolved `WorkflowSource`; it will not know how built-ins were registered.
 
 The catalog will:
 
@@ -51,7 +51,7 @@ The catalog will:
 
 ## Migration
 
-Migration runs before a session or host claims resumable workflow work.
+Migration runs before a session or server claims resumable workflow work.
 
 For each nonterminal run bundle:
 
@@ -75,7 +75,7 @@ It does not add runtime compatibility readers, aliases, dual-write fields, or a 
 - Starting `monitor` records `workflowSource.kind === "builtin"` and `id === "monitor"`.
 - No new built-in run records an installation path as its identity.
 - One process keeps its imported built-ins after files on disk change.
-- Source-loaded Pi and the distribution-loaded host resolve the same built-in reference and revision.
+- Source-loaded Pi and the distribution-loaded server resolve the same built-in reference and revision.
 - Project and global monitor overrides remain file sources and still reload.
 - A changed built-in revision parks or refuses resume with a clear source-change error.
 - Known existing nonterminal monitor runs migrate and resume.
@@ -94,4 +94,4 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 npx -y @simpledoc/simpledoc check
 ```
 
-Also test a source-loaded Pi extension, a distribution-loaded standalone host, a project override, a changed built-in revision, and a copied legacy nonterminal run bundle with its matching queue row. After OnurPi updates its immutable pin, start a fresh Pi RPC process and run the built-in monitor through its first check.
+Also test a source-loaded Pi extension, a distribution-loaded standalone server, a project override, a changed built-in revision, and a copied legacy nonterminal run bundle with its matching queue row. After OnurPi updates its immutable pin, start a fresh Pi RPC process and run the built-in monitor through its first check.

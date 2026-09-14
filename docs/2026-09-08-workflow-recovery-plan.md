@@ -28,7 +28,7 @@ Refactors must preserve these behaviors. General approval to simplify architectu
 
 This task saves the plan and corrects conflicting documentation in pi-workflows. It authorizes documentation validation, commit, and push only. It does not authorize implementation, live model calls, paid work, release, installation into active user profiles, live-run changes, database resets, or changes to other repositories.
 
-A later implementation should cover the existing host, message and request stores, Pi delivery coordinator, renderers, restart admission, follow-up ordering, recording, and tests. Keep the current exact-request checks, accepted receipts, source verification, worker ownership, active-time accounting, and interruption-recovery fixes.
+A later implementation should cover the existing server, message and request stores, Pi delivery coordinator, renderers, restart admission, follow-up ordering, recording, and tests. Keep the current exact-request checks, accepted receipts, source verification, worker ownership, active-time accounting, and interruption-recovery fixes.
 
 Do not introduce a second coordinator, separate recovery agent, new service, new database, parallel API version, embedded executor, or polling loop. Do not copy recovery nodes into every workflow. Do not change Pi core, private Pi APIs, or Pi session schemas. Existing workflow-specific repair steps remain useful and must not be removed merely because general recovery returns.
 
@@ -44,7 +44,7 @@ Inspect the old implementations and tests to recover intended behavior and edge 
 
 ## Selected design
 
-Use one explicit, bounded session recovery policy on the existing host-owned workflow message path. The host decides eligibility and commits durable transitions. The existing `WorkflowMessageCoordinator` delivers through public Pi APIs. The regular Pi model makes decisions that require judgment.
+Use one explicit, bounded session recovery policy on the existing server-owned workflow message path. The server decides eligibility and commits durable transitions. The existing `WorkflowMessageCoordinator` delivers through public Pi APIs. The regular Pi model makes decisions that require judgment.
 
 Workflow execution and session recovery are separate facts. A terminal run stays terminal while its result is explained or recovered from. A reporting failure cannot reverse execution, erase accepted work, or block cancellation. If more workflow execution is needed, use the appropriate existing command with a checked causal link to the original task.
 
@@ -74,7 +74,7 @@ Correct the same pending request where possible. Preserve accepted output and du
 
 Use a new start with corrected input only when the current commands cannot express the needed correction and existing permission covers the work. Bind every automatic recovery launch, including a corrected `start`, to its source terminal turn and original recovery chain. A change of workflow name or command must not bypass the recovery budget.
 
-Host admission must check the exact source outcome, current owned turn, execution revision where required, cancellation, unsettled effects, and available recovery budget. The model must also check the user's scope and action permission. An ownership token or recovery opportunity does not grant authority for spending, merge, release, deployment, or a different repository.
+Server admission must check the exact source outcome, current owned turn, execution revision where required, cancellation, unsettled effects, and available recovery budget. The model must also check the user's scope and action permission. An ownership token or recovery opportunity does not grant authority for spending, merge, release, deployment, or a different repository.
 
 If command or external-effect outcome is uncertain, inspect it through the responsible tools and existing receipts before retrying. Unknown state is a blocker, not evidence that nothing happened. Do not copy an approval to a changed proposal or repeat paid or destructive work on the strength of a prompt alone.
 
@@ -92,7 +92,7 @@ A queued follow-up waits for its successful source outcome and settlement of the
 
 ### Durable state and public API boundary
 
-Use existing run outcomes and ancestry, exact requests, message identities, turn reports, command receipts, and the content store. Settle turn completion, reminder eligibility, budget consumption, and required outgoing work through narrow host-owned transitions. Repeated reports must adopt the same transition instead of incrementing counters twice.
+Use existing run outcomes and ancestry, exact requests, message identities, turn reports, command receipts, and the content store. Settle turn completion, reminder eligibility, budget consumption, and required outgoing work through narrow server-owned transitions. Repeated reports must adopt the same transition instead of incrementing counters twice.
 
 First prove which policy and causal facts can be read from those records. If one is absent, add only the necessary durable metadata to the existing owner and its checked transition. Do not create another state store or mirror Pi's session history. Review the data model before adding fields. Keep version identifiers in place under the repository's alpha policy, and never reset live state as part of implementation or testing.
 
