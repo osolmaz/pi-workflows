@@ -1068,6 +1068,144 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("holds the session snapshot at its size when stored history reaches thousands", async () => {
+    const projectPath = await makeTempDir("long-history-project");
+    const databasePath = path.join(await makeTempDir("long-history-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    claimTestRun(queue, {
+      runId: "long-history-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "bounded" },
+      runnerId: "long-history",
+      claimToken: "claim-long-history",
+      leaseMs: 60_000,
+      originSessionId: "session-long-history",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("long-history-run", "claim-long-history"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "bounded" } }),
+    }).run(workflow, { task: "bounded" }, { runId: "long-history-run" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run("long-history-run");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run("long-history-run");
+    serverState.createInteractiveRequest({
+      requestId: "long-history-pending-source",
+      runId: "long-history-run",
+      attemptId,
+      targetSessionId: "session-long-history",
+      kind: "agent",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          requestId: "long-history-pending-source",
+          runId: "long-history-run",
+          workflowName: workflow.name,
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const encode = (session: unknown) =>
+      encodeProtocolLine({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "event",
+        subscriptionId: "long-history",
+        event: "session_snapshot",
+        revision: 1,
+        payload: session as never,
+      });
+    const current = views.session("session-long-history", null);
+    const pendingMessageId = current.workflowMessage?.workflowMessageId;
+    if (pendingMessageId === undefined) throw new Error("pending message missing");
+    const before = encode(current).byteLength;
+    // Two thousand delivered messages leave the stored history far above one frame.
+    const storedCount = 2_000;
+    const entries: Array<{ workflowMessageId: string; piSessionEntryId: string }> = [];
+    for (let index = 1; index <= storedCount; index += 1) {
+      const message = serverState.workflowMessages.create({
+        workflowMessageId: `long-history-message-${index}`,
+        runId: "long-history-run",
+        targetSessionId: "session-long-history",
+        kind: "terminal",
+        sourceId: `long-history-source-${index}`,
+        idempotencyKey: `long-history-message-${index}`,
+        content: {
+          schema: "pi-workflows.workflow-message-content.v1",
+          customType: "test-terminal",
+          content: `stored workflow message ${index}`,
+          display: false,
+          details: { note: `${index}` },
+          triggerTurn: false,
+        },
+        now: 1_700_000_000_000 + index,
+      });
+      entries.push({
+        workflowMessageId: message.workflowMessageId,
+        piSessionEntryId: `entry-${index}`,
+      });
+    }
+    serverState.workflowMessages.adoptBranch(
+      "session-long-history",
+      entries,
+      new Set(entries.map((entry) => entry.workflowMessageId)),
+    );
+    const reads = vi.spyOn(state, "readJson");
+    const selected = views.currentWorkflowMessage("session-long-history");
+    // Selection reads message metadata only, so a two-thousand-message history
+    // costs one content read for the one message Pi must act on.
+    expect(reads.mock.calls.length).toBe(1);
+    reads.mockRestore();
+    expect(selected?.workflowMessageId).toBe(pendingMessageId);
+    const grown = views.session("session-long-history", null);
+    expect(grown.workflowMessage?.workflowMessageId).toBe(pendingMessageId);
+    const after = encode(grown).byteLength;
+    // The frame carries current work, so stored history cannot make it grow. The
+    // measured frame is below 4 KiB with two thousand stored messages.
+    expect(after).toBeLessThanOrEqual(before + 64);
+    expect(after).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
+    expect(serverState.workflowMessages.listSession("session-long-history")).toHaveLength(
+      storedCount + 1,
+    );
+    // The complete history stays reachable through the bounded run page.
+    const page = views.page("long-history-run", { kind: "workflow_messages", cursor: 0 });
+    if (page === null) throw new Error("run page missing");
+    expect(page.workflowMessageTotal).toBe(storedCount + 1);
+    expect(Buffer.byteLength(canonicalJson(page.workflowMessages), "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    state.close();
+  }, 120_000);
+
   it("bounds the node window and its row text for a wide workflow", async () => {
     const projectPath = await makeTempDir("node-window-project");
     const databasePath = path.join(await makeTempDir("node-window-state"), "state.sqlite");
