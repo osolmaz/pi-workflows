@@ -4,7 +4,7 @@ Pi Workflows uses one live client protocol for the Pi extension, the TypeScript 
 
 The protocol ID is `pi-workflows.client.v1`. Its schema is [`protocol/client.v1.schema.json`](../protocol/client.v1.schema.json). TypeScript and Rust use the same valid and invalid fixture corpus.
 
-The server is the only process that reads or writes the active SQLite database. A client protocol or package-version mismatch does not mean that SQLite state is incompatible. The client stops and asks for matching `pi-workflows` and `piw` packages.
+The server is the only process that reads or writes the active SQLite database. A client protocol or package-version mismatch does not mean that SQLite state is incompatible. The client stops and names the running server process, and `pi-workflows server stop` or `pi-workflows server start` stops that process through the server lock file.
 
 ## Transports
 

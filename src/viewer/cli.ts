@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WorkflowClient } from "../client/client.js";
+import { WorkflowClient, WorkflowClientVersionError } from "../client/client.js";
 import { materializeRunView } from "../client/materialize.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
+import { serverLockPath, stopRecordedServer } from "../server/lock.js";
 import type { JsonValue } from "../state/json.js";
 import { verifyInactiveBackup } from "./backup.js";
 import { renderClientView, runViewer } from "./tui.js";
@@ -330,17 +331,57 @@ async function runServer(
   }
   const client = new WorkflowClient({ clientId: CLI_CLIENT_ID });
   try {
-    const response =
-      action === "start"
-        ? await client.ensureRunning()
-        : await client.request({
-            operation: action === "status" ? "server.status" : "server.stop",
-          });
-    process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
-    return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
+    try {
+      return await requestServerAction(client, action);
+    } catch (error) {
+      if (!(error instanceof WorkflowClientVersionError) || action === "status") throw error;
+      const stopped = await stopMismatchedServer(client, action);
+      if (stopped === undefined) throw error;
+      return stopped;
+    }
   } finally {
     await client.close();
   }
+}
+
+async function requestServerAction(
+  client: WorkflowClient,
+  action: "start" | "status" | "stop",
+): Promise<number> {
+  const response =
+    action === "start"
+      ? await client.ensureRunning()
+      : await client.request({
+          operation: action === "status" ? "server.status" : "server.stop",
+        });
+  process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
+  return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
+}
+
+/**
+ * A server from another package version refuses every request, including its own stop.
+ * The lock file names that process, so this path stops the recorded server and then
+ * repeats the requested action against a matching one.
+ */
+async function stopMismatchedServer(
+  client: WorkflowClient,
+  action: "start" | "stop",
+): Promise<number | undefined> {
+  const stopped = await stopRecordedServer(serverLockPath(client.databasePath));
+  if (stopped === undefined) return undefined;
+  process.stderr.write(
+    `Stopped the workflow server recorded in the lock file (PID ${stopped.pid}, server ${stopped.serverId}).\n`,
+  );
+  if (!stopped.exited) {
+    throw new Error(`The workflow server process ${stopped.pid} did not stop`);
+  }
+  if (action === "stop") {
+    process.stdout.write(
+      `${JSON.stringify({ stoppedPid: stopped.pid, forced: stopped.forced })}\n`,
+    );
+    return 0;
+  }
+  return await requestServerAction(client, "start");
 }
 
 async function firstRunsView(client: WorkflowClient): Promise<JsonValue> {

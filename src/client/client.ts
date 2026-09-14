@@ -599,7 +599,7 @@ export class WorkflowClient {
               throw new Error("Workflow server did not send hello first");
             if (message.packageVersion !== CLIENT_PACKAGE_VERSION) {
               throw new WorkflowClientVersionError(
-                `Workflow client version mismatch: server ${message.packageVersion}, client ${CLIENT_PACKAGE_VERSION}. Install matching pi-workflows and piw packages.`,
+                `Workflow client version mismatch: server ${message.packageVersion}, client ${CLIENT_PACKAGE_VERSION}. The running workflow server process is from another version. Run "pi-workflows server stop" and retry.`,
               );
             }
             receivedHello = true;

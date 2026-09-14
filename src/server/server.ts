@@ -109,6 +109,7 @@ import {
   type ChannelEffectRecord,
 } from "./channel-effects.js";
 import { ChannelAdapterSupervisor } from "./channel-supervisor.js";
+import { isServerLockRecord, writeServerLock } from "./lock.js";
 import {
   ServerProcessRegistry,
   matchesProcessIdentity,
@@ -5018,7 +5019,8 @@ export class WorkflowServer {
   private releaseLock(): void {
     try {
       const current = JSON.parse(fs.readFileSync(this.lockPath, "utf8")) as unknown;
-      if (isLockRecord(current) && current.serverId === this.serverId) fs.rmSync(this.lockPath);
+      if (isServerLockRecord(current) && current.serverId === this.serverId)
+        fs.rmSync(this.lockPath);
     } catch {
       // The lock is already gone.
     }
@@ -5126,7 +5128,7 @@ function acquireServerLock(
 ): void {
   try {
     const existing = JSON.parse(fs.readFileSync(lockPath, "utf8")) as unknown;
-    if (isLockRecord(existing) && matchesProcessIdentity(existing)) {
+    if (isServerLockRecord(existing) && matchesProcessIdentity(existing)) {
       throw new Error(`A workflow server is already running with PID ${existing.pid}`);
     }
     fs.rmSync(lockPath, { force: true });
@@ -5134,11 +5136,7 @@ function acquireServerLock(
     if (error instanceof Error && error.message.startsWith("A workflow server is already"))
       throw error;
   }
-  fs.writeFileSync(
-    lockPath,
-    `${JSON.stringify({ schema: "pi-workflows.server-lock.v1", ...record })}\n`,
-    { encoding: "utf8", mode: 0o600, flag: "wx" },
-  );
+  writeServerLock(lockPath, record);
 }
 
 function runnerRunCommand(
@@ -5498,17 +5496,4 @@ function runtimePackageVersion(): string {
     throw new Error("Package version is missing");
   }
   return parsed.version;
-}
-
-function isLockRecord(
-  value: unknown,
-): value is { schema: string; pid: number; startIdentity: string; serverId: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { schema?: unknown }).schema === "pi-workflows.server-lock.v1" &&
-    typeof (value as { pid?: unknown }).pid === "number" &&
-    typeof (value as { startIdentity?: unknown }).startIdentity === "string" &&
-    typeof (value as { serverId?: unknown }).serverId === "string"
-  );
 }
