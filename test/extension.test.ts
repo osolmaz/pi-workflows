@@ -1990,6 +1990,31 @@ export default defineResourceManager({
     expect(cursors).toEqual([4]);
   }, 60_000);
 
+  it("pages back to a window it already loaded", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+    const view = new SessionWorkflowView();
+    const cursors: Array<number | null> = [];
+    view.setNodePager((cursor) => {
+      cursors.push(cursor);
+    });
+    const loaded = widgetSessionSnapshot(1, "running", "publish", 1);
+    if (loaded.run === null) throw new Error("run missing");
+    const window = { ...loaded.run, nodes: loaded.run.nodes.slice(0, 1), nodeTotal: 4 };
+    const first = { ...window, nodeStart: 0 };
+    const second = { ...window, nodeStart: 1 };
+    view.update({ ...loaded, run: first }, fake.ctx);
+    view.scrollDown(fake.ctx);
+    expect(cursors).toEqual([1]);
+    view.update({ ...loaded, run: second }, fake.ctx);
+    view.scrollUp(fake.ctx);
+    expect(cursors).toEqual([1, 0]);
+    view.update({ ...loaded, run: first }, fake.ctx);
+    view.scrollDown(fake.ctx);
+    // The same edge asks again after the window it asked for arrived.
+    expect(cursors).toEqual([1, 0, 1]);
+  }, 60_000);
+
   it("binds the configured scroll key to the widget window and shows the same keys", async () => {
     const { cwd } = await setupProject();
     await writeShortcutsConfig({ scrollUp: "ctrl+alt+up", scrollDown: "ctrl+alt+down" });
