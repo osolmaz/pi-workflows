@@ -236,7 +236,7 @@ A checkpoint inside a child uses the normal continuation behavior and resumes at
 
 ### Reports and presentation
 
-Notify nodes and updates keep qualified node identities. Only the root workflow produces final `presentationPrompt` output. A child's `presentationPrompt` applies when the child runs alone and is ignored when included. An agent with `expectedOutput: assistantMessage()` is part of the graph, so its normal assistant response remains visible when included. The parent continues only after that turn settles.
+Notify nodes and updates keep qualified node identities. An agent with `expectedOutput: assistantMessage()` is part of the graph, so its normal assistant response remains visible when included. The parent continues only after that turn settles.
 
 ## Persistence
 
