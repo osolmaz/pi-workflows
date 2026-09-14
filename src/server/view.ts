@@ -107,10 +107,18 @@ export class ServerViewStore {
   // The selection walk reads message metadata in the durable order of each step, and
   // a session whose messages did not change keeps the same answer. The memo below
   // holds that answer under a key of cheap indexed facts, so a periodic view call
-  // over a long history costs the key instead of the history.
+  // over a long history costs the key instead of the history. It carries the same
+  // item bound as the view caches, so its size follows the viewed sessions and not
+  // the number of sessions the server has ever seen.
   private readonly selectionCache = new Map<
     string,
-    { key: string; message: WorkflowMessageSummary | undefined }
+    {
+      key: string;
+      message: WorkflowMessageSummary | undefined;
+      retentionKnown: boolean;
+      retainedRunId: string | undefined;
+      retainedExpiresAt: number | null;
+    }
   >();
   private contentBytes = 0;
   private activityRevision = 0;
@@ -387,7 +395,7 @@ export class ServerViewStore {
     return this.state.readTransaction(() => {
       const activeQueue = this.queue.findSessionReservationView(sessionId);
       const retainedRunId =
-        activeQueue === undefined ? this.retainedTerminalRunId(sessionId) : undefined;
+        activeQueue === undefined ? this.retainedTerminalRunIdForView(sessionId) : undefined;
       const runId = activeQueue?.runId ?? retainedRunId;
       // Selection is one metadata read. The key must name the exact message,
       // because a status or entry change can land in the same millisecond as the
@@ -450,19 +458,79 @@ export class ServerViewStore {
    */
   /** The one workflow message Pi must inspect, add, finish, or confirm next. */
   private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
+    return this.sessionSelection(sessionId, false).message;
+  }
+
+  /** The retained terminal run the session view shows, or undefined. */
+  private retainedTerminalRunIdForView(sessionId: string): string | undefined {
+    return this.sessionSelection(sessionId, true).retainedRunId;
+  }
+
+  /**
+   * The selection and the retained terminal run of one session, held under the
+   * indexed facts both depend on. The held result follows the item bound of the
+   * view caches, so viewing many sessions cannot grow this map without limit, and a
+   * repeat call over a session whose messages did not change reads no message row.
+   */
+  private sessionSelection(
+    sessionId: string,
+    wantRetention: boolean,
+  ): { message: WorkflowMessageSummary | undefined; retainedRunId: string | undefined } {
+    const now = Date.now();
     const key = this.selectionKey(sessionId);
     const cached = this.selectionCache.get(sessionId);
     if (
       cached !== undefined &&
       cached.key === key &&
-      (cached.message === undefined || this.retentionStillHolds(cached.message))
+      this.selectionHolds(cached, now, wantRetention)
     ) {
-      return cached.message;
+      refreshCacheEntry(this.selectionCache, sessionId, cached);
+      return cached;
     }
-    const message = this.selectWorkflowMessageSummary(sessionId);
-    this.selectionCache.delete(sessionId);
-    this.selectionCache.set(sessionId, { key, message });
-    return message;
+    // The retention walk runs at most once per computation, and only when the view
+    // needs it or the selection falls through to its retained terminal step.
+    let retained: { runId: string; expiresAt: number | null } | undefined;
+    let retentionKnown = false;
+    const retention = () => {
+      if (!retentionKnown) {
+        retentionKnown = true;
+        retained = this.retainedTerminalForView(sessionId, now);
+      }
+      return retained;
+    };
+    const message = this.selectWorkflowMessageSummary(sessionId, retention);
+    if (wantRetention) retention();
+    const entry = {
+      key,
+      message,
+      retentionKnown,
+      retainedRunId: retained?.runId,
+      retainedExpiresAt: retained?.expiresAt ?? null,
+    };
+    rememberCacheEntry(this.selectionCache, sessionId, entry);
+    return entry;
+  }
+
+  /**
+   * Whether a held selection still answers this session. A message inside the
+   * terminal retention window and a retained run both expire with the clock, not
+   * with a stored write, so both are checked before the result is reused.
+   */
+  private selectionHolds(
+    entry: {
+      message: WorkflowMessageSummary | undefined;
+      retentionKnown: boolean;
+      retainedRunId: string | undefined;
+      retainedExpiresAt: number | null;
+    },
+    now: number,
+    wantRetention: boolean,
+  ): boolean {
+    if (wantRetention && !entry.retentionKnown) return false;
+    if (entry.retainedRunId !== undefined && entry.retainedExpiresAt !== null) {
+      if (entry.retainedExpiresAt <= now) return false;
+    }
+    return entry.message === undefined || this.retentionStillHolds(entry.message, now);
   }
 
   /**
@@ -515,7 +583,10 @@ export class ServerViewStore {
   }
 
   /** Walk the session message metadata for the one message Pi must act on. */
-  private selectWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
+  private selectWorkflowMessageSummary(
+    sessionId: string,
+    retention: () => { runId: string } | undefined,
+  ): WorkflowMessageSummary | undefined {
     const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
     if (openTurn !== undefined) {
       const open = this.workflowMessages.readSessionSummary(sessionId, openTurn.workflowMessageId);
@@ -551,7 +622,7 @@ export class ServerViewStore {
       return message;
     }
     // A retained terminal message stays current until its delivery or first turn finishes.
-    const retainedRunId = this.retainedTerminalRunId(sessionId);
+    const retainedRunId = retention()?.runId;
     if (retainedRunId !== undefined) {
       return this.workflowMessages.readSessionSummaryByRun(sessionId, retainedRunId, "terminal");
     }
@@ -1102,7 +1173,20 @@ export class ServerViewStore {
     // reconciled from the Pi branch after the next coordinator connects.
   }
 
+  /** The retained terminal run of one session, if the session view shows one. */
   private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
+    return this.retainedTerminalForView(sessionId, now)?.runId;
+  }
+
+  /**
+   * The retained terminal run of one session, with the moment its retention window
+   * closes. A run kept by a waiting message or a triggering turn has no such moment,
+   * because its state and not the clock holds it.
+   */
+  private retainedTerminalForView(
+    sessionId: string,
+    now: number,
+  ): { runId: string; expiresAt: number | null } | undefined {
     // The walk reads bounded batches of retained terminal metadata, newest first,
     // and stops at the first retained run. Its candidate filter excludes every
     // terminal message whose retention window has passed.
@@ -1132,17 +1216,18 @@ export class ServerViewStore {
       ) {
         continue;
       }
-      if (message.status === "pending") return message.runId;
+      if (message.status === "pending") return { runId: message.runId, expiresAt: null };
       if (message.status !== "sent") continue;
       const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
       if (
         message.triggerTurn &&
         !recoveryStopped(this.state, message.workflowMessageId) &&
         (turn === undefined || turn.state === "started")
-      )
-        return message.runId;
-      if (Date.parse(turn?.endedAt ?? message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now)
-        return message.runId;
+      ) {
+        return { runId: message.runId, expiresAt: null };
+      }
+      const expiresAt = Date.parse(turn?.endedAt ?? message.updatedAt) + TERMINAL_VIEW_RETENTION_MS;
+      if (expiresAt > now) return { runId: message.runId, expiresAt };
     }
     return undefined;
   }

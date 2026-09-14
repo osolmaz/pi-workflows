@@ -2036,6 +2036,38 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("holds the selection result for the sessions it viewed, not for every session it saw", async () => {
+    const projectPath = await makeTempDir("memo-bound-project");
+    const databasePath = path.join(await makeTempDir("memo-bound-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const runs = new WorkflowRunStore(databasePath, { state, authorityProvider: () => undefined });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    // The held selection carries the same item bound as the view caches.
+    const heldItems = 64;
+    const sessionIds = Array.from({ length: heldItems + 1 }, (_, index) => `session-memo-${index}`);
+    const batches = vi.spyOn(serverState.workflowMessages, "listSessionSummaryBatch");
+    for (const sessionId of sessionIds) views.session(sessionId, null);
+    // A session above the bound walked its messages again after it fell out.
+    batches.mockClear();
+    views.session(sessionIds[0] ?? "", null);
+    expect(batches.mock.calls.length).toBeGreaterThan(0);
+    // A session inside the bound reused its held result and read no message row.
+    batches.mockClear();
+    views.session(sessionIds.at(-1) ?? "", null);
+    expect(batches).not.toHaveBeenCalled();
+    batches.mockRestore();
+    state.close();
+  }, 60_000);
+
   it("keeps one progress record per key however often one key publishes", async () => {
     const projectPath = await makeTempDir("progress-keys-project");
     const databasePath = path.join(await makeTempDir("progress-keys-state"), "state.sqlite");

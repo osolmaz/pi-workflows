@@ -863,3 +863,22 @@ identifies state is left out when it cannot travel in a bounded frame. The sched
 out under the same rule, and the stored record stays reachable through the update page. The test
 asserts the schedule is absent, the widest legal key is present in full, and the stored schedule
 records still count three.
+
+### The held selection follows the view cache bound
+
+The held selection result was an unbounded map, so its size followed every session the server had
+ever shown and not the sessions a client views. It now uses the same insert and bound helper as the
+other view caches, so it holds at most 64 sessions and drops the least recently used entry.
+
+The same bound made the retained terminal lookup cheap to keep. `session()` reads the retained
+terminal run of a session that holds no reservation, and that read was outside the held result, so it
+ran on every call. The held entry now carries the retained run, the moment its window closes, and
+whether that value was computed at all. The retained run is read at most once per computation and
+only when the view needs it or the selection falls through to its retained message step. A run kept
+by a waiting message or a triggering turn carries no closing moment, because its state holds it and
+not the clock.
+
+`test/server-view.test.ts` "holds the selection result for the sessions it viewed, not for every
+session it saw" views 65 sessions and asserts that the first session reads its messages again while
+the newest reuses its held result. Without the shared bound the first session keeps its entry and the
+test fails.
