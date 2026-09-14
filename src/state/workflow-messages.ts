@@ -12,6 +12,70 @@ export type WorkflowStepReason = "initial" | "resumed" | "reminder";
 export type WorkflowTurnState = "started" | "ended";
 export type WorkflowTurnStopReason = "completed" | "aborted" | "error" | "lost";
 
+/**
+ * Named candidate filters for the session message walk. Each filter is a superset
+ * of the rows one selection step can use, so the walk never reads rows that step
+ * must skip and the caller still applies the exact rule to every row it receives.
+ */
+export type SessionSummaryFilter =
+  | "any"
+  | "eligiblePending"
+  | "piWork"
+  | "cancelledStep"
+  | "retainedTerminal";
+
+const SESSION_SUMMARY_FILTERS = {
+  // A waiting message the session view can still show: a decision request that
+  // waits, a step whose run is not paused, or a message the view always shows.
+  eligiblePending: `
+    (m.kind = 'step' AND EXISTS (
+       SELECT 1 FROM interactive_requests i JOIN runs r ON r.run_id = i.run_id
+       WHERE i.request_id = m.source_id AND i.run_id = m.run_id
+         AND i.status = 'pending' AND r.paused = 0))
+    OR (m.kind = 'decision' AND EXISTS (
+       SELECT 1 FROM interactive_requests i
+       WHERE i.request_id = m.source_id AND i.run_id = m.run_id AND i.status = 'pending'))
+    OR m.kind IN ('notification', 'terminal', 'followUp')`,
+  // A delivered message Pi still owes work for: a step whose request waits, or a
+  // follow-up or model-triggering terminal message whose latest turn is started.
+  piWork: `
+    (m.kind = 'step' AND EXISTS (
+       SELECT 1 FROM interactive_requests i JOIN runs r ON r.run_id = i.run_id
+       WHERE i.request_id = m.source_id AND i.status = 'pending' AND r.paused = 0))
+    OR (
+      (m.kind = 'followUp' OR (m.kind = 'terminal' AND m.trigger_turn = 1))
+      AND (
+        NOT EXISTS (
+          SELECT 1 FROM workflow_turns t WHERE t.workflow_message_id = m.workflow_message_id)
+        OR (SELECT t.state FROM workflow_turns t
+            WHERE t.workflow_message_id = m.workflow_message_id
+            ORDER BY t.started_at DESC LIMIT 1) = 'started'
+      )
+    )`,
+  // A delivered step whose request is cancelled, which Pi still holds.
+  cancelledStep: `
+    m.kind = 'step'
+    AND EXISTS (
+      SELECT 1 FROM interactive_requests i
+      WHERE i.request_id = m.source_id AND i.run_id = m.run_id AND i.status = 'cancelled')
+    AND NOT EXISTS (
+      SELECT 1 FROM workflow_turns t WHERE t.workflow_message_id = m.workflow_message_id)`,
+  // A terminal message whose run may still be worth showing: it waits, it triggers
+  // a turn, or its latest turn or write is inside the retention window.
+  retainedTerminal: `
+    m.kind = 'terminal' AND (
+      m.status = 'pending'
+      OR (m.status = 'sent' AND (
+        m.trigger_turn = 1
+        OR m.updated_at >= ?
+        OR EXISTS (
+          SELECT 1 FROM workflow_turns t
+          WHERE t.workflow_message_id = m.workflow_message_id
+            AND t.ended_at IS NOT NULL AND t.ended_at >= ?)
+      ))
+    )`,
+} as const satisfies Record<Exclude<SessionSummaryFilter, "any">, string>;
+
 export type WorkflowMessageContent = {
   schema: typeof WORKFLOW_MESSAGE_CONTENT_SCHEMA;
   customType: string;
@@ -195,13 +259,17 @@ export class WorkflowMessageStore {
   /**
    * A bounded metadata batch of one session's messages in one status, without
    * content. The caller walks batches in the order it needs, so a long session
-   * history never loads into memory at once.
+   * history never loads into memory at once. A named candidate filter keeps rows
+   * that no selection step can use out of the walk, so the walk costs the position
+   * of the answer instead of the size of the history.
    */
   listSessionSummaryBatch(
     targetSessionId: string,
     options: {
       status: string | null;
       kind?: string;
+      filter?: SessionSummaryFilter;
+      cutoff?: number;
       newestFirst?: boolean;
       lastOrder?: number;
       limit: number;
@@ -209,27 +277,35 @@ export class WorkflowMessageStore {
   ): WorkflowMessageSummary[] {
     if (options.limit <= 0) return [];
     const newestFirst = options.newestFirst === true;
+    const params: unknown[] = [targetSessionId, options.status, options.status];
+    let filter = "";
+    if (options.filter !== undefined && options.filter !== "any") {
+      filter = ` AND (${SESSION_SUMMARY_FILTERS[options.filter]})`;
+      if (options.filter === "retainedTerminal") {
+        const cutoff = options.cutoff ?? 0;
+        params.push(cutoff, cutoff);
+      }
+    }
     const rows = this.state.connection
       .prepare(
-        `SELECT workflow_message_id AS workflowMessageId, run_id AS runId,
-                target_session_id AS targetSessionId, kind, source_id AS sourceId,
-                content_hash AS contentHash, trigger_turn AS triggerTurn,
-                order_number AS orderNumber, status,
-                pi_session_entry_id AS piSessionEntryId, created_at AS createdAt,
-                updated_at AS updatedAt
-         FROM workflow_messages
-         WHERE target_session_id = ? AND (? IS NULL OR status = ?)
-           AND order_number ${newestFirst ? "<" : ">"} ?
-           AND (? IS NULL OR kind = ?)
-         ORDER BY order_number ${newestFirst ? "DESC" : "ASC"} LIMIT ?`,
+        `SELECT m.workflow_message_id AS workflowMessageId, m.run_id AS runId,
+                m.target_session_id AS targetSessionId, m.kind, m.source_id AS sourceId,
+                m.content_hash AS contentHash, m.trigger_turn AS triggerTurn,
+                m.order_number AS orderNumber, m.status,
+                m.pi_session_entry_id AS piSessionEntryId, m.created_at AS createdAt,
+                m.updated_at AS updatedAt
+         FROM workflow_messages m
+         WHERE m.target_session_id = ? AND (? IS NULL OR m.status = ?)
+           AND m.order_number ${newestFirst ? "<" : ">"} ?
+           AND (? IS NULL OR m.kind = ?)${filter}
+         ORDER BY m.order_number ${newestFirst ? "DESC" : "ASC"} LIMIT ?`,
       )
       .all(
-        targetSessionId,
-        options.status,
-        options.status,
+        ...params.slice(0, 3),
         options.lastOrder ?? (newestFirst ? Number.MAX_SAFE_INTEGER : -1),
         options.kind ?? null,
         options.kind ?? null,
+        ...params.slice(3),
         options.limit,
       );
     return rows.filter(isWorkflowMessageRow).map((row) => this.mapMessageSummary(row));

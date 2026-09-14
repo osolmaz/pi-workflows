@@ -21,6 +21,7 @@ import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import {
   WorkflowMessageStore,
+  type SessionSummaryFilter,
   type WorkflowMessage,
   type WorkflowMessageSummary,
 } from "../state/workflow-messages.js";
@@ -29,6 +30,7 @@ import type {
   WorkflowRunQueueRecord,
   WorkflowRunQueueViewRecord,
 } from "../workflows/queue.js";
+import { NODE_ID_MAX_BYTES } from "../workflows/schema.js";
 import type { WorkflowRunDisplayState, WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowRunState,
@@ -102,6 +104,14 @@ export class ServerViewStore {
   private readonly listCache = new Map<string, { revision: string; page: WorkflowRunListPage }>();
   private readonly runCache = new Map<string, { version: string; view: WorkflowRunView | null }>();
   private readonly sessionCache = new Map<string, { version: string; view: WorkflowSessionView }>();
+  // The selection walk reads message metadata in the durable order of each step, and
+  // a session whose messages did not change keeps the same answer. The memo below
+  // holds that answer under a key of cheap indexed facts, so a periodic view call
+  // over a long history costs the key instead of the history.
+  private readonly selectionCache = new Map<
+    string,
+    { key: string; message: WorkflowMessageSummary | undefined }
+  >();
   private contentBytes = 0;
   private activityRevision = 0;
   private readonly workflowMessages: WorkflowMessageStore;
@@ -438,24 +448,85 @@ export class ServerViewStore {
    * Selection reads message metadata only. Content loads once, for the message
    * the session must act on.
    */
+  /** The one workflow message Pi must inspect, add, finish, or confirm next. */
   private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
+    const key = this.selectionKey(sessionId);
+    const cached = this.selectionCache.get(sessionId);
+    if (cached !== undefined && cached.key === key) return cached.message;
+    const message = this.selectWorkflowMessageSummary(sessionId);
+    this.selectionCache.delete(sessionId);
+    this.selectionCache.set(sessionId, { key, message });
+    return message;
+  }
+
+  /**
+   * The indexed facts the selection depends on: the message revision the database
+   * maintains, the run and request revisions, the state of the session runs, and the
+   * open turns of the session.
+   */
+  private selectionKey(sessionId: string): string {
+    return [
+      this.sessionMessageRevision(sessionId),
+      this.workflowActivityRevision(),
+      this.pendingSessionRevision(sessionId),
+      this.openTurnRevision(sessionId),
+      this.sessionRunsRevision(sessionId),
+    ].join("|");
+  }
+
+  /**
+   * The count and state of the session runs. Eligibility also depends on whether a
+   * run is paused and whether its status is terminal, so the selection key covers
+   * those facts without reading any message.
+   */
+  private sessionRunsRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS runs,
+                coalesce(sum(CASE WHEN r.paused = 1 THEN 1 ELSE 0 END), 0) AS paused,
+                coalesce(sum(CASE WHEN r.status IN ('queued', 'running', 'waiting') THEN 1 ELSE 0 END), 0) AS live
+         FROM run_bindings b JOIN runs r ON r.run_id = b.run_id
+         WHERE b.origin_session_id = ?`,
+      )
+      .get(sessionId);
+    return isObjectRecord(row) &&
+      typeof row.runs === "number" &&
+      typeof row.paused === "number" &&
+      typeof row.live === "number"
+      ? `${row.runs}:${row.paused}:${row.live}`
+      : "-";
+  }
+
+  /** Walk the session message metadata for the one message Pi must act on. */
+  private selectWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
     const openTurn = this.workflowMessages.openTurnsForSession(sessionId)[0];
     if (openTurn !== undefined) {
       const open = this.workflowMessages.readSessionSummary(sessionId, openTurn.workflowMessageId);
       if (open !== undefined) return open;
     }
     // Selection walks one bounded batch of metadata at a time, in the order each
-    // step needs, so a long session history never loads into memory at once. A
-    // step stops at the first message that satisfies it, so the walk costs no more
-    // than the position of the answer.
-    for (const message of this.walkSessionSummaries(sessionId, "pending", false)) {
+    // step needs. Each step names the candidate filter it can use, so it never
+    // reads a row it must skip and it stops at the first message it needs.
+    for (const message of this.walkSessionSummaries(sessionId, {
+      status: "pending",
+      newestFirst: false,
+      filter: "eligiblePending",
+    })) {
       if (this.isMessageEligible(message)) return message;
     }
-    for (const message of this.walkSessionSummaries(sessionId, "sent", true)) {
+    for (const message of this.walkSessionSummaries(sessionId, {
+      status: "sent",
+      newestFirst: true,
+      filter: "piWork",
+    })) {
       if (!this.needsPiWork(message)) continue;
       return message;
     }
-    for (const message of this.walkSessionSummaries(sessionId, "sent", true)) {
+    for (const message of this.walkSessionSummaries(sessionId, {
+      status: "sent",
+      newestFirst: true,
+      filter: "cancelledStep",
+    })) {
       if (message.kind !== "step" || !this.hasCancelledSource(message)) continue;
       if (this.workflowMessages.latestTurnForMessage(message.workflowMessageId) !== undefined) {
         continue;
@@ -472,20 +543,27 @@ export class ServerViewStore {
 
   /**
    * Walk one session's message metadata in bounded batches, in durable order or
-   * newest first. The caller stops at the first message it needs.
+   * newest first, with the named candidate filter for that step. The caller stops
+   * at the first message it needs.
    */
   private *walkSessionSummaries(
     sessionId: string,
-    status: string | null,
-    newestFirst: boolean,
-    kind?: string,
+    options: {
+      status: string | null;
+      newestFirst: boolean;
+      kind?: string;
+      filter?: SessionSummaryFilter;
+      cutoff?: number;
+    },
   ): Generator<WorkflowMessageSummary> {
     let lastOrder: number | undefined;
     for (;;) {
       const batch = this.workflowMessages.listSessionSummaryBatch(sessionId, {
-        status,
-        newestFirst,
-        ...(kind === undefined ? {} : { kind }),
+        status: options.status,
+        newestFirst: options.newestFirst,
+        ...(options.kind === undefined ? {} : { kind: options.kind }),
+        ...(options.filter === undefined ? {} : { filter: options.filter }),
+        ...(options.cutoff === undefined ? {} : { cutoff: options.cutoff }),
         ...(lastOrder === undefined ? {} : { lastOrder }),
         limit: SESSION_MESSAGE_BATCH,
       });
@@ -537,16 +615,20 @@ export class ServerViewStore {
     };
   }
 
+  /**
+   * The number of message writes this session has seen. The database maintains it,
+   * so the session view cache key notices every insert, update, and delete without
+   * reading the session's stored messages.
+   */
   private sessionMessageRevision(sessionId: string): string {
     const row = this.state.connection
-      .prepare(
-        `SELECT count(*) AS count, COALESCE(max(updated_at), 0) AS updatedAt,
-                COALESCE(sum(order_number), 0) AS orderSum
-         FROM workflow_messages WHERE target_session_id = ?`,
-      )
+      .prepare("SELECT revision FROM session_message_revisions WHERE target_session_id = ?")
       .get(sessionId);
-    if (!isObjectRecord(row)) throw new Error("Session message revision is invalid");
-    return `${row.count}:${row.updatedAt}:${row.orderSum}`;
+    if (row === undefined) return "0";
+    if (!isObjectRecord(row) || typeof row.revision !== "number") {
+      throw new Error("Session message revision is invalid");
+    }
+    return `${row.revision}`;
   }
 
   private openTurnRevision(sessionId: string): string {
@@ -753,6 +835,7 @@ export class ServerViewStore {
         )
         .run(sessionId, retained, now);
       this.sessionCache.delete(sessionId);
+      this.selectionCache.delete(sessionId);
       return retained;
     });
   }
@@ -856,7 +939,7 @@ export class ServerViewStore {
     // node entry cannot exceed the page budget on its own. The complete definition
     // stays reachable through the content reference below.
     const nodeEntries = allNodeEntries.filter(
-      ([nodeId]) => Buffer.byteLength(nodeId, "utf8") <= SESSION_TEXT_BYTES,
+      ([nodeId]) => Buffer.byteLength(nodeId, "utf8") <= NODE_ID_MAX_BYTES,
     );
     const boundedNodeEntries = byteBoundedForwardPage(nodeEntries, ([nodeId, node]) => [
       nodeId,
@@ -1003,9 +1086,17 @@ export class ServerViewStore {
   }
 
   private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
-    // The walk reads bounded batches of terminal message metadata, newest first,
-    // and stops at the first retained run.
-    for (const message of this.walkSessionSummaries(sessionId, null, true, "terminal")) {
+    // The walk reads bounded batches of retained terminal metadata, newest first,
+    // and stops at the first retained run. Its candidate filter excludes every
+    // terminal message whose retention window has passed.
+    const cutoff = now - TERMINAL_VIEW_RETENTION_MS;
+    for (const message of this.walkSessionSummaries(sessionId, {
+      status: null,
+      newestFirst: true,
+      kind: "terminal",
+      filter: "retainedTerminal",
+      cutoff,
+    })) {
       const run = this.state.connection
         .prepare("SELECT status FROM runs WHERE run_id = ?")
         .get(message.runId);
@@ -1184,14 +1275,23 @@ export class ServerViewStore {
     return undefined;
   }
 
-  private workflowActivityRevision(): string {
-    const row = this.state.connection
-      .prepare(
-        `SELECT
-           COALESCE((SELECT max(updated_at) FROM workflow_messages), 0) AS messageUpdatedAt,
-           COALESCE((SELECT max(COALESCE(ended_at, started_at)) FROM workflow_turns), 0) AS turnUpdatedAt`,
-      )
-      .get();
+  private workflowActivityRevision(runId?: string): string {
+    const row =
+      runId === undefined
+        ? this.state.connection
+            .prepare(
+              `SELECT
+                 COALESCE((SELECT max(updated_at) FROM workflow_messages), 0) AS messageUpdatedAt,
+                 COALESCE((SELECT max(COALESCE(ended_at, started_at)) FROM workflow_turns), 0) AS turnUpdatedAt`,
+            )
+            .get()
+        : this.state.connection
+            .prepare(
+              `SELECT
+                 COALESCE((SELECT max(updated_at) FROM workflow_messages WHERE run_id = ?), 0) AS messageUpdatedAt,
+                 COALESCE((SELECT max(COALESCE(ended_at, started_at)) FROM workflow_turns WHERE run_id = ?), 0) AS turnUpdatedAt`,
+            )
+            .get(runId, runId);
     return isObjectRecord(row) &&
       typeof row.messageUpdatedAt === "number" &&
       typeof row.turnUpdatedAt === "number"
@@ -1282,7 +1382,7 @@ export class ServerViewStore {
       row.presentationRevision,
       row.runStatus,
       row.paused,
-      this.workflowActivityRevision(),
+      this.workflowActivityRevision(runId),
       this.hasLiveRunner(runId),
       this.hasActivity(runId),
       this.pendingRequestKind(runId),
@@ -1841,7 +1941,7 @@ function boundSessionText(value: string): string {
  */
 function boundSessionNodeId(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
-  return Buffer.byteLength(canonicalJson(value), "utf8") > VIEW_PAGE_BYTES ? null : value;
+  return Buffer.byteLength(canonicalJson(value), "utf8") > NODE_ID_MAX_BYTES ? null : value;
 }
 
 /** One JSON detail, or null when the detail is too large for the session frame. */
