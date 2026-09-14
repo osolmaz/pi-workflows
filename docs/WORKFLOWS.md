@@ -12,6 +12,10 @@ step contract before submitting an agent result. Report worktree creation or
 implementation progress only after the corresponding recorded steps succeed.
 The status view distinguishes unconfirmed step delivery, active agent work,
 required results, and a durable pause. Waiting uses a different glyph from pause.
+A Pi session holds at most one active interactive run. A start call for a
+session whose reservation is taken fails with the identity of the active run;
+wait for that run, inspect it, or cancel it first. A headless run does not take
+the session reservation, so it can run beside an interactive run.
 
 Resume uses the run's original source and graph, including ordinary workflows
 without included workflows. Source and graph checks run before any durable
