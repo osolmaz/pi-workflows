@@ -95,6 +95,14 @@ in `vitest.config.ts`. The istanbul provider is deliberate. Workflow files are
 loaded through jiti at runtime, and the v8 provider mismapped those modules;
 istanbul instruments through the vitest transform pipeline only.
 
+The suite creates one temporary root per run and deletes it at the end. Some
+tests start a workflow server in a temporary home, and a server that outlives
+its test holds about 80 MB for the life of the machine. The harness therefore
+reads `server/server.lock.json` under the run root, stops every recorded
+process whose start identity still matches, and then removes the root. A
+killed run can still leave a server behind, so check `ps` after an interrupted
+run.
+
 Slophammer runs in CI (coverage, complexity max 8, DRY max 0 findings,
 dependency boundaries). Run it locally with:
 
