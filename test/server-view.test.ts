@@ -1286,6 +1286,18 @@ describe("current session state", () => {
     expect(Buffer.byteLength(canonicalJson(page.workflowMessages), "utf8")).toBeLessThanOrEqual(
       64 * 1024,
     );
+    // The cache key reads message metadata in bounded batches, in the order the
+    // selection needs, so one view call over a long session history reads a few
+    // rows instead of every stored message.
+    const batches = vi.spyOn(serverState.workflowMessages, "listSessionSummaryBatch");
+    const fullScans = vi.spyOn(serverState.workflowMessages, "listSessionSummaries");
+    views.session("session-long-history", null);
+    const rowsRead = batches.mock.calls.reduce((total, call) => total + (call[1]?.limit ?? 0), 0);
+    expect(batches.mock.calls.every((call) => (call[1]?.limit ?? 0) <= 32)).toBe(true);
+    expect(rowsRead).toBeLessThanOrEqual(32 * batches.mock.calls.length);
+    expect(fullScans).not.toHaveBeenCalled();
+    batches.mockRestore();
+    fullScans.mockRestore();
     state.close();
   }, 120_000);
 
