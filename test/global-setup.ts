@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { stopTempWorkflowServers } from "./temp-workflow-servers.js";
 
 export const TEST_TEMP_ROOT_ENV = "PI_WORKFLOWS_TEST_TEMP_ROOT";
 
@@ -18,8 +19,14 @@ export function setup(): void {
   process.env.PI_WORKFLOWS_CONFIG_DIR = path.join(ownedRoot, "config");
 }
 
-export function teardown(): void {
+export async function teardown(): Promise<void> {
   if (ownedRoot !== undefined) {
+    const stopped = await stopTempWorkflowServers(ownedRoot);
+    if (stopped > 0) {
+      process.stderr.write(
+        `test harness stopped ${stopped} workflow server(s) left behind by this run\n`,
+      );
+    }
     fs.rmSync(ownedRoot, { force: true, recursive: true });
     ownedRoot = undefined;
   }
