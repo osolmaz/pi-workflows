@@ -1630,6 +1630,12 @@ describe("current session state", () => {
     expect(selected?.kind).toBe("terminal");
     expect(probe.rows.count).toBeLessThanOrEqual(32);
     probe.restore();
+    // The retention window closes with the clock and not with a stored write, so a
+    // held selection is not reused past it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(recent + 60_000 + 1_000);
+    expect(views.currentWorkflowMessage(sessionId)).toBeUndefined();
+    vi.useRealTimers();
     state.close();
   }, 120_000);
 
@@ -2085,6 +2091,30 @@ describe("current session state", () => {
                   },
                 });
               }
+              // An update key is pattern-bounded to 128 ASCII characters, and the widest
+              // legal key still travels in the compact view in full.
+              await publishUpdate({
+                type: "progress",
+                key: `k${"k".repeat(127)}`,
+                data: {
+                  schema: "pi-workflows.progress.v1",
+                  status: "running",
+                  completed: 1,
+                  total: 2,
+                  unit: "items",
+                },
+              });
+              // The newest monitor schedule carries an instant no bounded frame can hold.
+              await publishUpdate({
+                type: "monitor.schedule",
+                key: "next-check",
+                data: {
+                  schema: "pi-workflows.monitor-schedule.v1",
+                  lastCheckAt: "2026-01-01T00:00:00.000Z",
+                  nextCheckAt: `2026-01-01T03:00:00.000Z${"x".repeat(SESSION_TEXT_LIMIT)}`,
+                  everyMinutes: 60,
+                },
+              });
               return "done";
             },
           }),
@@ -2139,14 +2169,35 @@ describe("current session state", () => {
     if (run === null) throw new Error("session run missing");
     // A hot key cannot hide the other tracks: the projection carries the latest
     // record of every key, so one key's many updates replace only its own.
-    expect(run.progressUpdates.map((update) => update.key)).toEqual([...otherKeys, "hot"]);
+    expect(run.progressUpdates.map((update) => update.key)).toEqual([
+      ...otherKeys,
+      "hot",
+      `k${"k".repeat(127)}`,
+    ]);
     expect(run.progressUpdates.at(-1)?.data).toMatchObject({
-      completed: hotCount - 1,
-      total: hotCount,
+      completed: 1,
+      total: 2,
     });
     // A later monitor cycle replaces its own next-check record, so the projection
-    // carries the newest schedule and never an earlier one.
-    expect(run.monitorSchedule?.nextCheckAt).toBe("2026-01-01T02:00:00.000Z");
+    // carries the newest schedule and never an earlier one. The newest schedule names
+    // an instant no bounded frame can hold, so it is left out and not cut.
+    expect(run.monitorSchedule).toBeNull();
+    // The widest legal key travels in full, and the whole projection still travels in
+    // one client frame.
+    expect(run.progressUpdates.at(-1)?.key).toBe(`k${"k".repeat(127)}`);
+    expect(
+      Buffer.byteLength(canonicalJson(views.session("session-progress-keys", null)), "utf8"),
+    ).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES);
+    // The complete schedule record stays stored, so the update page can still carry it.
+    expect(
+      state.connection
+        .prepare(
+          `SELECT count(*) AS count FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ? AND u.update_type = 'monitor.schedule' AND u.update_key = 'next-check'`,
+        )
+        .get(runId),
+    ).toEqual({ count: 3 });
     state.close();
   }, 60_000);
 

@@ -452,11 +452,28 @@ export class ServerViewStore {
   private currentWorkflowMessageSummary(sessionId: string): WorkflowMessageSummary | undefined {
     const key = this.selectionKey(sessionId);
     const cached = this.selectionCache.get(sessionId);
-    if (cached !== undefined && cached.key === key) return cached.message;
+    if (
+      cached !== undefined &&
+      cached.key === key &&
+      (cached.message === undefined || this.retentionStillHolds(cached.message))
+    ) {
+      return cached.message;
+    }
     const message = this.selectWorkflowMessageSummary(sessionId);
     this.selectionCache.delete(sessionId);
     this.selectionCache.set(sessionId, { key, message });
     return message;
+  }
+
+  /**
+   * Whether a delivered terminal message is still inside its retention window. The
+   * window closes with time and not with a stored write, so the held selection is
+   * checked against the clock before it is reused.
+   */
+  private retentionStillHolds(message: WorkflowMessageSummary, now: number = Date.now()): boolean {
+    if (message.kind !== "terminal" || message.status !== "sent") return true;
+    const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
+    return Date.parse(turn?.endedAt ?? message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now;
   }
 
   /**
@@ -1678,13 +1695,26 @@ function humanDecisionRequest(
   if (!isJsonObject(value)) return undefined;
   if (value.schema !== "pi-workflows.human-decision-request.v1") return undefined;
   if (typeof value.nodeId !== "string" || typeof value.audience !== "string") return undefined;
+  // A node identity and an audience name identify state, so one that cannot travel
+  // in a bounded frame is left out and never cut. The summary is free-form display
+  // text, which is cut at the shared session bound.
+  if (
+    Buffer.byteLength(value.nodeId, "utf8") > NODE_ID_MAX_BYTES ||
+    Buffer.byteLength(value.audience, "utf8") > SESSION_TEXT_BYTES
+  ) {
+    return undefined;
+  }
   const presentation = isJsonObject(value.presentation) ? value.presentation : undefined;
   return {
     nodeId: value.nodeId,
     audience: value.audience,
-    summary: typeof presentation?.summary === "string" ? presentation.summary : null,
+    summary:
+      typeof presentation?.summary === "string" ? boundSessionText(presentation.summary) : null,
     presentationDigest:
-      typeof value.presentationDigest === "string" ? value.presentationDigest : null,
+      typeof value.presentationDigest === "string" &&
+      Buffer.byteLength(value.presentationDigest, "utf8") <= SESSION_TEXT_BYTES
+        ? value.presentationDigest
+        : null,
   };
 }
 
@@ -1711,6 +1741,10 @@ function sessionMonitorSchedule(
   for (const update of updates) {
     if (update.type !== "monitor.schedule" || update.key !== "next-check") continue;
     if (!isJsonObject(update.data) || typeof update.data.nextCheckAt !== "string") continue;
+    // A schedule that cannot travel in a bounded frame is left out rather than cut,
+    // because a cut instant is another instant. The recorded update stays available
+    // through the run update page.
+    if (Buffer.byteLength(update.data.nextCheckAt, "utf8") > SESSION_TEXT_BYTES) return null;
     return { nextCheckAt: update.data.nextCheckAt, recordedAt: update.at };
   }
   return null;

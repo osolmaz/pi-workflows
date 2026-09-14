@@ -841,3 +841,25 @@ the detailed run view inside one frame when a node identity fills the limit" pin
 view at the limit. The two view tests that drove the omission path now build the oversized identity
 through a hand-made definition snapshot, which is the only way that shape can still exist: state
 written before this limit. That state needs a reset, which the alpha state policy requires.
+
+### The review round that followed
+
+A review round on `2161e98` reported two findings. The second is real and fixed: the held selection
+is checked against the clock before it is reused, because the terminal retention window closes with
+time and not with a stored write. Without that check a session kept a retained terminal message past
+its window, and `test/server-view.test.ts` "keeps the eligible message behind neighbours the
+candidate filters skip" fails on that path.
+
+The first finding claimed that an update key of unbounded length can push the session frame past the
+limit. That shape is unreachable: `KEY_PATTERN` in `src/workflows/updates.ts` bounds an update key to
+128 ASCII characters, the same way `CHOICE_PATTERN` bounds a decision value. The claim is answered
+with that rule and pinned by the test, which publishes the widest legal key and asserts that the
+whole projection stays inside one frame.
+
+The same audit found two values that _are_ reachable. A monitor schedule carries the instant from its
+own data, and a human-decision request carries a presentation summary, an audience name, a node
+identity, and a digest. The summary is now cut at the shared session bound, and a value that
+identifies state is left out when it cannot travel in a bounded frame. The schedule instant is left
+out under the same rule, and the stored record stays reachable through the update page. The test
+asserts the schedule is absent, the widest legal key is present in full, and the stored schedule
+records still count three.
