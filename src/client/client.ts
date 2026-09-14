@@ -29,6 +29,7 @@ import type { WorkflowRunListPage, WorkflowRunSummary, WorkflowRunView } from ".
 
 const CONNECT_TIMEOUT_MS = 2_000;
 const START_TIMEOUT_MS = 10_000;
+const STARTUP_STDERR_LIMIT_BYTES = 64 * 1024;
 /** Capped exponential reconnect delay with jitter; the first retry is fastest. */
 const RECONNECT_BASE_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 10_000;
@@ -247,22 +248,26 @@ export class WorkflowClient {
       // child that can never serve it.
       assertSocketPathSupported(this.endpoint);
       this.resetConnection();
-      this.startDetached();
-    }
-    const deadline = Date.now() + START_TIMEOUT_MS;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      await delay(50);
-      try {
-        return await this.connect();
-      } catch (error) {
-        lastError = error;
-        this.resetConnection();
+      const startupFailure = this.startDetached();
+      let startupError: Error | undefined;
+      void startupFailure.then((error) => {
+        startupError = error;
+      });
+      const deadline = Date.now() + START_TIMEOUT_MS;
+      let lastError: unknown;
+      while (Date.now() < deadline) {
+        await delay(50);
+        try {
+          return await this.connect();
+        } catch (error) {
+          lastError = error;
+          this.resetConnection();
+        }
       }
+      throw new Error(
+        `Workflow server did not become ready: ${startupError?.message ?? (lastError instanceof Error ? lastError.message : String(lastError))}`,
+      );
     }
-    throw new Error(
-      `Workflow server did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
-    );
   }
 
   async ensureRunning(): Promise<ClientResponse> {
@@ -881,7 +886,7 @@ export class WorkflowClient {
     return value as JsonValue;
   }
 
-  private startDetached(): void {
+  private startDetached(): Promise<Error> {
     const builtEntry = fileURLToPath(new URL("../server/server-entry.js", import.meta.url));
     const sourceEntry = fileURLToPath(new URL("../server/server-entry.ts", import.meta.url));
     const entry = this.serverEntryPath ?? builtEntry;
@@ -891,11 +896,55 @@ export class WorkflowClient {
         : [entry];
     const child = spawn(process.execPath, [...args, "--database", this.databasePath], {
       detached: true,
-      stdio: "ignore",
-      env: { ...process.env, ...this.env },
+      stdio: ["ignore", "ignore", "ignore", "pipe"],
+      env: { ...process.env, ...this.env, PI_WORKFLOWS_STARTUP_FD: "3" },
+    });
+    const startupDiagnostic = child.stdio[3];
+    if (startupDiagnostic === null || startupDiagnostic === undefined) {
+      child.unref();
+      return Promise.resolve(new Error("Workflow server startup diagnostic pipe is unavailable"));
+    }
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
+    let stderrTruncated = false;
+    startupDiagnostic.on("data", (chunk: Buffer) => {
+      const remaining = STARTUP_STDERR_LIMIT_BYTES - stderrBytes;
+      if (remaining <= 0) {
+        stderrTruncated = true;
+        return;
+      }
+      const kept = chunk.subarray(0, remaining);
+      stderrChunks.push(kept);
+      stderrBytes += kept.byteLength;
+      if (kept.byteLength < chunk.byteLength) stderrTruncated = true;
+    });
+    const failure = new Promise<Error>((resolve) => {
+      child.once("error", (error) => resolve(error));
+      startupDiagnostic.once("end", () => {
+        const detail = startupErrorDetail(stderrChunks, stderrTruncated);
+        if (detail.length > 0) resolve(new Error(detail));
+      });
+      child.once("close", (code, signal) => {
+        const detail = startupErrorDetail(stderrChunks, stderrTruncated);
+        resolve(
+          new Error(
+            detail.length > 0
+              ? detail
+              : `Workflow server process exited before becoming ready (code ${code}, signal ${signal})`,
+          ),
+        );
+      });
     });
     child.unref();
+    return failure;
   }
+}
+
+function startupErrorDetail(chunks: Buffer[], truncated: boolean): string {
+  const detail = Buffer.concat(chunks).toString("utf8").trim();
+  return detail.length > 0 && truncated
+    ? `${detail}\n[workflow server startup diagnostic truncated]`
+    : detail;
 }
 
 function requireSubscriptionId(value: JsonValue): string {

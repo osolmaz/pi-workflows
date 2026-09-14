@@ -38,7 +38,10 @@ describe("WorkflowClient", () => {
     // The client refuses to spawn or connect instead of waiting for a socket
     // the operating system cannot bind.
     const client = new WorkflowClient({ databasePath });
-    const start = vi.spyOn(client as unknown as { startDetached: () => void }, "startDetached");
+    const start = vi.spyOn(
+      client as unknown as { startDetached: () => Promise<Error> },
+      "startDetached",
+    );
     await expect(client.ensureAvailable()).rejects.toThrow(/operating system limit/);
     expect(start).not.toHaveBeenCalled();
   });
@@ -56,8 +59,8 @@ describe("WorkflowClient", () => {
         packageVersion: "0.15.3",
       });
     const start = vi
-      .spyOn(client as unknown as { startDetached: () => void }, "startDetached")
-      .mockImplementation(() => undefined);
+      .spyOn(client as unknown as { startDetached: () => Promise<Error> }, "startDetached")
+      .mockImplementation(() => new Promise<Error>(() => undefined));
     const timers = vi.spyOn(globalThis, "setTimeout");
     try {
       await expect(client.ensureAvailable()).resolves.toMatchObject({
@@ -70,6 +73,76 @@ describe("WorkflowClient", () => {
       expect(start).toHaveBeenCalledTimes(1);
     } finally {
       timers.mockRestore();
+      await client.close();
+    }
+  });
+
+  it("connects when another client wins the concurrent server startup race", async () => {
+    const databasePath = path.join(await makeTempDir("client-concurrent-start"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    const connect = vi
+      .spyOn(client, "connect")
+      .mockRejectedValueOnce(new Error("not ready"))
+      .mockResolvedValue({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "hello",
+        connectionId: "concurrent-start-winner",
+        packageVersion: "0.17.3",
+      });
+    const start = vi
+      .spyOn(client as unknown as { startDetached: () => Promise<Error> }, "startDetached")
+      .mockResolvedValue(new Error("EEXIST: server.lock.json"));
+    try {
+      await expect(client.ensureAvailable()).resolves.toMatchObject({
+        connectionId: "concurrent-start-winner",
+      });
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(start).toHaveBeenCalledOnce();
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("captures stderr when the detached server exits during startup", async () => {
+    const directory = await makeTempDir("client-startup-error");
+    const databasePath = path.join(directory, "state.sqlite");
+    const serverEntryPath = path.join(directory, "failing-server.mjs");
+    await fs.writeFile(
+      serverEntryPath,
+      'import fs from "node:fs"; fs.writeSync(3, "Pi Workflows durable state is incompatible. Move state.sqlite and retry.\\n"); process.exit(1);',
+    );
+    const client = new WorkflowClient({ databasePath, serverEntryPath });
+    try {
+      const failure = await (
+        client as unknown as { startDetached: () => Promise<Error> }
+      ).startDetached();
+      expect(failure.message).toContain(
+        "Pi Workflows durable state is incompatible. Move state.sqlite and retry.",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("prefers the detached server error when startup never becomes available", async () => {
+    const databasePath = path.join(await makeTempDir("client-startup-blocker"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    vi.spyOn(client, "connect").mockRejectedValue(new Error("connect ENOENT server.sock"));
+    vi.spyOn(
+      client as unknown as { startDetached: () => Promise<Error> },
+      "startDetached",
+    ).mockResolvedValue(
+      new Error("Pi Workflows durable state is incompatible. Move state.sqlite."),
+    );
+    vi.useFakeTimers();
+    try {
+      const unavailable = expect(client.ensureAvailable()).rejects.toThrow(
+        "Pi Workflows durable state is incompatible. Move state.sqlite.",
+      );
+      await vi.advanceTimersByTimeAsync(10_050);
+      await unavailable;
+    } finally {
+      vi.useRealTimers();
       await client.close();
     }
   });
