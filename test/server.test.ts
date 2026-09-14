@@ -2147,15 +2147,6 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
           isIdle: true,
         }),
       ).toMatchObject({ receipt: { outcome: "absent" } });
-      console.log(
-        "AFTER-REPORT",
-        JSON.stringify(
-          observed.workflowMessages
-            .listSession(sessionId)
-            .filter((message) => message.sourceId === interaction.requestId)
-            .map((message) => `${message.kind}:${message.status}:${message.workflowMessageId}`),
-        ),
-      );
       await waitUntil(
         () =>
           observed.workflowMessages
@@ -2173,6 +2164,119 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
       expect(await currentWorkflowMessageId(client, sessionId)).toBe(
         recovered.find((message) => message.status === "pending")?.workflowMessageId,
       );
+    } finally {
+      observed.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("re-issues a delivered decision prompt that left the branch", async () => {
+    const cwd = await makeTempDir("decision-branch-project");
+    const databasePath = path.join(await makeTempDir("decision-branch-state"), "state.sqlite");
+    const sessionId = "server-test-session";
+    const workflowPath = path.join(cwd, "decision-branch.workflow.ts");
+    await fs.writeFile(
+      workflowPath,
+      `import {
+  choice,
+  compute,
+  defineHumanChoices,
+  defineWorkflow,
+  humanDecision,
+  humanDecisionEdge,
+} from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+const choices = defineHumanChoices({
+  approve: choice({ label: "Approve" }),
+  reject: choice({ label: "Reject" }),
+});
+export default defineWorkflow({
+  name: "decision-branch",
+  startAt: "gate",
+  nodes: {
+    gate: humanDecision({
+      audience: "operator",
+      choices,
+      request: () => ({
+        title: "Approve the protected action",
+        subject: { action: "test" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "A human must approve this test action.",
+          blocks: [{ kind: "paragraph", text: "Review the action before approval." }],
+        },
+      }),
+    }),
+    done: compute({ run: () => ({ complete: true }) }),
+  },
+  edges: [
+    humanDecisionEdge({
+      from: "gate",
+      choices,
+      cases: { approve: "done", reject: "done" },
+    }),
+  ],
+});\n`,
+    );
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath, clientId: "decision-branch-client" });
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    await server.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "decision-branch",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => observed.listPendingInteractions(sessionId).length === 1, 30_000);
+      const interaction = observed.listPendingInteractions(sessionId)[0];
+      if (interaction === undefined) throw new Error("interaction missing");
+      expect(interaction.kind).toBe("decision");
+      const decision = observed.workflowMessages
+        .listSession(sessionId)
+        .find((message) => message.sourceId === interaction.requestId);
+      if (decision === undefined) throw new Error("decision message missing");
+      expect(decision.kind).toBe("decision");
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "decision-branch", sessionId, coordinator: true },
+      });
+      const authority = {
+        targetSessionId: sessionId,
+        coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
+      };
+      // Pi holds the prompt the server asked it to confirm.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: decision.workflowMessageId,
+          piSessionEntryId: "decision-entry",
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "present" } });
+      expect(observed.workflowMessages.require(decision.workflowMessageId).status).toBe("sent");
+      // The user branches to a point before the prompt, so the prompt leaves the
+      // branch while the decision still waits for an answer.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: decision.workflowMessageId,
+          piSessionEntryId: null,
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "absent" } });
+      // The prompt returns as the one message Pi must add again, because a
+      // decision keeps its identity and cannot be answered from a message the
+      // branch no longer holds.
+      await waitUntil(
+        () => observed.workflowMessages.require(decision.workflowMessageId).status === "pending",
+        30_000,
+      );
+      const reopened = observed.workflowMessages.require(decision.workflowMessageId);
+      expect(reopened.piSessionEntryId).toBeNull();
+      expect(reopened.triggerTurn).toBe(false);
+      expect(await currentWorkflowMessageId(client, sessionId)).toBe(decision.workflowMessageId);
+      expect(observed.workflowMessages.listSession(sessionId)).toHaveLength(1);
     } finally {
       observed.close();
       await client.close();

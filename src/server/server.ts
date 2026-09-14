@@ -1043,6 +1043,7 @@ export class WorkflowServer {
         new Set(entries.map((entry) => entry.workflowMessageId)),
       );
       if (report.isIdle && !report.hasPendingMessages) {
+        const now = Date.now();
         for (const turn of this.serverState.workflowMessages.openTurnsForSession(
           report.targetSessionId,
         )) {
@@ -1080,10 +1081,16 @@ export class WorkflowServer {
             !sourceMessages.some((message) => branchIds.has(message.workflowMessageId))
           ) {
             this.serverState.workflowMessages.cancelPendingForSource(interaction.requestId);
-            this.serverState.ensureInteractionMessage(
+            const ensured = this.serverState.ensureInteractionMessage(
               interaction,
               interaction.kind === "decision" ? "initial" : "resumed",
             );
+            // A decision prompt keeps its identity, so the delivered message is the
+            // one that has to return. A step prompt already returned as a new
+            // resumed message, which is pending and needs nothing further.
+            if (ensured.status !== "pending") {
+              this.serverState.workflowMessages.reopenForSource(interaction.requestId, now);
+            }
           }
         }
       }

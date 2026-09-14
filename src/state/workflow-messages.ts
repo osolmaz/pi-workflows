@@ -284,6 +284,28 @@ export class WorkflowMessageStore {
     );
   }
 
+  /**
+   * Make a delivered decision message deliverable again.
+   *
+   * A decision prompt keeps its identity across a branch change, because the
+   * prompt describes one still pending decision. The delivery that left the branch
+   * therefore has to become pending again, or the session waits forever for an
+   * answer to a prompt it can no longer show. A step prompt instead returns as a
+   * new resumed message with a new identity, so it does not come through here.
+   */
+  reopenForSource(sourceId: string, now: number = Date.now()): number {
+    return this.state.transaction(
+      () =>
+        this.state.connection
+          .prepare(
+            `UPDATE workflow_messages
+             SET status = 'pending', pi_session_entry_id = NULL, updated_at = ?
+             WHERE source_id = ? AND status = 'sent' AND kind = 'decision'`,
+          )
+          .run(now, sourceId).changes,
+    );
+  }
+
   adoptBranch(
     targetSessionId: string,
     entries: readonly WorkflowBranchEntry[],
