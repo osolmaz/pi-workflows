@@ -744,3 +744,56 @@ Two limits of that evidence stay on the record:
    `test/extension.test.ts` "re-arms the session subscription after a failure during the first
    publish" and `test/workflow-message-coordinator.test.ts` "sends nothing from a snapshot whose
    subscription failed".
+
+### Independent review and the fixes it produced
+
+An independent reviewer checked the branch at `3765df1` and reported two P1 gaps and one P2
+concern. Every citation in that report was verified against the repository. One attribution was
+wrong: the decision-redelivery defect already existed on `main`, because the recovery block in
+`reportWorkflowBranch` and the idempotency in `ensureInteractionMessage` are the same there. What
+this change added was the rule that the session view no longer lists a delivered decision, which
+made the old defect reachable.
+
+**P1: a delivered prompt had no way back.** When a prompt leaves the active branch while its
+interaction is still pending, the selection could not pick it again. A `sent` message is not a
+`pending` candidate, `openWorkflowMessage` has no decision branch, and the recovery call used the
+same idempotency key, so `create()` returned the existing `sent` row. The session then waited for an
+answer to a prompt it could no longer show. `WorkflowMessageStore.reopenMessage` now sets the exact
+delivered message back to `pending` and clears `pi_session_entry_id`, and the recovery loop in
+`reportWorkflowBranch` calls it with the message the recovery found delivered. It names one message,
+so one source never holds two pending messages. A later review round found the same gap for a
+`resumed` step message that leaves the branch a second time: the ensured row is then the already
+delivered resumed message, and the first fix covered decisions only. The same reopening now covers
+that message too. Covered by `test/server.test.ts` "re-issues a delivered decision prompt that left
+the branch" and "re-issues a delivered resumed step prompt that left the branch again". The rule is
+recorded in [Workflow server](../WORKFLOW_SERVER.md).
+
+**P1: the 1 MiB frame limit was incomplete.** The limit was measured at the encode call sites, so an
+oversized direct response ended the connection through `.catch(() => socket.destroy())`, and the run
+list summary carried the raw stored workflow name. The server now writes every client frame through
+one measured writer, `writeClientFrame`. It encodes the message once, measures the complete frame,
+and writes only a frame that fits. An oversized response becomes a bounded `rejected` response that
+names the limit; an oversized event fails only its own subscription through the existing
+`projection_failed` path. The workflow name is bounded in the run list summary, in the run manifest,
+and in the bounded run view, where the complete definition stays reachable through the content
+reference the view carries. A node identity larger than one bounded value is left out instead of cut.
+Covered by `test/client-protocol.test.ts` "measures the complete frame and refuses a frame above the
+client limit", `test/server-view.test.ts` "keeps a run list frame inside the client limit when one
+name is very long", and `test/server.test.ts` "refuses a frame above the client limit and keeps the
+socket". The accepted limit and the writer rule are recorded in
+[Live replay protocol](../LIVE_REPLAY_PROTOCOL.md) and [Workflow server](../WORKFLOW_SERVER.md).
+
+**P2: the cache key did work proportional to the whole session history.** The key is built before the
+cache lookup, and the selection loaded every stored message and every terminal message, while the
+retention walk loaded terminal messages again. Selection and retention now walk indexed metadata in
+bounded batches, in the order each step needs, and stop at the message they need. A node-attempt
+index covers the ordered attempt reads. Measured on one session with two thousand stored messages and
+one warm cache: one view call took 6186 us before and 638 us after, and the cold projection took
+6.66 ms before and 2.90 ms after. The remainder is the session revision aggregate, which is
+proportional to the stored messages of the session, and the per-run attempt fold, which is
+proportional to one run's attempts. Both stay small at the sizes this feature targets. The bounded
+batch walk is covered by the batching assertions of `test/server-view.test.ts` "holds the session
+snapshot at its size when stored history reaches thousands".
+
+The complete history stays reachable in every case: the run page carries every stored message, and
+the run view points at the complete definition content.
