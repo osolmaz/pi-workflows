@@ -48,7 +48,7 @@ The values have these meanings:
 
 A callback that returns `null` has the same meaning as a fixed `null`. The existing 30-second limit for resolving a timeout callback still applies.
 
-A null timeout disables only elapsed-time expiry. Cancellation, pause, park, claim loss, host shutdown, late-submission rejection, active-attempt cleanup, and the node's `AbortSignal` keep their current behavior.
+A null timeout disables only elapsed-time expiry. Cancellation, pause, park, claim loss, server shutdown, late-submission rejection, active-attempt cleanup, and the node's `AbortSignal` keep their current behavior.
 
 Reject zero, negative numbers, `NaN`, infinity, strings, and other invalid values.
 

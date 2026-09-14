@@ -200,7 +200,7 @@ Use the existing saved actor types:
 - `controller` for a controller request;
 - `policy` only when existing saved policy code makes the change.
 
-Save a separate source label, such as `workflow-tool`, `interactive-command`, or `controller-request`, when it helps inspection. The host supplies both fields. They never come from JSON Patch data.
+Save a separate source label, such as `workflow-tool`, `interactive-command`, or `controller-request`, when it helps inspection. The server supplies both fields. They never come from JSON Patch data.
 
 A normal user message that asks the model to change settings still produces a `session` change through a model tool call. The workflow can allow safe session changes, such as forbidding merge, while requiring a verified `human` action to grant authority, spend money, use credentials, or widen repository scope.
 

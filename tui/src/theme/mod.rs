@@ -695,11 +695,11 @@ pub fn resolve(cli_theme: Option<&str>) -> ResolvedTheme {
     let requested = explicit.unwrap_or_else(|| {
         if config.auto_switch {
             match detected_appearance() {
-                Some(HostAppearance::Dark) => config
+                Some(TerminalAppearance::Dark) => config
                     .dark_name
                     .clone()
                     .unwrap_or_else(|| "catppuccin".to_string()),
-                Some(HostAppearance::Light) => config
+                Some(TerminalAppearance::Light) => config
                     .light_name
                     .clone()
                     .unwrap_or_else(|| "catppuccin-latte".to_string()),
@@ -841,16 +841,16 @@ pub fn parse_color(input: &str) -> Option<Color> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostAppearance {
+enum TerminalAppearance {
     Dark,
     Light,
 }
 
-fn detected_appearance() -> Option<HostAppearance> {
+fn detected_appearance() -> Option<TerminalAppearance> {
     if let Ok(value) = std::env::var("PIW_THEME_APPEARANCE") {
         return match value.trim().to_ascii_lowercase().as_str() {
-            "dark" => Some(HostAppearance::Dark),
-            "light" => Some(HostAppearance::Light),
+            "dark" => Some(TerminalAppearance::Dark),
+            "light" => Some(TerminalAppearance::Light),
             _ => None,
         };
     }
@@ -861,9 +861,9 @@ fn detected_appearance() -> Option<HostAppearance> {
         .parse::<u8>()
         .ok()?;
     Some(if matches!(background, 7 | 15) {
-        HostAppearance::Light
+        TerminalAppearance::Light
     } else {
-        HostAppearance::Dark
+        TerminalAppearance::Dark
     })
 }
 

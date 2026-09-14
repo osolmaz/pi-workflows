@@ -24,7 +24,7 @@ When pi-workflows runs inside Herdr, show a shortcut that opens the current run 
 
 ## Design
 
-### One package with two host entry points
+### One package with two server entry points
 
 The package root will contain `herdr-plugin.toml`. Pi loads the existing extension entry point. Herdr loads a `piw` pane entry point from the same package root. A small checked-in JavaScript launcher validates the workflow run ID and starts `piw` with an argv array. It uses Herdr's configured executable path when that path works. If Herdr replaced its executable after the server started and the configured path no longer exists, the launcher retries the pane label command through `PATH`.
 

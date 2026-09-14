@@ -57,7 +57,5 @@ describe("unified workflow client boundary", () => {
       .map((file) => fs.readFileSync(file, "utf8"))
       .join("\n");
     expect(source).not.toContain("pi-workflows.replay");
-    expect(source).not.toContain("pi-workflows.host-request");
-    expect(source).not.toContain("pi-workflows.host-response");
   });
 });

@@ -168,16 +168,16 @@ A resource type cannot change. A command supplies the expected revision. A succe
 
 `leases` records current ownership. The row remains after release so the generation never resets.
 
-| Field          | Type      | Rules                                                             |
-| -------------- | --------- | ----------------------------------------------------------------- |
-| `resource_id`  | `TEXT`    | Primary key, foreign key to `resources`                           |
-| `generation`   | `INTEGER` | Starts at `0`, increases on every successful claim                |
-| `owner_type`   | `TEXT`    | `session`, `host`, `controller`, or `channel`; nullable when free |
-| `owner_id`     | `TEXT`    | Private local owner ID; nullable when free                        |
-| `token_hash`   | `BLOB`    | SHA-256 of the random claim token; nullable when free             |
-| `acquired_at`  | `INTEGER` | Nullable when free                                                |
-| `heartbeat_at` | `INTEGER` | Nullable when free                                                |
-| `expires_at`   | `INTEGER` | Nullable when free                                                |
+| Field          | Type      | Rules                                                                     |
+| -------------- | --------- | ------------------------------------------------------------------------- |
+| `resource_id`  | `TEXT`    | Primary key, foreign key to `resources`                                   |
+| `generation`   | `INTEGER` | Starts at `0`, increases on every successful claim                        |
+| `owner_type`   | `TEXT`    | `session`, `server`, `resource_manager`, or `channel`; nullable when free |
+| `owner_id`     | `TEXT`    | Private local owner ID; nullable when free                                |
+| `token_hash`   | `BLOB`    | SHA-256 of the random claim token; nullable when free                     |
+| `acquired_at`  | `INTEGER` | Nullable when free                                                        |
+| `heartbeat_at` | `INTEGER` | Nullable when free                                                        |
+| `expires_at`   | `INTEGER` | Nullable when free                                                        |
 
 A table check requires all owner fields to be set together or all to be null. Claiming an unowned or expired lease increments `generation`, writes the owner data, and returns the raw random token plus generation. Releasing a lease clears owner data and keeps the generation.
 
@@ -187,18 +187,18 @@ Indexes cover `expires_at` and `(owner_type, owner_id)`.
 
 `events` is the immutable audit history.
 
-| Field               | Type      | Rules                                                                                 |
-| ------------------- | --------- | ------------------------------------------------------------------------------------- |
-| `event_seq`         | `INTEGER` | Global autoincrement primary key                                                      |
-| `event_id`          | `TEXT`    | Unique public event ID                                                                |
-| `resource_id`       | `TEXT`    | Foreign key to `resources`                                                            |
-| `resource_revision` | `INTEGER` | Positive revision accepted by this event                                              |
-| `event_type`        | `TEXT`    | Domain event name                                                                     |
-| `actor_type`        | `TEXT`    | `session`, `host`, `controller`, `channel`, `human`, `policy`, `control`, or `system` |
-| `actor_id`          | `TEXT`    | Private local actor ID when applicable                                                |
-| `lease_generation`  | `INTEGER` | Ownership generation used for the write, when applicable                              |
-| `payload_hash`      | `BLOB`    | Optional foreign key to `blobs`                                                       |
-| `recorded_at`       | `INTEGER` | Commit time                                                                           |
+| Field               | Type      | Rules                                                                                         |
+| ------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| `event_seq`         | `INTEGER` | Global autoincrement primary key                                                              |
+| `event_id`          | `TEXT`    | Unique public event ID                                                                        |
+| `resource_id`       | `TEXT`    | Foreign key to `resources`                                                                    |
+| `resource_revision` | `INTEGER` | Positive revision accepted by this event                                                      |
+| `event_type`        | `TEXT`    | Domain event name                                                                             |
+| `actor_type`        | `TEXT`    | `session`, `server`, `resource_manager`, `channel`, `human`, `policy`, `control`, or `system` |
+| `actor_id`          | `TEXT`    | Private local actor ID when applicable                                                        |
+| `lease_generation`  | `INTEGER` | Ownership generation used for the write, when applicable                                      |
+| `payload_hash`      | `BLOB`    | Optional foreign key to `blobs`                                                               |
+| `recorded_at`       | `INTEGER` | Commit time                                                                                   |
 
 `(resource_id, resource_revision)` is unique. Events are inserted in the same transaction as the matching domain change. Normal store APIs never update or delete them.
 
@@ -779,7 +779,7 @@ src/state/
   types.ts
 ```
 
-`src/state` imports no Pi, workflow, controller, host, extension, viewer, or built-in code. Update `slophammer.yml` so workflows and controllers may import this lower layer.
+`src/state` imports no Pi, workflow, controller, server, extension, viewer, or built-in code. Update `slophammer.yml` so workflows and controllers may import this lower layer.
 
 Keep domain stores with their owners:
 

@@ -6,11 +6,11 @@ date: 2026-08-30
 
 # Run workflows outside Pi
 
-Status: implemented. The implementation keeps schema version 1, uses one global on-demand host, and has no embedded production fallback. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) fixes the later model-turn status bug and restores session features that the hard cut removed.
+Status: implemented. The implementation keeps schema version 1, uses one global on-demand server, and has no embedded production fallback. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) fixes the later model-turn status bug and restores session features that the hard cut removed.
 
 A live workflow lost its lease while it was still working. The workflow engine kept the Node.js event loop busy, so its renewal timer did not run before the 30-second lease expired. The next state write used a generic error, the extension treated the error as a crash, and durable state was left with a running queue row, a running attempt, an expired lease, and a separate failed audit event.
 
-This plan fixes that failure first, then removes its root architectural cause. One user-level host will own workflow state. Each active run will execute in a supervised child process. Pi will become a client that starts work, presents interactive requests, and submits answers through documented extension APIs.
+This plan fixes that failure first, then removes its root architectural cause. One user-level server will own workflow state. Each active run will execute in a supervised child process. Pi will become a client that starts work, presents interactive requests, and submits answers through documented extension APIs.
 
 [Workflow server](WORKFLOW_SERVER.md) defines the complete target process, protocol, state, recovery, and Pi integration contracts. This plan gives the implementation order and acceptance checks.
 
@@ -20,8 +20,8 @@ This plan fixes that failure first, then removes its root architectural cause. O
 - Reject every stale writer with a typed claim-loss result.
 - Keep run, queue, attempt, decision, lease, audit, and viewer state consistent.
 - Recover or cancel expired running rows without treating a live owner as stale.
-- Move workflow code out of the Pi extension and host processes.
-- Make the host the only normal writer to the workflow database.
+- Move workflow code out of the Pi extension and server processes.
+- Make the server the only normal writer to the workflow database.
 - Preserve interactive workflow steps in the original Pi session.
 - Supervise workflow children with bounded startup, runtime, output, and shutdown behavior.
 - Make retries safe for pure work and explicit for external effects.
@@ -32,19 +32,19 @@ This plan fixes that failure first, then removes its root architectural cause. O
 - Do not change Pi source, private Pi APIs, or Pi session schemas.
 - Do not add a remote service, distributed consensus, or network database.
 - Do not claim exactly-once execution when an external system has no idempotency support.
-- Do not keep the embedded runner as a fallback after the host path is complete.
+- Do not keep the embedded runner as a fallback after the server path is complete.
 - Do not add a compatibility reader, dual path, `v2` schema, or automatic state migration for older alpha databases.
 - Do not install an operating-system service as part of this change.
 
 ## Original failure
 
-The former extension and host renewed 30-second run claims from 10-second `setInterval` callbacks. `src/workflows/engine.ts` can execute a long sequence of synchronous graph transitions without a macrotask yield. A long synchronous node can also block the event loop by itself.
+The former extension and server renewed 30-second run claims from 10-second `setInterval` callbacks. `src/workflows/engine.ts` can execute a long sequence of synchronous graph transitions without a macrotask yield. A long synchronous node can also block the event loop by itself.
 
 `src/workflows/store.ts` checks lease expiry during a protected write. Every ownership failure currently becomes `Error("Workflow run write rejected because ownership changed")`. The extension handles `ClaimLostError` as a normal handoff, but it handles this generic error as a workflow crash.
 
 The former public cancellation path handled an in-memory run, a queued or starting row, or a waiting human decision. It could not claim and cancel an expired running row.
 
-The former standalone host executed the workflow engine in the same process that renewed claims. Workflow code could therefore block host renewal too.
+The former standalone server executed the workflow engine in the same process that renewed claims. Workflow code could therefore block server renewal too.
 
 ## Core rules
 
@@ -55,7 +55,7 @@ The former standalone host executed the workflow engine in the same process that
 5. A true claim loss stops the old runner without a terminal run write.
 6. One lifecycle transition updates every related projection in one transaction.
 7. Waiting and paused runs release their claim and need no live child.
-8. The host executes no workflow code.
+8. The server executes no workflow code.
 9. A workflow child writes no workflow state directly.
 10. Pi is the origin client, not the run owner.
 11. A durable command is acknowledged only after it is committed.
@@ -122,11 +122,11 @@ Cancellation will use that claim to commit one terminal cancellation. It will al
 
 Startup recovery will make expired running rows claimable. A resumable run will continue from its last durable boundary. A run with an uncertain unmanaged side effect will stop for manual review instead of retrying.
 
-## Part 4: One global host
+## Part 4: One global server
 
-The state database is global to one user installation. Use one host for that database, not one writing host per project.
+The state database is global to one user installation. Use one server for that database, not one writing server per project.
 
-The host will:
+The server will:
 
 - own all run claims;
 - accept commands from Pi clients and command-line clients;
@@ -137,9 +137,9 @@ The host will:
 - reconcile controllers;
 - expose safe status without payloads or tokens.
 
-The host event loop will contain only bounded IPC, short SQLite transactions, timers, and process supervision. It will not load or execute workflow definitions.
+The server event loop will contain only bounded IPC, short SQLite transactions, timers, and process supervision. It will not load or execute workflow definitions.
 
-The existing package CLI will provide explicit host start, status, and stop behavior. The Pi extension may start the package host on demand. The package will not install systemd, launchd, or another operating-system service.
+The existing package CLI will provide explicit server start, status, and stop behavior. The Pi extension may start the package server on demand. The package will not install systemd, launchd, or another operating-system service.
 
 ## Part 5: Local protocol
 
@@ -159,9 +159,9 @@ Every request will include:
 
 The protocol will support start, pause, resume, cancel, ordinary checkpoint answers, protected human answers, interactive step submission, notification delivery, terminal turn delivery, node transition proposals, child progress, child exit, and managed effect operations.
 
-A command is successful only after the host commits it. Duplicate request IDs return the stored receipt. Stale revisions, generations, attempts, and idempotency conflicts return typed rejections.
+A command is successful only after the server commits it. Duplicate request IDs return the stored receipt. Stale revisions, generations, attempts, and idempotency conflicts return typed rejections.
 
-The host will bound message size and connection buffering. Malformed messages will close only that connection.
+The server will bound message size and connection buffering. Malformed messages will close only that connection.
 
 ## Part 6: One child per active run
 
@@ -172,20 +172,20 @@ The child will:
 - verify the root and every mounted source identity before it loads workflow modules;
 - load the workflow and compare the resolved mounted-source map with the saved map;
 - execute graph and node code;
-- propose state transitions to the host;
+- propose state transitions to the server;
 - request interactive work or managed effects;
 - exit when the run parks, waits, finishes, or loses its generation.
 
 The child will not receive a writable state store. This is an architectural boundary against accidental writes, not a security sandbox against malicious same-user code.
 
-The host will enforce:
+The server will enforce:
 
 - startup handshake timeout;
 - node and run cancellation;
 - bounded stdout and stderr capture;
 - process-group termination;
 - `SIGTERM` followed by bounded `SIGKILL`;
-- orphan cleanup on host restart;
+- orphan cleanup on server restart;
 - portable limits where Node and the operating system expose them.
 
 ## Part 7: Preserve interactive Pi steps
@@ -194,16 +194,16 @@ Interactive agent and assistant-message steps remain in the origin Pi session.
 
 When a child reaches one of these steps:
 
-1. It sends a durable interactive request to the host.
-2. The host commits the request and parks the run.
+1. It sends a durable interactive request to the server.
+2. The server commits the request and parks the run.
 3. The child exits and the claim is released.
 4. The Pi extension presents the exact step contract through documented Pi messaging and tool APIs.
-5. The extension sends a provisional result to the host with the request, node, attempt, and revision identifiers.
-6. The host records it as `validating` and schedules a new supervised child from that durable boundary.
+5. The extension sends a provisional result to the server with the request, node, attempt, and revision identifiers.
+6. The server records it as `validating` and schedules a new supervised child from that durable boundary.
 7. The child loads the workflow and runs the node's `validate` function.
-8. The host settles the request only after the child accepts it. A rejection keeps the request pending and returns the durable validation error to the model.
+8. The server settles the request only after the child accepts it. A rejection keeps the request pending and returns the durable validation error to the model.
 
-If Pi closes, the request stays pending until its durable node deadline. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. The host enforces the saved deadline while the worker is absent and after restart. An expired request atomically closes and starts a supervised child that records the same attempt as timed out. The workflow can route that result through `$result.outcome`; otherwise the run becomes terminal and releases its session reservation. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry. If the host stops after it records `validating` but before activation, startup recovery schedules that same submission unless its deadline expired.
+If Pi closes, the request stays pending until its durable node deadline. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. The server enforces the saved deadline while the worker is absent and after restart. An expired request atomically closes and starts a supervised child that records the same attempt as timed out. The workflow can route that result through `$result.outcome`; otherwise the run becomes terminal and releases its session reservation. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry. If the server stops after it records `validating` but before activation, startup recovery schedules that same submission unless its deadline expired.
 
 Keep one active interactive request per Pi session. Other requests remain ordered and durable.
 
@@ -211,17 +211,17 @@ A protected human decision is displayed without starting a model turn. The model
 
 Notify nodes and terminal results create `workflow_messages` records in the same transaction as their source facts. The origin Pi session claims and adopts both message kinds through the one shared coordinator. There is no notification outbox or terminal-turn intent send path.
 
-Detached workflows can use host-managed `pi --mode rpc` children. Their execution mode and origin are durable provenance.
+Detached workflows can use server-managed `pi --mode rpc` children. Their execution mode and origin are durable provenance.
 
 ## Part 8: Safe effects and retries
 
 Treat compute nodes as pure work. A child crash may rerun a compute node from its last committed boundary.
 
-Side-effecting action nodes must use a managed effect record with a stable key and request fingerprint. The host reserves the effect before execution and stores its receipt after execution. Duplicate requests return the stored receipt.
+Side-effecting action nodes must use a managed effect record with a stable key and request fingerprint. The server reserves the effect before execution and stores its receipt after execution. Duplicate requests return the stored receipt.
 
 An adapter may report safe retry only when the external system supports an idempotency key or a read-back check proves the result. If a child can have completed an external action but no receipt exists, mark the effect uncertain and stop for manual recovery.
 
-Migrate package-owned workflows to this rule before the host path becomes the only runtime. Do not silently treat arbitrary action code as exactly once.
+Migrate package-owned workflows to this rule before the server path becomes the only runtime. Do not silently treat arbitrary action code as exactly once.
 
 ## Part 9: Alpha state change
 
@@ -231,7 +231,7 @@ The changed DDL digest will reject an older state database with the standard cle
 
 The new state shape will add the minimum durable records needed for:
 
-- host command receipts;
+- server command receipts;
 - interactive requests and submissions;
 - child process epochs and exits;
 - uncertain effects when existing effect rows cannot express the state.
@@ -242,15 +242,15 @@ Reuse attempts, effects, and feature-specific source records when they already p
 
 Land the work in coherent commits and keep one implementation pull request. The final production change will:
 
-1. Use the host path for every new run.
+1. Use the server path for every new run.
 2. Remove embedded engine execution from the extension.
-3. Remove host-side in-process workflow execution.
+3. Remove server-side in-process workflow execution.
 4. Remove old renewal-only ownership handling.
 5. Keep read-only viewers on the same canonical database.
 6. Keep the extension as a documented Pi client.
 7. Keep no fallback or feature flag for the old path.
 
-The host protocol and worker runtime may exist under tests before the final switch. There must never be two selectable production runtimes.
+The server protocol and worker runtime may exist under tests before the final switch. There must never be two selectable production runtimes.
 
 ## Tests
 
@@ -275,13 +275,13 @@ The host protocol and worker runtime may exist under tests before the final swit
 
 ### Server and child isolation
 
-- Block a child event loop longer than the run lease and prove the host keeps ownership.
+- Block a child event loop longer than the run lease and prove the server keeps ownership.
 - Kill Pi while a run computes.
 - Kill a child before and after a proposed transition.
-- Kill the host before and after a committed transition.
+- Kill the server before and after a committed transition.
 - Restart after a provisional interaction submission commits but before child activation.
 - Change an included source and prove the resumed child rejects it before module execution.
-- Start two hosts and prove that one is rejected or fenced.
+- Start two servers and prove that one is rejected or fenced.
 - Reject stale child messages after a generation change.
 - Kill complete process groups on cancellation.
 - Bound malformed input and output floods.
@@ -291,7 +291,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Start a workflow from real Pi with the mock provider.
 - Commit and present an interactive request.
 - Restart Pi before submission and present the same request once.
-- Restart the host after an interactive deadline expires, close the request, and resume the same attempt into its timeout route.
+- Restart the server after an interactive deadline expires, close the request, and resume the same attempt into its timeout route.
 - Submit once and replay the same receipt for a duplicate.
 - Run workflow-specific submission validation only in a supervised child.
 - Return an actionable validation error and accept a corrected submission for the same request.
@@ -305,7 +305,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 ### Effects
 
 - Deduplicate a repeated effect request.
-- Recover a stored effect receipt after child and host restart.
+- Recover a stored effect receipt after child and server restart.
 - Mark a request uncertain when completion cannot be proved.
 - Never auto-retry an uncertain effect.
 
@@ -328,7 +328,7 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 
 - The observed event-loop starvation cannot reproduce false ownership loss.
 - A stale runner cannot write after expiry or generation change.
-- A child blocked longer than the lease cannot block host renewal.
+- A child blocked longer than the lease cannot block server renewal.
 - Run lifecycle projections remain consistent after injected crashes.
 - Expired running rows can be resumed or cancelled safely.
 - Pi restart does not lose or falsely fail pending work.
@@ -338,7 +338,7 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 - Duplicate commands and submissions return stored receipts.
 - A submission is not accepted until supervised workflow validation succeeds.
 - Effects are deduplicated or marked uncertain.
-- The extension and host execute no workflow code in production.
+- The extension and server execute no workflow code in production.
 - Pi source, private APIs, and session schemas remain unchanged.
 - The old in-process runtime and all compatibility paths are removed.
 - Local checks, real Pi end-to-end tests, Pi Reviewer, pull-request review, and CI pass.
@@ -350,4 +350,4 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 - **Pi internals:** None.
 - **Public Pi APIs:** The extension uses documented commands, tools, session lifecycle events, message sending, widgets, and status APIs.
 - **Workflow authoring API:** Graph structure stays stable. Side-effecting actions gain an explicit managed-effect or manual-recovery requirement.
-- **Runtime:** Workflow graphs execute in supervised child processes. One global host owns state and claims.
+- **Runtime:** Workflow graphs execute in supervised child processes. One global server owns state and claims.

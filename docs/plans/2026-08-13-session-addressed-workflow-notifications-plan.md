@@ -6,7 +6,7 @@ date: 2026-08-13
 
 # Route workflow reports to their starting session
 
-pi-workflows must not send one workflow's report into an unrelated conversation. A workflow started in one Pi session must report only to that session, even when another session or the standalone host executes part of the run.
+pi-workflows must not send one workflow's report into an unrelated conversation. A workflow started in one Pi session must report only to that session, even when another session or the standalone server executes part of the run.
 
 ## Requirements
 
@@ -16,14 +16,14 @@ pi-workflows must not send one workflow's report into an unrelated conversation.
 - Deliver a notification only when its target session is open.
 - Keep undelivered notifications until the target session opens again.
 - Prevent unrelated sessions from claiming session-bound runs.
-- Permit a detached host to execute a run without changing its report target.
+- Permit a detached server to execute a run without changing its report target.
 - Give workflow authors a runtime-owned notification node instead of using an agent step to relay text.
 - Migrate active path-based runs and existing queue rows without guessing their origin.
 - Remove project-wide hidden-message broadcasts and the shared project watermark.
 
 ## Data model
 
-Queue records gain an optional `origin_session_id`. Interactive runs set it from `ctx.sessionManager.getSessionId()`. ResourceManager-created detached runs leave it empty. A session runner can claim a record only when the origin is empty or matches its current session. The standalone host can claim either form.
+Queue records gain an optional `origin_session_id`. Interactive runs set it from `ctx.sessionManager.getSessionId()`. ResourceManager-created detached runs leave it empty. A session runner can claim a record only when the origin is empty or matches its current session. The standalone server can claim either form.
 
 A `workflow_notifications` table is the durable outbox:
 
@@ -48,7 +48,7 @@ The existing `run_events` table remains an execution audit feed. It does not inj
 
 ## Workflow API
 
-Add a `notify(...)` node. Its message callback returns plain text. The engine calls a host-provided notification sink and persists the resulting receipt as the node output. The node does not ask the model to relay a message and does not depend on the runner's active conversation.
+Add a `notify(...)` node. Its message callback returns plain text. The engine calls a server-provided notification sink and persists the resulting receipt as the node output. The node does not ask the model to relay a message and does not depend on the runner's active conversation.
 
 The built-in monitor uses `notify` for progress and final reports. Its check agent still decides whether a report is needed, but delivery always targets the origin session.
 
@@ -73,7 +73,7 @@ Existing lifecycle events are not converted into notifications. This prevents ol
 ## Acceptance criteria
 
 - Two open Pi sessions in the same directory cannot receive each other's workflow reports.
-- A report executed by the standalone host is delivered after the origin session opens.
+- A report executed by the standalone server is delivered after the origin session opens.
 - A report remains pending while its origin session is closed.
 - A session-bound run is not claimed by a different interactive session.
 - Duplicate polling and process restart do not duplicate a delivered notification.

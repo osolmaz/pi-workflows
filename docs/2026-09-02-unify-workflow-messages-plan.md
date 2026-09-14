@@ -1,21 +1,21 @@
 ---
-title: Unify workflow messages and restore hosted behavior
+title: Unify workflow messages and restore server-side behavior
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-02
 status: approved
 ---
 
-# Unify workflow messages and restore hosted behavior
+# Unify workflow messages and restore server-side behavior
 
 > Historical plan. The [durable execution plan](2026-09-06-durable-execution-plan.md) changed its continuation, scheduling, and automatic model-turn choices. The [workflow recovery plan](2026-09-08-workflow-recovery-plan.md) now restores the required terminal recovery and reminder behavior on the current architecture. Use this earlier plan as behavioral evidence, not as authority to revert newer ownership, request, or checkpoint fixes. Runtime restoration is pending.
 
 ## Summary
 
-The out-of-process host made workflow execution safer, but the change did not preserve all session behavior. The current host also loses track of some active model turns. A model can still be responding while the widget and `piw` show `waiting`.
+The out-of-process server made workflow execution safer, but the change did not preserve all session behavior. The current server also loses track of some active model turns. A model can still be responding while the widget and `piw` show `waiting`.
 
-This change gives the host one saved list of workflow messages that Pi must add to a conversation. A workflow message can be a step, human decision, notification, terminal turn, or follow-up prompt. Initial, reminder, and resumed prompts are the same `step` kind with different display reasons. One extension component sends every kind through documented Pi APIs.
+This change gives the server one saved list of workflow messages that Pi must add to a conversation. A workflow message can be a step, human decision, notification, terminal turn, or follow-up prompt. Initial, reminder, and resumed prompts are the same `step` kind with different display reasons. One extension component sends every kind through documented Pi APIs.
 
-The same change restores the user features removed during the host cut. It keeps one global host, one client protocol, one database, and one production runtime.
+The same change restores the user features removed during the server cut. It keeps one global server, one client protocol, one database, and one production runtime.
 
 [Workflow server](WORKFLOW_SERVER.md) remains the process and state specification. [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) remains the Pi message specification. This plan changes both contracts in place.
 
@@ -23,14 +23,14 @@ The same change restores the user features removed during the host cut. It keeps
 
 ### Active model turns can show `waiting`
 
-The extension currently reports active model work through a four-second host lease. It refreshes that lease every second.
+The extension currently reports active model work through a four-second server lease. It refreshes that lease every second.
 
 This design has several faults:
 
 - Activity starts when the first step prompt is recorded, not on every matching `agent_start` event.
 - A later model turn on the same pending step does not start new activity.
 - One delayed refresh can let the lease expire.
-- After expiry, later refreshes can be rejected because the host expects a new start.
+- After expiry, later refreshes can be rejected because the server expects a new start.
 - Concurrent refreshes can reuse a sequence number.
 - The extension hides refresh failures.
 
@@ -38,19 +38,19 @@ The durable run remains `waiting` while an interactive step is parked. When the 
 
 ### Completed results disappear immediately
 
-Before the host cut, the Pi widget kept a terminal result for 60 seconds. The current session view returns only a run that still owns the session reservation. A terminal run correctly releases that reservation, but the widget then clears at once.
+Before the server cut, the Pi widget kept a terminal result for 60 seconds. The current session view returns only a run that still owns the session reservation. A terminal run correctly releases that reservation, but the widget then clears at once.
 
 Display retention and workflow ownership are separate concerns. A terminal result can remain visible without retaining a claim, reservation, or control.
 
 ### Session behavior is split
 
-The current host saves and sends three kinds of Pi content through separate paths:
+The current server saves and sends three kinds of Pi content through separate paths:
 
 - interactive requests;
 - notifications;
 - terminal turns.
 
-Each path has different claim operations and different message fields. Reminders, resumed prompts, and follow-up prompts have no complete hosted path. Human decisions use another presentation path. This split made it possible to remove working features when the embedded executor was deleted.
+Each path has different claim operations and different message fields. Reminders, resumed prompts, and follow-up prompts have no complete server-side path. Human decisions use another presentation path. This split made it possible to remove working features when the embedded executor was deleted.
 
 ### Documents describe behavior that does not ship
 
@@ -60,21 +60,21 @@ Several reference pages still describe reminders, follow-ups, live settings cont
 
 - Show `running` for the full duration of each matching Pi model turn.
 - Keep the last terminal result visible for 60 seconds or until another workflow starts.
-- Save every workflow message through one host-owned contract.
+- Save every workflow message through one server-owned contract.
 - Use one extension component to add workflow messages to Pi.
 - Restore every user feature listed in [Behavior to restore](#behavior-to-restore).
 - Keep workflow-specific results separate from message sending.
-- Make the widget, status line, CLI, and `piw` use the same host view.
-- Preserve one global host as the only normal SQLite writer.
+- Make the widget, status line, CLI, and `piw` use the same server view.
+- Preserve one global server as the only normal SQLite writer.
 - Use documented Pi extension APIs only.
 
 ## Boundaries
 
 - Do not restore the embedded workflow executor.
 - Do not let the extension, CLI, or `piw` open live SQLite state.
-- Do not restore per-project hosts or `/resource-manager start` and `/resource-manager stop`.
+- Do not restore per-project servers or `/resource-manager start` and `/resource-manager stop`.
 - Do not send a workflow prompt into an active model turn.
-- Do not run workflow or resource manager code in the host event loop.
+- Do not run workflow or resource manager code in the server event loop.
 - Do not change Pi core, private Pi APIs, Pi session files, or Pi session schemas.
 - Do not add another database, service, runtime, compatibility reader, fallback, or feature flag.
 - Do not claim exactly-once model execution.
@@ -83,9 +83,9 @@ Several reference pages still describe reminders, follow-ups, live settings cont
 
 ## Workflow messages
 
-A workflow message is content that the host requires Pi to add to one conversation. It does not mean every message in the Pi session.
+A workflow message is content that the server requires Pi to add to one conversation. It does not mean every message in the Pi session.
 
-The host saves these kinds:
+The server saves these kinds:
 
 | Kind           | Pi behavior                 | Purpose                                                     |
 | -------------- | --------------------------- | ----------------------------------------------------------- |
@@ -116,16 +116,16 @@ type WorkflowMessage = {
 
 The exact Pi content and custom-message details remain in the existing content-addressed value store. `contentDigest` binds the saved record to those bytes. `sourceId` binds it to the feature that created it, such as an interaction request, human decision, or terminal run. Step details contain `reason: "initial" | "reminder" | "resumed"`; the workflow-message table does not store three kinds for the same behavior.
 
-`kind` determines the custom renderer, whether the message starts a model turn, and its host eligibility rule. The host does not store duplicate flags or message-to-message pointers for these derived facts.
+`kind` determines the custom renderer, whether the message starts a model turn, and its server eligibility rule. The server does not store duplicate flags or message-to-message pointers for these derived facts.
 
-`order` is the acceptance order within one origin session. The host marks one pending message as the next eligible message in the origin-session view. An earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility, so removing a follow-up or changing a continuation cannot leave a broken pointer chain.
+`order` is the acceptance order within one origin session. The server marks one pending message as the next eligible message in the origin-session view. An earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility, so removing a follow-up or changing a continuation cannot leave a broken pointer chain.
 
 The database table is `workflow_messages`. The public TypeScript name is `WorkflowMessage`. The model does not receive `workflowMessageId`, `sourceId`, internal coordination facts, or Pi entry IDs.
 
 ### Message states
 
-- `pending` means the host has no active-branch proof that Pi contains the message. The message can be new or uncertain after a process stopped.
-- `sent` means the exact message exists in the target Pi branch and the host saved its Pi entry ID.
+- `pending` means the server has no active-branch proof that Pi contains the message. The message can be new or uncertain after a process stopped.
+- `sent` means the exact message exists in the target Pi branch and the server saved its Pi entry ID.
 - `cancelled` means the source no longer requires the message.
 
 Lifecycle transactions can change `pending` to `cancelled`. Active-branch evidence changes `pending` or `cancelled` to `sent`; evidence always wins because Pi already contains the entry. `sent` is terminal. A pending message is never sent until the active coordinator reports the branch, Pi is idle, Pi has no pending input, and the branch has no matching hidden ID.
@@ -136,25 +136,25 @@ A response to a message is not another message state. Interactive request state 
 
 The version-1 client protocol replaces the separate interaction, notification, terminal-turn, and follow-up send operations with two controls:
 
-- `workflowMessage.reportBranch` reports active-branch workflow message IDs with Pi entry IDs, `isIdle`, and `hasPendingMessages`. The report is bounded to message IDs in the complete origin-session view window. The host adopts entries, closes proved-lost turns, and creates a missing message of the source's own kind.
+- `workflowMessage.reportBranch` reports active-branch workflow message IDs with Pi entry IDs, `isIdle`, and `hasPendingMessages`. The report is bounded to message IDs in the complete origin-session view window. The server adopts entries, closes proved-lost turns, and creates a missing message of the source's own kind.
 - `workflowTurn.report` records the start or end of one model turn against an open sent message.
 
-The host keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one. Only the active epoch receives the next eligible message or can report branch and turn state. This prevents two Pi processes that opened the same session from sending concurrently without adding durable per-message claim state.
+The server keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one. Only the active epoch receives the next eligible message or can report branch and turn state. This prevents two Pi processes that opened the same session from sending concurrently without adding durable per-message claim state.
 
 The extension has one `WorkflowMessageCoordinator`. It performs these steps:
 
-1. After every host connection, wait for the complete origin-session view and report the active branch before any send or turn report.
-2. Wait until the host view names the next eligible pending message, Pi is idle, and Pi has no queued user input.
+1. After every server connection, wait for the complete origin-session view and report the active branch before any send or turn report.
+2. Wait until the server view names the next eligible pending message, Pi is idle, and Pi has no queued user input.
 3. Keep that message ID in the coordinator's in-memory queued map.
 4. Check the active branch for the same hidden workflow message ID and report it when found.
 5. Recheck synchronously that Pi is still idle, has no pending input, the message is absent from the active branch, and the connection still owns the active session epoch.
 6. Call documented `pi.sendMessage()` with the custom type and turn behavior for the message kind, with no `await` between the final check and the call.
 7. Keep the message ID queued until the new Pi entry is visible.
-8. Report the active branch so the host saves the Pi entry ID and changes the message to `sent`.
+8. Report the active branch so the server saves the Pi entry ID and changes the message to `sent`.
 
-The coordinator sends one message at a time. A poll can discover work, but it cannot send an ID in the in-memory queued map. The host orders messages by session and saved order. A later eligible message cannot pass an earlier eligible message.
+The coordinator sends one message at a time. A poll can discover work, but it cannot send an ID in the in-memory queued map. The server orders messages by session and saved order. A later eligible message cannot pass an earlier eligible message.
 
-Pi can emit `agent_start` before the host records the new session entry. The coordinator keeps that start and any matching end in its in-memory session map. It first records the workflow message as `sent`, then reports the saved turn events in order. It does not drop a turn event because host confirmation was still in progress.
+Pi can emit `agent_start` before the server records the new session entry. The coordinator keeps that start and any matching end in its in-memory session map. It first records the workflow message as `sent`, then reports the saved turn events in order. It does not drop a turn event because server confirmation was still in progress.
 
 `pi.sendMessage()` does not return the saved Pi entry ID. Branch evidence therefore confirms a send. A visible entry with the hidden workflow message ID is `sent`, even when a lifecycle transaction marked that message `cancelled` before the evidence arrived.
 
@@ -184,14 +184,14 @@ The extension reports model activity from Pi's documented lifecycle events. It d
 
 ### Open-message rule
 
-`agent_start` has no message payload, so the extension and host use one closed rule:
+`agent_start` has no message payload, so the extension and server use one closed rule:
 
 - the latest sent `step` message is open while its interaction and attempt remain pending and its run is not paused;
 - a sent `terminal` message is open until its first reported turn ends;
 - a sent `followUp` message is open until its first reported turn ends;
 - `decision` and `notification` messages never open a model turn.
 
-The host rejects a start against a closed message. A normal user turn after a terminal turn has ended does not bind to the terminal message. A follow-up turn is reported for ordering and recovery, but it remains normal conversation work and does not change workflow display status to `running`.
+The server rejects a start against a closed message. A normal user turn after a terminal turn has ended does not bind to the terminal message. A follow-up turn is reported for ordering and recovery, but it remains normal conversation work and does not change workflow display status to `running`.
 
 ### Start
 
@@ -216,7 +216,7 @@ Any model turn that starts while a step interaction is pending and its run is no
 
 On `agent_end`, the extension derives `stopReason` as `completed`, `aborted`, or `error` from the documented assistant messages in the event. It reads response-entry evidence from `ctx.sessionManager.getBranch()` after the event; the entry ID can be null. It reports `ended` with the same turn ID, stop reason, and available evidence.
 
-The host applies the end and its workflow consequence in one transaction:
+The server applies the end and its workflow consequence in one transaction:
 
 - `aborted` sets the run pause and cancels the interaction's pending step messages; the interaction derives its paused state from the run;
 - `completed`, recoverable `error`, and proved `lost` apply the bounded unproductive-turn rule only when the submitted-output step is pending, not paused, and has no accepted or validating submission;
@@ -229,11 +229,11 @@ The host applies the end and its workflow consequence in one transaction:
 
 The transaction stores one immutable end event, updates activity, and creates or cancels messages together. Repeating the same report adopts that result. A stale or different turn ID cannot end newer activity.
 
-The host clears process-local activity when the client disconnects. Server startup does not close a Pi turn because the host cannot know whether Pi is still working. On `session_start`, the extension reports the active branch before new sends. If Pi is still busy, it reports `started` again with the retained turn ID. Only an idle-session branch report can close an open sent message with synthetic `stopReason: "lost"`. A lost step follows the normal unproductive-turn rule. A lost terminal or follow-up closes without reopening the completed workflow.
+The server clears process-local activity when the client disconnects. Server startup does not close a Pi turn because the server cannot know whether Pi is still working. On `session_start`, the extension reports the active branch before new sends. If Pi is still busy, it reports `started` again with the retained turn ID. Only an idle-session branch report can close an open sent message with synthetic `stopReason: "lost"`. A lost step follows the normal unproductive-turn rule. A lost terminal or follow-up closes without reopening the completed workflow.
 
 ### Display rule
 
-The host remains the only status reducer.
+The server remains the only status reducer.
 
 - A live supervised worker is `running`.
 - A live Pi model turn for a step or terminal message is `running`.
@@ -242,7 +242,7 @@ The host remains the only status reducer.
 - Terminal status appears when no terminal presentation turn is active.
 - A follow-up starts normal conversation work and does not reopen or display the completed workflow as running.
 
-Every renderer receives the same status, activity, reason, and controls from the host.
+Every renderer receives the same status, activity, reason, and controls from the server.
 
 ## Terminal result retention
 
@@ -256,7 +256,7 @@ The clear command changes only the retained view. It does not change the run, me
 
 A retained terminal view has no pause, resume, answer, cancel, or review authority unless the durable run independently permits that control. Retention does not keep a lease, worker, interaction, or session reservation.
 
-The widget and status line clear from the host view. They do not run their own retention timers.
+The widget and status line clear from the server view. They do not run their own retention timers.
 
 ## Behavior to restore
 
@@ -271,7 +271,7 @@ This applies to:
 - timed-out runs;
 - cancelled runs;
 - launch failures;
-- claim loss when safe handoff is impossible and the host commits a terminal result;
+- claim loss when safe handoff is impossible and the server commits a terminal result;
 - resource manager interruption.
 
 An ordinary claim transfer remains a handoff and creates no terminal message. A stale owner cannot create one.
@@ -280,7 +280,7 @@ The message includes the saved input, result, terminal reason, workflow identity
 
 That one turn presents the result and lets the model choose the next safe action. The model can finish with a normal response, start an authorized workflow, use Monitor for an external wait, or request a safe restart. It must stop when work is complete, the user cancelled, authority is missing, a human decision is required, or the same failure repeated.
 
-Restore the `restart` workflow-tool action. Restart creates a new immutable run with the same approved input and saved workflow identity. The host records parent and root run IDs, restart number, and the parent terminal fingerprint. It rejects:
+Restore the `restart` workflow-tool action. Restart creates a new immutable run with the same approved input and saved workflow identity. The server records parent and root run IDs, restart number, and the parent terminal fingerprint. It rejects:
 
 - restart after cancellation;
 - more than three restarts;
@@ -296,7 +296,7 @@ The request stores `unproductiveTurnEnds`, initially zero. A completed, recovera
 
 Resume clears the pause and creates one step message. Its reason is `resumed` when the request has a sent step message and `initial` otherwise. Repeated resume commands adopt the same message. A run that is already working reports `alreadyRunning` and creates no message.
 
-On `session_tree`, the coordinator reports the active branch. If a pending interaction has no entry for that interaction on the active branch, the host cancels its pending step messages and creates one resumed-reason step for that branch. If a pending decision is absent, the host creates one new `decision` message instead. Repeating the same branch report creates no duplicate. Switching back to a branch that already contains an entry for the source creates no new message.
+On `session_tree`, the coordinator reports the active branch. If a pending interaction has no entry for that interaction on the active branch, the server cancels its pending step messages and creates one resumed-reason step for that branch. If a pending decision is absent, the server creates one new `decision` message instead. Repeating the same branch report creates no duplicate. Switching back to a branch that already contains an entry for the source creates no new message.
 
 Assistant-message steps keep their existing visible-response rules. They do not use the submitted-output reminder rule.
 
@@ -307,9 +307,9 @@ Restore these workflow-tool actions and slash commands:
 - `queue-follow-up`;
 - `remove-follow-up`.
 
-Controllers keep their existing typed methods. All callers use the same host command path and authority checks.
+Controllers keep their existing typed methods. All callers use the same server command path and authority checks.
 
-Acceptance creates the `workflow_follow_ups` source record and one `followUp` workflow message in the same transaction. The source run and message stay attached to the chain member that accepted them; continuation does not rewrite either row. The host walks the continuation chain to decide the final source outcome. No terminal or earlier-message pointer is required. The host makes the next follow-up eligible only when:
+Acceptance creates the `workflow_follow_ups` source record and one `followUp` workflow message in the same transaction. The source run and message stay attached to the chain member that accepted them; continuation does not rewrite either row. The server walks the continuation chain to decide the final source outcome. No terminal or earlier-message pointer is required. The server makes the next follow-up eligible only when:
 
 - the source workflow completed successfully;
 - its terminal turn ended;
@@ -324,7 +324,7 @@ Removal changes the source record and pending workflow message to `cancelled` in
 
 ### Live settings
 
-Restore `change-settings` in the workflow tool and `/workflow` command. The host remains the only writer.
+Restore `change-settings` in the workflow tool and `/workflow` command. The server remains the only writer.
 
 A change:
 
@@ -335,11 +335,11 @@ A change:
 - never changes immutable input, completed work, or a running node;
 - returns the same stored receipt on an identical retry.
 
-The step prompt includes only settings paths and values that the actor can read. Actor identity comes from the host connection and command source, not model input.
+The step prompt includes only settings paths and values that the actor can read. Actor identity comes from the server connection and command source, not model input.
 
 ### Human decisions and Telegram
 
-Keep the current protected Pi decision path. A `decision` workflow message displays the complete approved presentation without starting a model turn. A verified answer still enters through the existing host decision command.
+Keep the current protected Pi decision path. A `decision` workflow message displays the complete approved presentation without starting a model turn. A verified answer still enters through the existing server decision command.
 
 Restore:
 
@@ -350,28 +350,28 @@ Restore:
 - verified Telegram answers;
 - expiry, settlement, and duplicate protection.
 
-The host supervises channel adapter children. The private protocol has `channel.ready`, `channel.present`, `channel.answer`, `channel.settle`, and `channel.exiting` messages. Each state-changing message includes the channel profile, saved request or settlement record, expected revision, and stable message ID. Channel children receive only the approved presentation and private channel configuration needed for their work. They do not open SQLite, load workflow code, change runs directly, or receive the decision subject. The host validates and saves every claim and receipt.
+The server supervises channel adapter children. The private protocol has `channel.ready`, `channel.present`, `channel.answer`, `channel.settle`, and `channel.exiting` messages. Each state-changing message includes the channel profile, saved request or settlement record, expected revision, and stable message ID. Channel children receive only the approved presentation and private channel configuration needed for their work. They do not open SQLite, load workflow code, change runs directly, or receive the decision subject. The server validates and saves every claim and receipt.
 
-A pending external-channel decision is unsettled work and keeps the on-demand host and its adapter child alive until answer, expiry, cancellation, or explicit channel shutdown.
+A pending external-channel decision is unsettled work and keeps the on-demand server and its adapter child alive until answer, expiry, cancellation, or explicit channel shutdown.
 
 Credentials remain in their existing private files. The change does not copy, print, or move a token.
 
 ### Session history in `piw`
 
-Restore workflow-related Pi conversation recording through one batched host client operation. The extension uses documented Pi events and sends only records associated with an active workflow range:
+Restore workflow-related Pi conversation recording through one batched server client operation. The extension uses documented Pi events and sends only records associated with an active workflow range:
 
 - turn start and end;
 - message start and end;
 - settled prompt and assistant entries;
 - tool start and result.
 
-The host writes the existing `session_segments`, `session_entries`, and `session_events` tables. It deduplicates settled entries by Pi entry ID and binds each workflow attempt to its first and last entries. A capture failure does not fail workflow execution.
+The server writes the existing `session_segments`, `session_entries`, and `session_events` tables. It deduplicates settled entries by Pi entry ID and binds each workflow attempt to its first and last entries. A capture failure does not fail workflow execution.
 
 The extension does not read or edit Pi session files. Raw session content remains excluded from normal status output.
 
 ### Widget, status, and command details
 
-Restore these details from the host view:
+Restore these details from the server view:
 
 - current node ID in the status line;
 - display reason and allowed controls;
@@ -391,7 +391,7 @@ Restore TypeScript viewer step scrubbing and its one-second elapsed-time redraw.
 - One origin session presents one workflow message at a time.
 - Protected human decisions cannot be answered by the model-facing tool.
 - Escape pauses only the exact matching workflow turn.
-- Pause, cancel, answer, update, and submit remain durable host commands.
+- Pause, cancel, answer, update, and submit remain durable server commands.
 - A pending interaction on a paused run rejects update and submit until resume.
 - Workflow and resource manager code remain in supervised children.
 - Side effects remain idempotent or explicitly ambiguous.
@@ -451,13 +451,13 @@ The later status work binds only to `workflow_messages`. Do not implement a temp
 
 - Run Telegram adapters as supervised children.
 - Restore channel setup, reload, delivery, answer, and settlement.
-- Add batched session recording through the host client.
+- Add batched session recording through the server client.
 - Restore conversation panes and viewer controls.
 - Remove any remaining dead channel or recorder code.
 
 ### Update reference documentation
 
-Update [Workflow server](WORKFLOW_SERVER.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](LIVE_REPLAY_PROTOCOL.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](SESSION_EVENT_JOURNAL.md), [Rust TUI viewer](TUI_VIEWER.md), the earlier host plans, the authoring reference, and README to match the implementation.
+Update [Workflow server](WORKFLOW_SERVER.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](LIVE_REPLAY_PROTOCOL.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](SESSION_EVENT_JOURNAL.md), [Rust TUI viewer](TUI_VIEWER.md), the earlier server plans, the authoring reference, and README to match the implementation.
 
 Remove temporary current-version warnings only after live checks pass.
 
@@ -474,10 +474,10 @@ Remove temporary current-version warnings only after live checks pass.
 - Accept and reject a submission around turn end and prove no stale reminder-reason step survives.
 - Emit `agent_start` and `agent_end` before the message receipt or session view finishes and prove both reports are applied in order.
 - Reject a start against a closed terminal message and report a follow-up turn without showing the completed workflow as `running`.
-- Disconnect and reconnect the host client during a turn.
-- Restart only the host during an active Pi turn and prove it does not mark the turn `lost`; then restart Pi and prove an idle-session branch report closes the unended turn as `lost`.
+- Disconnect and reconnect the server client during a turn.
+- Restart only the server during an active Pi turn and prove it does not mark the turn `lost`; then restart Pi and prove an idle-session branch report closes the unended turn as `lost`.
 - Prove `waiting` appears only when no matching worker or turn is active.
-- Prove `paused` appears only after the host accepts pause.
+- Prove `paused` appears only after the server accepts pause.
 - Keep a terminal result visible while its terminal message is pending or its first turn is open, then for 60 seconds after that turn ends; replace it immediately when another run starts.
 
 ### Workflow message tests
@@ -485,11 +485,11 @@ Remove temporary current-version warnings only after live checks pass.
 - Cover every message kind and every state transition.
 - Hold Pi busy with an eligible pending message and prove no duplicate message appears.
 - Crash before send, after send, and before the Pi entry ID is recorded.
-- Adopt an existing branch entry after Pi, extension, or host restart.
+- Adopt an existing branch entry after Pi, extension, or server restart.
 - Prove active-branch absence only when no hidden ID exists, Pi is idle, and Pi has no pending messages.
 - Replace the active session coordinator and prove the old connection cannot send or report state.
 - Disconnect after send but before branch proof, keep the message `pending`, reconnect, report the branch before any send, and adopt the existing entry.
-- Restart only the host while Pi remains open and prove the reconnect branch report resolves pending message evidence.
+- Restart only the server while Pi remains open and prove the reconnect branch report resolves pending message evidence.
 - Reject stale session coordinator epochs, wrong-session branch reports, and mismatched turn-end reports.
 - Cancel a pending message through its source lifecycle, then report a late matching Pi entry and prove evidence changes it to `sent`.
 - Prove the model never receives workflow message IDs or internal send state.
@@ -508,7 +508,7 @@ Remove temporary current-version warnings only after live checks pass.
 - Keep a slash-looking follow-up as plain model input.
 - Change settings during a run and prove only later attempts use the new value.
 - Answer one protected decision through Pi and one through a fake Telegram adapter.
-- Keep the host alive while an external decision remains pending.
+- Keep the server alive while an external decision remains pending.
 - Clear a retained terminal view without changing its terminal run or message.
 - Record conversation entries and events and display them in `piw`.
 - Restore status details, progress history, list paging, and viewer controls.
@@ -551,13 +551,13 @@ Run one real-model live test with an explicit provider and model. Run Pi Reviewe
 
 The work is complete when:
 
-- the host owns every workflow message before Pi sends it;
+- the server owns every workflow message before Pi sends it;
 - one extension component sends every workflow message kind;
 - all replaced send paths are removed;
 - the widget, status line, CLI, and `piw` agree on activity and status;
 - active model turns never fall back to `waiting`;
 - terminal results remain visible for the defined period without retaining authority;
-- initial, reminder, and resumed step prompts, terminal recovery, restart, settings, follow-ups, protected decisions, Telegram channels, and conversation recording work through the host;
+- initial, reminder, and resumed step prompts, terminal recovery, restart, settings, follow-ups, protected decisions, Telegram channels, and conversation recording work through the server;
 - all restored command details and viewer behavior have tests;
 - old incompatible state fails without mutation and gives a clear backup-and-reset instruction;
 - no Pi core change, direct live SQLite client, embedded executor, second runtime, or compatibility path exists;

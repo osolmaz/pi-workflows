@@ -56,7 +56,7 @@ Reading shared state never gives mutation authority. Every durable write checks 
 
 ## Boundaries
 
-The workflow engine stays independent of Pi. The Pi extension servers the engine and connects it to a conversation. Controllers manage durable external resources. Viewers read recorded state without changing it.
+The workflow engine stays independent of Pi. The Pi extension connects the engine to a conversation. Resource managers own durable external resources. Viewers read recorded state without changing it.
 
 Keep these layers separate and connect them through small public interfaces.
 

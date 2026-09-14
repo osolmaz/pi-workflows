@@ -259,9 +259,9 @@ Add `--list-themes`. A picker Apply writes only the theme selection, preserves
 unknown config keys and comments, and uses a same-directory temporary file plus
 atomic rename. Applying a manual theme disables `auto_switch`, matching Herdr.
 
-Server light/dark detection and automatic sibling switching are a final theme
+Terminal light/dark detection and automatic sibling switching are a final theme
 phase, not a prerequisite for manual theme selection. When added, query the
-host terminal background only through standard terminal escape sequences,
+terminal background only through standard terminal escape sequences,
 restore terminal modes on exit, and retain the manually configured theme when
 the terminal does not answer.
 
@@ -551,10 +551,10 @@ Exit criterion: every node-card field is visible, node bounds stay unchanged
 across every live and replay state, graph nodes are selectable, and an
 80-column terminal remains usable through panning.
 
-### 8. Conversation polish and host-theme switching
+### 8. Conversation polish and terminal-theme switching
 
 - Add structured tool rows, expansion, and sticky auto-follow.
-- Add optional host appearance detection and dark/light sibling switching.
+- Add optional terminal appearance detection and dark/light sibling switching.
 - Verify terminal state restoration after normal exit, errors, and Ctrl-C.
 
 Exit criterion: live tool activity remains readable and auto-switching never

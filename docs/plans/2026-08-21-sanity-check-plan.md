@@ -194,7 +194,7 @@ After strict verification succeeds, an assistant-message `agent` shows the compl
 
 The graph then includes `plain-summary`. The summarizer receives the verified verdict and detailed report, keeps the verdict, and writes one short plain-language response. It uses the plain-summary workflow limits of 2,000 characters and five sentences. The detailed response always settles before the summary starts.
 
-Neither response uses `presentationPrompt`, and neither can change the verified verdict. A final compute node returns the original strict `SanityCheckResult` as the workflow result. Both visible responses and their normal assistant receipts use existing Pi session and SQLite records. A detached host parks before these session-visible nodes until the origin Pi session can continue them.
+Neither response uses `presentationPrompt`, and neither can change the verified verdict. A final compute node returns the original strict `SanityCheckResult` as the workflow result. Both visible responses and their normal assistant receipts use existing Pi session and SQLite records. A detached server parks before these session-visible nodes until the origin Pi session can continue them.
 
 ## Implementation plan
 
@@ -209,7 +209,7 @@ Neither response uses `presentationPrompt`, and neither can change the verified 
 9. Pass the private profile and exact dispatch through Sanity Check without changing its review behavior or progress schema. Remove any `--no-extensions` launch guidance.
 10. Add the ordered detailed assistant response and included plain summary, then return the original verified result from a final compute node.
 11. Change the built-in Sanity Check revision from 3 to 4 for the presentation graph change.
-12. Add temporary fixture extensions and full unit, integration, interactive Pi, and standalone host coverage.
+12. Add temporary fixture extensions and full unit, integration, interactive Pi, and standalone server coverage.
 13. Update this plan and `docs/WORKFLOWS.md` to match the shipped behavior.
 14. Run the complete repository gate and inspect the full public diff.
 15. After mock-provider verification of the provider architecture, run one bounded real acceptance on OpenClaw pull request 126028 with `openai-codex/gpt-5.6-sol` and high thinking. Abort immediately if any child reports another provider or model. Do not modify OpenClaw.
