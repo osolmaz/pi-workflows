@@ -6,6 +6,7 @@ import {
   MAX_PROTOCOL_MESSAGE_BYTES,
   NdjsonFrameDecoder,
   clientRequestFingerprint,
+  encodeProtocolFrameOrNull,
   encodeProtocolLine,
   encodeProtocolMessage,
   parseClientMessage,
@@ -135,6 +136,30 @@ describe("client protocol fixtures", () => {
       },
     ];
     for (const value of invalid) expectInvalid(value);
+  });
+
+  it("measures the complete frame and refuses a frame above the client limit", () => {
+    const response: ClientResponse = {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "response",
+      requestId: "frame-request",
+      outcome: "accepted",
+      receipt: { value: "small" },
+    };
+    expect(encodeProtocolFrameOrNull(response)).toEqual(encodeProtocolLine(response));
+    // A nested value that is too large is refused as one frame, not as one page.
+    expect(
+      encodeProtocolFrameOrNull({
+        ...response,
+        receipt: { value: "x".repeat(MAX_PROTOCOL_MESSAGE_BYTES) },
+      }),
+    ).toBeNull();
+    expect(() =>
+      encodeProtocolLine({
+        ...response,
+        receipt: { value: "x".repeat(MAX_PROTOCOL_MESSAGE_BYTES) },
+      }),
+    ).toThrow("exceeds 1 MiB");
   });
 
   it("frames split messages and rejects oversized frames", () => {

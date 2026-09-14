@@ -1068,6 +1068,89 @@ describe("current session state", () => {
     state.close();
   }, 60_000);
 
+  it("keeps a run list frame inside the client limit when one name is very long", async () => {
+    const projectPath = await makeTempDir("long-name-project");
+    const databasePath = path.join(await makeTempDir("long-name-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // The workflow name has no length limit, and a run row can hold a name far
+    // larger than one client frame.
+    const longName = `long-name-${"n".repeat(2 * 1024 * 1024)}`;
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    // The run definition carries the same long name, as a real definition would.
+    const snapshot = { ...createDefinitionSnapshot(workflow), name: longName };
+    claimTestRun(queue, {
+      runId: "long-name-run",
+      workflowName: longName,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest: createHash("sha256").update(canonicalJson(snapshot)).digest("hex"),
+      definitionSnapshot: snapshot,
+      input: { task: "long-name" },
+      runnerId: "long-name",
+      claimToken: "claim-long-name",
+      leaseMs: 60_000,
+      originSessionId: "session-long-name",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("long-name-run", "claim-long-name"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const page = views.list(0, 10);
+    const item = page.items.find((candidate) => candidate.runId === "long-name-run");
+    if (item === undefined) throw new Error("run list did not carry the run");
+    // One free-form value is cut at 4 KiB on a character boundary, so the whole
+    // page stays inside one frame.
+    expect(Buffer.byteLength(item.workflowName, "utf8")).toBeLessThanOrEqual(SESSION_TEXT_LIMIT);
+    expect(item.workflowName.endsWith("\uFFFD")).toBe(false);
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "response",
+      requestId: "long-name-request",
+      outcome: "accepted",
+      receipt: page as unknown as never,
+    });
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES);
+    // The complete name stays reachable through the run content the bounded
+    // definition points at.
+    const view = views.run("long-name-run");
+    if (view === null) throw new Error("run view missing");
+    const reference = view.workflow as {
+      name?: string;
+      content?: { $artifact?: { path?: string } };
+    };
+    expect(Buffer.byteLength(reference.name ?? "", "utf8")).toBeLessThanOrEqual(SESSION_TEXT_LIMIT);
+    const definitionPath = reference.content?.$artifact?.path;
+    if (definitionPath === undefined) throw new Error("definition was not externalized");
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    for (;;) {
+      const chunk = views.content("long-name-run", definitionPath, offset) as {
+        data: string;
+        nextOffset: number;
+        complete: boolean;
+      } | null;
+      if (chunk === null) throw new Error("definition content missing");
+      chunks.push(Buffer.from(chunk.data, "base64"));
+      offset = chunk.nextOffset;
+      if (chunk.complete) break;
+    }
+    expect(Buffer.concat(chunks).toString("utf8")).toContain(longName);
+    state.close();
+  }, 60_000);
+
   it("holds the session snapshot at its size when stored history reaches thousands", async () => {
     const projectPath = await makeTempDir("long-history-project");
     const databasePath = path.join(await makeTempDir("long-history-state"), "state.sqlite");
