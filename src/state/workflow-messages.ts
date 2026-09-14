@@ -369,24 +369,27 @@ export class WorkflowMessageStore {
   }
 
   /**
-   * Make a delivered decision message deliverable again.
+   * Make one delivered interactive prompt deliverable again.
    *
-   * A decision prompt keeps its identity across a branch change, because the
-   * prompt describes one still pending decision. The delivery that left the branch
-   * therefore has to become pending again, or the session waits forever for an
-   * answer to a prompt it can no longer show. A step prompt instead returns as a
-   * new resumed message with a new identity, so it does not come through here.
+   * A prompt keeps its identity across a branch change while its request is still
+   * pending. The delivery that left the branch therefore has to become pending
+   * again, or the session waits forever for an answer to a prompt it can no longer
+   * show. The caller names the exact message the recovery found delivered: a
+   * decision prompt keeps its original identity, and a step prompt first returns as
+   * a new resumed message that later keeps its own identity. Only that one message
+   * changes, so a source can never hold two pending messages at once. A terminal or
+   * notification message needs no re-delivery, so it does not come through here.
    */
-  reopenForSource(sourceId: string, now: number = Date.now()): number {
+  reopenMessage(workflowMessageId: string, now: number = Date.now()): number {
     return this.state.transaction(
       () =>
         this.state.connection
           .prepare(
             `UPDATE workflow_messages
              SET status = 'pending', pi_session_entry_id = NULL, updated_at = ?
-             WHERE source_id = ? AND status = 'sent' AND kind = 'decision'`,
+             WHERE workflow_message_id = ? AND status = 'sent' AND kind IN ('step', 'decision')`,
           )
-          .run(now, sourceId).changes,
+          .run(now, workflowMessageId).changes,
     );
   }
 

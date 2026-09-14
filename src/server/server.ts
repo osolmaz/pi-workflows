@@ -1107,11 +1107,12 @@ export class WorkflowServer {
               interaction,
               interaction.kind === "decision" ? "initial" : "resumed",
             );
-            // A decision prompt keeps its identity, so the delivered message is the
-            // one that has to return. A step prompt already returned as a new
-            // resumed message, which is pending and needs nothing further.
+            // A decision prompt keeps its original identity, so the delivered
+            // message is the one that has to return. A step prompt first returns as
+            // a new resumed message and keeps that identity, so a later loss of the
+            // resumed message also has to return through the same delivered row.
             if (ensured.status !== "pending") {
-              this.serverState.workflowMessages.reopenForSource(interaction.requestId, now);
+              this.serverState.workflowMessages.reopenMessage(ensured.workflowMessageId, now);
             }
           }
         }
