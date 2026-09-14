@@ -12,6 +12,14 @@ import type {
 } from "./types.js";
 
 const NODE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+/**
+ * The largest node identity a bounded client view can carry. Every view that
+ * carries a node identity bounds it at this size, because one client frame is at
+ * most 1 MiB and no view may cut an identity. A longer identity is refused here,
+ * where the workflow still loads, instead of leaving a stored run that no client
+ * can display.
+ */
+export const NODE_ID_MAX_BYTES = 4 * 1024;
 
 function fail(message: string): never {
   throw new Error(`Invalid workflow definition: ${message}`);
@@ -358,6 +366,11 @@ export function assertValidWorkflowDefinitionShape(
       (!options.compiled && segments.length !== 1)
     ) {
       fail(`node id ${JSON.stringify(nodeId)} must match ${NODE_ID_PATTERN.source}`);
+    }
+    if (Buffer.byteLength(nodeId, "utf8") > NODE_ID_MAX_BYTES) {
+      fail(
+        `node id ${JSON.stringify(nodeId.slice(0, 64))} must be at most ${NODE_ID_MAX_BYTES} bytes`,
+      );
     }
     // Ids like __proto__ or toString would collide with Object prototype
     // members in the plain-object maps used for outputs and results.

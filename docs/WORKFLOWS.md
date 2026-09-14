@@ -94,6 +94,11 @@ Top-level fields:
 fields) and validates the graph (unknown targets, duplicate outgoing edges,
 unreachable nodes) when a run starts.
 
+A node ID matches `^[A-Za-z_][A-Za-z0-9_-]*$` and is at most 4 KiB. The size
+limit keeps every node identity inside one bounded client frame, because the run
+view carries the identity in full and never cuts it. A longer ID fails the
+definition with a message that names the limit.
+
 ## Node context
 
 Every node callback receives the same context object:
@@ -597,7 +602,8 @@ that fails stays retryable, and the widget keeps the loaded window until the
 next one arrives. A window that follows a node row too large for one frame holds
 no rows, so an upward step from it returns to the last window that held rows.
 The compact run also leaves out a current or waiting node identity that cannot
-fit one frame, so an unbounded node id never reaches the client.
+fit one frame. New workflows cannot hold such an identity, because the definition
+refuses a node ID above 4 KiB, and state written before that limit needs a reset.
 The extension remembers the window the user scrolled to, so a
 subscription it has to arm again after a connection loss returns that window
 instead of the default one. `Shift+Up` and

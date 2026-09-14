@@ -804,3 +804,40 @@ which allows at most 128 ASCII characters, so the widest legal decision row cann
 8 KiB detail budget. The row copies each kept value exactly and stops before the budget. No bound was
 added for an unreachable shape. The property is pinned by `test/server-view.test.ts` "keeps a decision
 row inside the frame at the largest legal choice value".
+
+### The remaining per-tick cost, and the node identity that broke the run view
+
+Two defects remained after the bounded-batch change. Both are fixed in this change.
+
+The first defect was the periodic cost of the session view cache key. The key still aggregated the
+session's stored messages (`count(*)`, `max(updated_at)`, `sum(order_number)`), so every 250 ms
+server tick paid a scan proportional to the session's history, and the selection walk could read
+every stored message again because the key named the selected message. The cache key now reads one
+row of an indexed counter, and the per-run activity revision reads indexed per-run maxima instead of
+two global table scans. The selection walk names a candidate filter for each step, so the database
+returns the rows that step can use, in the step's own order. Each filter is a superset of the step's
+rule, and the step still applies its exact rule to every row it receives. The walk result is held
+under a key of indexed facts: the session message counter, the run activity revision, the pending
+request revision, the open turn revision, and the run state counts of the session. A repeated view
+call over a session whose messages did not change therefore reads no message row.
+
+The counter is maintained by three triggers on `workflow_messages`, so a direct SQL writer moves it
+as well. Measured on one session with fifty thousand stored messages, ten warm rounds per value:
+the old aggregate took 5447 us, the counter read 9.8 us, a repeated session view call 245 us, and a
+repeated `currentWorkflowMessage` call 56 us. Before the memo, the same repeated view call took
+28.4 ms. `test/server-view.test.ts` "holds the session snapshot at its size when stored history
+reaches thousands" asserts that a repeat call reads no batch, and "keeps the eligible message behind
+neighbours the candidate filters skip" pins each filter against two hundred ineligible neighbours.
+
+The second defect was a node identity above one frame. `NODE_ID_PATTERN` had no length limit, so a
+valid node ID larger than 1 MiB left the detailed run view undeliverable: the step row and the taken
+transition carry the identity in full, the client rejects a frame above 1 MiB, and the view could
+not be shown at all. An identity is never cut and never left out of a view that carries it, because a
+partial identity names no node. The workflow definition therefore refuses a node ID above 4 KiB
+(`NODE_ID_MAX_BYTES`) when it loads, with a message that names the limit, and the detailed run view
+of a workflow inside that limit always fits one frame. `test/review-fixes.test.ts` "refuses a node id
+above the identity limit" pins the refusal and the boundary, and `test/server-view.test.ts` "keeps
+the detailed run view inside one frame when a node identity fills the limit" pins the deliverable
+view at the limit. The two view tests that drove the omission path now build the oversized identity
+through a hand-made definition snapshot, which is the only way that shape can still exist: state
+written before this limit. That state needs a reset, which the alpha state policy requires.

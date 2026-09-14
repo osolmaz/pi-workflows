@@ -557,9 +557,45 @@ CREATE TABLE workflow_messages (
 CREATE INDEX workflow_messages_session_idx
   ON workflow_messages(target_session_id, status, order_number);
 CREATE INDEX workflow_messages_run_idx ON workflow_messages(run_id, order_number);
+CREATE INDEX workflow_messages_session_order_idx
+  ON workflow_messages(target_session_id, order_number);
+CREATE INDEX workflow_messages_updated_idx ON workflow_messages(updated_at);
+CREATE INDEX workflow_messages_run_updated_idx ON workflow_messages(run_id, updated_at);
 CREATE INDEX workflow_messages_source_idx ON workflow_messages(kind, source_id, order_number);
 CREATE UNIQUE INDEX workflow_messages_pending_step_source_idx
   ON workflow_messages(source_id) WHERE kind = 'step' AND status = 'pending';
+
+-- The session view cache key must notice every message write without reading the
+-- session's messages. The database maintains this counter on every insert, update,
+-- or delete, so no writer can forget it and the read costs one row lookup.
+CREATE TABLE session_message_revisions (
+  target_session_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL CHECK (revision > 0)
+) STRICT;
+
+CREATE TRIGGER workflow_messages_revision_insert AFTER INSERT ON workflow_messages
+BEGIN
+  INSERT INTO session_message_revisions(target_session_id, revision)
+  VALUES (new.target_session_id, 1)
+  ON CONFLICT(target_session_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER workflow_messages_revision_update AFTER UPDATE ON workflow_messages
+BEGIN
+  INSERT INTO session_message_revisions(target_session_id, revision)
+  VALUES (new.target_session_id, 1)
+  ON CONFLICT(target_session_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO session_message_revisions(target_session_id, revision)
+  VALUES (old.target_session_id, 1)
+  ON CONFLICT(target_session_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER workflow_messages_revision_delete AFTER DELETE ON workflow_messages
+BEGIN
+  INSERT INTO session_message_revisions(target_session_id, revision)
+  VALUES (old.target_session_id, 1)
+  ON CONFLICT(target_session_id) DO UPDATE SET revision = revision + 1;
+END;
 
 CREATE TABLE workflow_turns (
   workflow_turn_id TEXT PRIMARY KEY,
@@ -585,6 +621,11 @@ CREATE UNIQUE INDEX workflow_turns_open_message_idx
 CREATE UNIQUE INDEX workflow_turns_open_session_idx
   ON workflow_turns(target_session_id) WHERE state = 'started';
 CREATE INDEX workflow_turns_session_idx ON workflow_turns(target_session_id, state, started_at);
+CREATE INDEX workflow_turns_run_idx ON workflow_turns(run_id, started_at);
+CREATE INDEX workflow_turns_message_idx ON workflow_turns(workflow_message_id, started_at DESC);
+CREATE INDEX workflow_turns_activity_idx ON workflow_turns(COALESCE(ended_at, started_at));
+CREATE INDEX workflow_turns_run_activity_idx
+  ON workflow_turns(run_id, COALESCE(ended_at, started_at));
 
 CREATE TABLE session_terminal_views (
   target_session_id TEXT PRIMARY KEY,

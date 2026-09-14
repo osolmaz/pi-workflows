@@ -24,6 +24,7 @@ import { action, compute, defineWorkflow, idempotentEffect } from "../src/workfl
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { choice, defineHumanChoices, humanDecision } from "../src/workflows/human-decision.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
+import { NODE_ID_MAX_BYTES } from "../src/workflows/schema.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
@@ -31,6 +32,27 @@ import { claimTestRun } from "./queue-helpers.js";
 
 /** Free-form session text one compact projection carries, in bytes. */
 const SESSION_TEXT_LIMIT = 4 * 1024;
+
+/**
+ * Rename one node in a compiled definition snapshot. A stored run written before
+ * the node identity limit can hold an identity that no bounded view can carry, so
+ * the view tests build that state directly instead of compiling it.
+ */
+function renameSnapshotNode(
+  snapshot: ReturnType<typeof createDefinitionSnapshot>,
+  from: string,
+  to: string,
+): void {
+  snapshot.nodes = Object.fromEntries(
+    Object.entries(snapshot.nodes).map(([nodeId, node]) => [nodeId === from ? to : nodeId, node]),
+  );
+  if (snapshot.startAt === from) snapshot.startAt = to;
+  snapshot.edges = snapshot.edges.map((edge) => ({
+    ...edge,
+    from: edge.from === from ? to : edge.from,
+    ...("to" in edge && edge.to === from ? { to } : {}),
+  }));
+}
 
 const base: WorkflowDisplayFacts = {
   queueStatus: "parked",
@@ -1394,8 +1416,220 @@ describe("current session state", () => {
     expect(batches.mock.calls.every((call) => (call[1]?.limit ?? 0) <= 32)).toBe(true);
     expect(rowsRead).toBeLessThanOrEqual(32 * batches.mock.calls.length);
     expect(fullScans).not.toHaveBeenCalled();
+    batches.mockClear();
+    // A repeat call over a session whose messages did not change costs the indexed
+    // key and not the stored history, so a periodic view call reads no message row.
+    views.session("session-long-history", null);
+    views.currentWorkflowMessage("session-long-history");
+    expect(batches).not.toHaveBeenCalled();
     batches.mockRestore();
     fullScans.mockRestore();
+    state.close();
+  }, 120_000);
+
+  it("keeps the eligible message behind neighbours the candidate filters skip", async () => {
+    const projectPath = await makeTempDir("filter-eq-project");
+    const databasePath = path.join(await makeTempDir("filter-eq-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-filter-eq";
+    const sessionId = "session-filter-eq";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: { root: { kind: "builtin", id: "echo", revision: "test" }, mounted: [] },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: { task: "filter" },
+      runnerId: "filter-eq",
+      claimToken: "claim-filter-eq",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-filter-eq"),
+    });
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "filter" } }),
+    }).run(workflow, { task: "filter" }, { runId });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
+      .run(runId);
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const create = (
+      index: number,
+      kind: "step" | "notification" | "terminal" | "followUp",
+      now: number,
+    ) =>
+      serverState.workflowMessages.create({
+        workflowMessageId: `filter-message-${kind}-${index}`,
+        runId,
+        targetSessionId: sessionId,
+        kind,
+        sourceId: `filter-source-${kind}-${index}`,
+        idempotencyKey: `filter-message-${kind}-${index}`,
+        content: {
+          schema: "pi-workflows.workflow-message-content.v1",
+          customType: `test-${kind}`,
+          content: `filter message ${index}`,
+          display: false,
+          details: { note: `${index}` },
+          triggerTurn: kind === "step" || kind === "followUp",
+        },
+        now,
+      });
+    const deliver = (messageId: string, now: number = Date.now()) =>
+      serverState.workflowMessages.adoptBranch(
+        sessionId,
+        [{ workflowMessageId: messageId, piSessionEntryId: `entry-${messageId}` }],
+        new Set([messageId]),
+        now,
+      );
+    const request = (requestId: string) =>
+      serverState.createInteractiveRequest({
+        requestId,
+        runId,
+        attemptId,
+        targetSessionId: sessionId,
+        kind: "agent",
+        contract: {
+          prompt: "Continue",
+          contract: {
+            requestId,
+            runId,
+            workflowName: workflow.name,
+            nodeId: "reply",
+            attemptId,
+            completion: "submit",
+          },
+        },
+      });
+    const countRowsRead = () => {
+      const original = serverState.workflowMessages.listSessionSummaryBatch.bind(
+        serverState.workflowMessages,
+      );
+      const rows = { count: 0, batches: 0 };
+      const spy = vi
+        .spyOn(serverState.workflowMessages, "listSessionSummaryBatch")
+        .mockImplementation((targetSessionId, options) => {
+          const batch = original(targetSessionId, options);
+          rows.count += batch.length;
+          rows.batches += 1;
+          return batch;
+        });
+      return { rows, restore: () => spy.mockRestore() };
+    };
+    const base = 1_700_000_000_000;
+    const liveId = () => {
+      const message = serverState.workflowMessages.latestForSource("step", "filter-source-live");
+      if (message === undefined) throw new Error("live step message missing");
+      return message.workflowMessageId;
+    };
+    // A pending step waits for the model, and a neighbour without a request cannot.
+    request("filter-source-live");
+    const liveMessageId = liveId();
+    for (let index = 1; index <= 200; index += 1) create(index, "step", base + index);
+    let probe = countRowsRead();
+    let selected = views.currentWorkflowMessage(sessionId);
+    expect(selected?.workflowMessageId).toBe(liveMessageId);
+    expect(probe.rows.count).toBeLessThanOrEqual(32);
+    probe.restore();
+    // A delivered follow-up that no turn has picked up still needs a model turn,
+    // and a delivered notification never does.
+    state.connection
+      .prepare(
+        `UPDATE interactive_requests SET status = 'cancelled', accepted_submission_id = NULL,
+           settled_at = NULL, revision = revision + 1 WHERE request_id = ?`,
+      )
+      .run("filter-source-live");
+    const followUpId = create(300, "followUp", base + 300).workflowMessageId;
+    deliver(followUpId);
+    for (let index = 1; index <= 200; index += 1) {
+      deliver(create(400 + index, "notification", base + 400 + index).workflowMessageId);
+    }
+    probe = countRowsRead();
+    selected = views.currentWorkflowMessage(sessionId);
+    expect(selected?.workflowMessageId).toBe(followUpId);
+    expect(probe.rows.count).toBeLessThanOrEqual(32);
+    probe.restore();
+    // A cancelled step that Pi still holds stays current, and a delivered step whose
+    // request is still pending does not come back through this path.
+    const followUpTurn = serverState.workflowMessages.startTurn({
+      workflowMessageId: followUpId,
+      runId,
+      targetSessionId: sessionId,
+    });
+    serverState.workflowMessages.endTurn({
+      workflowMessageId: followUpId,
+      workflowTurnId: followUpTurn.workflowTurnId,
+      runId,
+      targetSessionId: sessionId,
+      stopReason: "completed",
+    });
+    deliver(liveMessageId);
+    probe = countRowsRead();
+    selected = views.currentWorkflowMessage(sessionId);
+    expect(selected?.workflowMessageId).toBe(liveMessageId);
+    expect(probe.rows.count).toBeLessThanOrEqual(32);
+    probe.restore();
+    // Once Pi reports the turn for that step, only the retention window can still
+    // keep a terminal message current.
+    serverState.workflowMessages.startTurn({
+      workflowMessageId: liveMessageId,
+      runId,
+      targetSessionId: sessionId,
+    });
+    const liveTurn = serverState.workflowMessages.openTurnForMessage(liveMessageId);
+    if (liveTurn === undefined) throw new Error("live turn missing");
+    serverState.workflowMessages.endTurn({
+      workflowMessageId: liveMessageId,
+      workflowTurnId: liveTurn.workflowTurnId,
+      runId,
+      targetSessionId: sessionId,
+      stopReason: "completed",
+    }); // A terminal message inside the retention window stays current even when older
+    // ones outside it sit above it in durable order.
+    const recent = Date.now();
+    state.connection
+      .prepare("UPDATE runs SET status = 'completed', finished_at = ? WHERE run_id = ?")
+      .run(recent, runId);
+    for (let index = 1; index <= 200; index += 1) {
+      const old = recent - 3_600_000 - index;
+      deliver(create(800 + index, "terminal", old).workflowMessageId, old);
+    }
+    const retainedId = create(1_200, "terminal", recent).workflowMessageId;
+    deliver(retainedId, recent);
+    for (let index = 1; index <= 200; index += 1) {
+      const old = recent - 7_200_000 - index;
+      deliver(create(1_300 + index, "terminal", old).workflowMessageId, old);
+    }
+    probe = countRowsRead();
+    selected = views.currentWorkflowMessage(sessionId);
+    // The retained terminal message keeps its run current, and the walk reaches the
+    // window in one batch instead of reading the terminals outside it.
+    expect(selected?.runId).toBe(runId);
+    expect(selected?.kind).toBe("terminal");
+    expect(probe.rows.count).toBeLessThanOrEqual(32);
+    probe.restore();
     state.close();
   }, 120_000);
 
@@ -2034,27 +2268,31 @@ describe("current session state", () => {
       const state = new StateDatabase({ filePath: databasePath });
       const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
       const serverState = new ServerStateStore(databasePath, { state });
-      // A valid node id has no length limit.
+      // A stored definition can hold a node identity above the load limit, because
+      // the limit arrived after that state was written. The window leaves such a row
+      // out, and the load limit keeps a new definition from adding one.
       const hugeId = `m${"x".repeat(200 * 1024)}`;
       const nodeIds =
         placement === "first"
           ? [hugeId, "node-000", "node-001", "node-002"]
           : ["aaa", hugeId, "zzz"];
       const startAt = placement === "first" ? hugeId : "aaa";
+      const compiledIds = nodeIds.map((nodeId) => (nodeId === hugeId ? "huge" : nodeId));
       const workflow = compileWorkflowDefinition(
         defineWorkflow({
           name: "node-huge-row",
-          startAt,
+          startAt: startAt === hugeId ? "huge" : startAt,
           nodes: Object.fromEntries(
-            nodeIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
+            compiledIds.map((nodeId, index) => [nodeId, compute({ run: () => index })]),
           ),
-          edges: nodeIds.slice(1).map((nodeId, index) => ({
-            from: nodeIds[index] ?? startAt,
+          edges: compiledIds.slice(1).map((nodeId, index) => ({
+            from: compiledIds[index] ?? "huge",
             to: nodeId,
           })),
         }),
       );
       const snapshot = createDefinitionSnapshot(workflow);
+      renameSnapshotNode(snapshot, "huge", hugeId);
       const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
       const runId = `run-node-huge-row-${placement}`;
       const sessionId = `session-node-huge-row-${placement}`;
@@ -2108,25 +2346,99 @@ describe("current session state", () => {
     60_000,
   );
 
+  it("keeps the detailed run view inside one frame when a node identity fills the limit", async () => {
+    const projectPath = await makeTempDir("node-id-limit-project");
+    const databasePath = path.join(await makeTempDir("node-id-limit-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // The load limit admits a node identity that fills it, and the detailed run
+    // view must still fit one client frame, because the step row and the taken
+    // transition carry that identity in full.
+    const nodeId = `n${"x".repeat(NODE_ID_MAX_BYTES - 1)}`;
+    expect(Buffer.byteLength(nodeId, "utf8")).toBe(NODE_ID_MAX_BYTES);
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "node-id-limit",
+        startAt: nodeId,
+        nodes: { [nodeId]: compute({ run: () => 1 }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const runId = "run-node-id-limit";
+    const sessionId = "session-node-id-limit";
+    claimTestRun(queue, {
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:node-id-limit",
+      workflowSource: {
+        root: { kind: "builtin", id: "node-id-limit", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "node-id-limit",
+      claimToken: "claim-node-id-limit",
+      leaseMs: 60_000,
+      originSessionId: sessionId,
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority(runId, "claim-node-id-limit"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      workflow,
+      {},
+      { runId },
+    );
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.run(runId);
+    if (view === null) throw new Error("run view missing");
+    expect(view.state).not.toBeNull();
+    const runState = view.state as unknown as { steps: Array<{ nodeId: string }> };
+    expect(runState.steps[0]?.nodeId).toBe(nodeId);
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "response",
+      requestId: "node-id-limit-request",
+      outcome: "accepted",
+      receipt: view as unknown as never,
+    });
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES);
+    state.close();
+  }, 60_000);
+
   it("leaves out a node identity that cannot fit the frame", async () => {
     const projectPath = await makeTempDir("node-huge-scalar-project");
     const databasePath = path.join(await makeTempDir("node-huge-scalar-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
     const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
-    // A valid node id has no length limit, so it can exceed one frame on its own.
-    // The window leaves such a row out, and the run facts leave the identity out
-    // for the same reason, so no unbounded scalar reaches the client.
+    // A stored definition can hold a node identity above the load limit, because
+    // the limit arrived after that state was written. The window leaves such a row
+    // out, and the run facts leave the identity out for the same reason, so no
+    // unbounded scalar reaches the client.
     const hugeId = `m${"x".repeat(200 * 1024)}`;
     const workflow = compileWorkflowDefinition(
       defineWorkflow({
         name: "node-huge-scalar",
-        startAt: hugeId,
-        nodes: { [hugeId]: compute({ run: () => 0 }) },
+        startAt: "huge",
+        nodes: { huge: compute({ run: () => 0 }) },
         edges: [],
       }),
     );
     const snapshot = createDefinitionSnapshot(workflow);
+    renameSnapshotNode(snapshot, "huge", hugeId);
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
     const runId = "run-node-huge-scalar";
     const sessionId = "session-node-huge-scalar";

@@ -12,6 +12,7 @@ import {
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
 import { extractJsonValue } from "../src/workflows/json.js";
+import { NODE_ID_MAX_BYTES } from "../src/workflows/schema.js";
 import { runShellAction } from "../src/workflows/shell.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
@@ -280,6 +281,43 @@ describe("reserved node ids", () => {
         }),
       ).toThrow(/shadows an Object prototype member|must match/);
     }
+  });
+});
+
+describe("node identity size", () => {
+  it("accepts a node id that fills the identity limit", () => {
+    const nodeId = `n${"x".repeat(NODE_ID_MAX_BYTES - 1)}`;
+    expect(Buffer.byteLength(nodeId, "utf8")).toBe(NODE_ID_MAX_BYTES);
+    const workflow = defineWorkflow({
+      name: "node-id-limit",
+      startAt: nodeId,
+      nodes: { [nodeId]: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    expect(workflow.startAt).toBe(nodeId);
+    expect(() => validateWorkflowDefinition(workflow)).not.toThrow();
+  });
+
+  it("refuses a node id above the identity limit, because no bounded view can carry it", () => {
+    const nodeId = `n${"x".repeat(NODE_ID_MAX_BYTES)}`;
+    expect(Buffer.byteLength(nodeId, "utf8")).toBe(NODE_ID_MAX_BYTES + 1);
+    expect(() =>
+      defineWorkflow({
+        name: "node-id-over",
+        startAt: nodeId,
+        nodes: { [nodeId]: compute({ run: () => 1 }) },
+        edges: [],
+      }),
+    ).toThrow(`must be at most ${NODE_ID_MAX_BYTES} bytes`);
+    // The message names the identity in short form, so it stays readable.
+    expect(() =>
+      defineWorkflow({
+        name: "node-id-over-huge",
+        startAt: `n${"x".repeat(200 * 1024)}`,
+        nodes: { [`n${"x".repeat(200 * 1024)}`]: compute({ run: () => 1 }) },
+        edges: [],
+      }),
+    ).toThrow(`must be at most ${NODE_ID_MAX_BYTES} bytes`);
   });
 });
 
