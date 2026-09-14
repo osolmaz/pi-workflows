@@ -13,6 +13,12 @@ import {
 import { initializeViewerRun, recordViewerDeltas } from "../state/viewer.js";
 import { WorkflowMessageStore } from "../state/workflow-messages.js";
 
+/**
+ * Queue states that hold the one-active-run reservation for a Pi session. Keep this list
+ * equal to the `run_queue_active_session_idx` predicate in the state schema.
+ */
+const ACTIVE_SESSION_QUEUE_STATUSES = ["queued", "starting", "running", "parked"] as const;
+
 export type WorkflowRunLaunchStatus =
   | "queued"
   | "starting"
@@ -545,6 +551,27 @@ export class WorkflowRunQueueStore extends ProjectStore {
       }
     } else if (options.restartNumber !== undefined || options.parentRunRevision !== undefined) {
       throw new Error("A root workflow run cannot declare restart metadata");
+    }
+    // A headless run does not hold the session reservation, so it may run beside an
+    // interactive run of the same Pi session.
+    const sessionReservation =
+      options.executionMode === "headless" ? undefined : options.originSessionId;
+    if (sessionReservation !== undefined) {
+      const active = this.state.connection
+        .prepare(
+          `SELECT run_id AS runId, status AS status FROM run_queue
+           WHERE origin_session_id = ?
+             AND status IN (${ACTIVE_SESSION_QUEUE_STATUSES.map(() => "?").join(", ")})
+           ORDER BY created_at, run_id LIMIT 1`,
+        )
+        .get(sessionReservation, ...ACTIVE_SESSION_QUEUE_STATUSES) as
+        | { runId: string; status: string }
+        | undefined;
+      if (active !== undefined) {
+        throw new Error(
+          `Pi session ${sessionReservation} already has active workflow run ${active.runId} (${active.status}). Wait for it to finish, inspect it, or cancel it before starting another run.`,
+        );
+      }
     }
     const resourceId = resourceIdFor("run", options.runId);
     const definitionHash = this.state.putJson(options.definitionSnapshot, now);

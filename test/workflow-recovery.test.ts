@@ -161,7 +161,7 @@ it("prevents concurrent recovery siblings and cancels the sole queued child", as
     f.reserve("first");
     f.recovery.attach("first", source);
     expect(() => f.reserve("second")).toThrow(
-      "UNIQUE constraint failed: run_queue.origin_session_id",
+      "Pi session session already has active workflow run first (queued). Wait for it to finish, inspect it, or cancel it before starting another run.",
     );
     expect(await client.request({ operation: "run.cancel", runId: "first" })).toMatchObject({
       outcome: "accepted",

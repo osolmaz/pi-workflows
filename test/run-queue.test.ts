@@ -264,7 +264,9 @@ describe("workflow run queue in canonical SQLite", () => {
     const { store } = await setup();
     reserve(store);
     expect(() => reserve(store)).toThrow(/already reserved/);
-    expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
+    expect(() => reserve(store, "run-2")).toThrow(
+      "Pi session session-1 already has active workflow run run-1 (queued). Wait for it to finish, inspect it, or cancel it before starting another run.",
+    );
     store.claimWorkflowRun({
       runId: "run-1",
       runnerId: "server",
@@ -272,7 +274,9 @@ describe("workflow run queue in canonical SQLite", () => {
       leaseMs: 10_000,
     });
     expect(store.parkWorkflowRun({ runId: "run-1", claimToken: "park" })).toBe(true);
-    expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
+    expect(() => reserve(store, "run-2")).toThrow(
+      "Pi session session-1 already has active workflow run run-1 (parked). Wait for it to finish, inspect it, or cancel it before starting another run.",
+    );
     expect(store.getWorkflowRun("run-2")).toBeUndefined();
     store.close();
   });
