@@ -22,6 +22,7 @@ import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { action, compute, defineWorkflow, idempotentEffect } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { choice, defineHumanChoices, humanDecision } from "../src/workflows/human-decision.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
@@ -1148,6 +1149,103 @@ describe("current session state", () => {
       if (chunk.complete) break;
     }
     expect(Buffer.concat(chunks).toString("utf8")).toContain(longName);
+    state.close();
+  }, 60_000);
+
+  it("keeps a decision row inside the frame at the largest legal choice value", async () => {
+    const projectPath = await makeTempDir("long-choice-project");
+    const databasePath = path.join(await makeTempDir("long-choice-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
+    const serverState = new ServerStateStore(databasePath, { state });
+    // A choice value is the key a human answer sends back. Its pattern allows up to
+    // 128 characters, so the row copies every kept value exactly and stops before
+    // the 8 KiB detail budget. This bounds the widest legal decision row.
+    const wideValue = (index: number): string =>
+      `c${`${index}`.padStart(3, "0")}${"v".repeat(123)}`;
+    const wideChoices = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [
+        wideValue(index),
+        choice({ label: `Choice ${index}` }),
+      ]),
+    );
+    const choices = defineHumanChoices({
+      approve: choice({ label: "Approve" }),
+      reject: choice({ label: "Reject" }),
+      ...wideChoices,
+    });
+    const workflow = defineWorkflow({
+      name: "long-choice",
+      startAt: "gate",
+      nodes: {
+        gate: humanDecision({
+          audience: "operator",
+          choices,
+          request: () => ({
+            title: "Approve the action",
+            subject: { action: "test" },
+            presentation: {
+              schema: "pi-workflows.decision-presentation.v1",
+              summary: "A human must approve this test action.",
+              blocks: [{ kind: "paragraph", text: "Review the action first." }],
+            },
+          }),
+        }),
+      },
+      edges: [],
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled) as unknown as Record<string, unknown>;
+    claimTestRun(queue, {
+      runId: "long-choice-run",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:long-choice",
+      workflowSource: {
+        root: { kind: "builtin", id: "long-choice", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest: createHash("sha256").update(canonicalJson(snapshot)).digest("hex"),
+      definitionSnapshot: snapshot,
+      input: { task: "long-choice" },
+      runnerId: "long-choice",
+      claimToken: "claim-long-choice",
+      leaseMs: 60_000,
+      originSessionId: "session-long-choice",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("long-choice-run", "claim-long-choice"),
+    });
+    const views = new ServerViewStore(
+      state,
+      queue,
+      serverState,
+      runs,
+      () => false,
+      () => false,
+    );
+    const view = views.session("session-long-choice", null);
+    const row = view.run?.nodes?.find((node) => node.nodeId === "gate");
+    if (row?.humanDecision === undefined || row.humanDecision === null) {
+      throw new Error("decision row missing");
+    }
+    const kept = row.humanDecision.choices;
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(choices && Object.keys(choices).length);
+    expect(kept.every((entry) => entry.value.length <= 128)).toBe(true);
+    expect(kept.every((entry) => !entry.value.endsWith("\uFFFD"))).toBe(true);
+    // The complete decision stays available through the detailed run view.
+    const detailed = views.run("long-choice-run");
+    expect(detailed).not.toBeNull();
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "long-choice",
+      event: "session_snapshot",
+      revision: 1,
+      payload: view as unknown as never,
+    });
+    expect(encoded.byteLength).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES / 4);
     state.close();
   }, 60_000);
 

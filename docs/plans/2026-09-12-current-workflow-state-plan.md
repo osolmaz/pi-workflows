@@ -797,3 +797,10 @@ snapshot at its size when stored history reaches thousands".
 
 The complete history stays reachable in every case: the run page carries every stored message, and
 the run view points at the complete definition content.
+
+A later review round reported that a human-decision choice value is copied into the compact session
+row without a bound. That value is validated by `CHOICE_PATTERN` in `src/workflows/human-decision.ts`,
+which allows at most 128 ASCII characters, so the widest legal decision row cannot grow past the
+8 KiB detail budget. The row copies each kept value exactly and stops before the budget. No bound was
+added for an unreachable shape. The property is pinned by `test/server-view.test.ts` "keeps a decision
+row inside the frame at the largest legal choice value".
