@@ -143,7 +143,9 @@ export class ServerViewStore {
         );
         return {
           runId: run.runId,
-          workflowName: run.workflowName,
+          // One free-form value must not push a list frame past the client limit.
+          // The complete name stays in the run definition.
+          workflowName: boundSessionText(run.workflowName),
           originSessionId: run.originSessionId,
           createdAt: run.createdAt,
           updatedAt: run.updatedAt,
@@ -833,7 +835,13 @@ export class ServerViewStore {
     ) {
       return this.registerContent(runId, original, "application/json");
     }
-    const nodeEntries = Object.entries(workflow.nodes);
+    const allNodeEntries = Object.entries(workflow.nodes);
+    // A node identity larger than one bounded value is left out, never cut, so one
+    // node entry cannot exceed the page budget on its own. The complete definition
+    // stays reachable through the content reference below.
+    const nodeEntries = allNodeEntries.filter(
+      ([nodeId]) => Buffer.byteLength(nodeId, "utf8") <= SESSION_TEXT_BYTES,
+    );
     const boundedNodeEntries = byteBoundedForwardPage(nodeEntries, ([nodeId, node]) => [
       nodeId,
       this.projectWorkflowNode(runId, node),
@@ -848,11 +856,13 @@ export class ServerViewStore {
     const edges = byteBoundedForwardPage(workflow.edges, (edge) => this.projectValue(runId, edge));
     return {
       schema: workflow.schema,
-      name: workflow.name,
+      // One free-form value must not push a run frame past the client limit. The
+      // complete definition stays in the run content, reachable by its digest.
+      name: boundSessionText(workflow.name),
       startAt: workflow.startAt,
       nodes,
       nodeStart: 0,
-      nodeTotal: nodeEntries.length,
+      nodeTotal: allNodeEntries.length,
       edges,
       edgeStart: 0,
       edgeTotal: workflow.edges.length,
@@ -1388,7 +1398,9 @@ function manifest(
   return {
     schema: "pi-workflows.run-manifest.v1",
     runId: run.runId,
-    workflowName: run.workflowName,
+    // The complete name stays in the run definition, so the list frame cannot
+    // grow with one free-form value.
+    workflowName: boundSessionText(run.workflowName),
     workflowSource: workflowRootSource(run.workflowSource),
     startedAt: run.startedAt ?? run.createdAt,
     ...(run.finishedAt === null ? {} : { finishedAt: run.finishedAt }),

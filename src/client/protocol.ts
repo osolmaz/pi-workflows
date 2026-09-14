@@ -129,11 +129,19 @@ export function encodeProtocolMessage(message: ClientMessage): Buffer {
   return encoded;
 }
 
+/**
+ * Encode one client frame, or return null when the complete frame exceeds the
+ * client frame limit. Every outbound frame goes through this measurement, so no
+ * nested value can push a frame past the limit unnoticed.
+ */
+export function encodeProtocolFrameOrNull(message: ClientMessage): Buffer | null {
+  const encoded = Buffer.concat([Buffer.from(canonicalJson(message), "utf8"), Buffer.from("\n")]);
+  return encoded.byteLength > MAX_PROTOCOL_MESSAGE_BYTES ? null : encoded;
+}
+
 export function encodeProtocolLine(message: ClientMessage): Buffer {
-  const encoded = Buffer.concat([encodeProtocolMessage(message), Buffer.from("\n")]);
-  if (encoded.byteLength > MAX_PROTOCOL_MESSAGE_BYTES) {
-    throw new ClientProtocolError("Client protocol message exceeds 1 MiB");
-  }
+  const encoded = encodeProtocolFrameOrNull(message);
+  if (encoded === null) throw new ClientProtocolError("Client protocol message exceeds 1 MiB");
   return encoded;
 }
 

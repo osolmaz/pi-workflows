@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import { WorkflowClient } from "../src/client/client.js";
 import {
+  CLIENT_PROTOCOL_SCHEMA,
+  MAX_PROTOCOL_MESSAGE_BYTES,
   encodeProtocolLine,
   maxSocketPathBytes,
   NdjsonFrameDecoder,
@@ -2167,6 +2169,50 @@ export default defineWorkflow({ name: "branch-report-source", startAt: "work", n
     } finally {
       observed.close();
       await client.close();
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("refuses a frame above the client limit and keeps the socket", async () => {
+    const databasePath = path.join(await makeTempDir("frame-writer-state"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    await server.start();
+    const socket = new net.Socket();
+    const frames: Buffer[] = [];
+    const write = vi.spyOn(socket, "write").mockImplementation((chunk: string | Uint8Array) => {
+      frames.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk));
+      return true;
+    });
+    const privateServer = server as unknown as {
+      writeClientFrame: (target: net.Socket, message: unknown) => { status: "sent" | "oversized" };
+    };
+    try {
+      // The one writer measures the complete frame, so a response a projection
+      // cannot keep small is refused instead of closing the connection.
+      expect(
+        privateServer.writeClientFrame(socket, {
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "response",
+          requestId: "frame-writer",
+          outcome: "accepted",
+          payload: { value: "x".repeat(MAX_PROTOCOL_MESSAGE_BYTES) },
+        }),
+      ).toMatchObject({ status: "oversized" });
+      expect(write).not.toHaveBeenCalled();
+      expect(
+        privateServer.writeClientFrame(socket, {
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "response",
+          requestId: "frame-writer",
+          outcome: "accepted",
+          payload: { value: "small" },
+        }),
+      ).toMatchObject({ status: "sent" });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(frames[0]?.byteLength ?? 0).toBeLessThan(MAX_PROTOCOL_MESSAGE_BYTES);
+      expect(socket.destroyed).toBe(false);
+    } finally {
+      socket.destroy();
       await server.stop();
     }
   }, 60_000);

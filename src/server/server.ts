@@ -18,12 +18,13 @@ import {
 import { WorkflowClient } from "../client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
-  encodeProtocolLine,
+  encodeProtocolFrameOrNull,
   assertSocketPathSupported,
   clientSocketPath,
   NdjsonFrameDecoder,
   parseClientRequest,
   type ClientEvent,
+  type ClientMessage,
   type ClientOutcome,
   type ClientRequest,
   type ClientResponse,
@@ -201,6 +202,13 @@ type ClientConnection = {
   /** Set when a change must publish after the pass that is already running. */
   publishQueued: boolean;
 };
+
+/**
+ * The result of one measured frame write. `drained` is set when the socket
+ * applied backpressure, and the caller decides whether to wait for it and whether
+ * a failed wait matters for its own message.
+ */
+type ClientFrameWrite = { status: "sent"; drained: Promise<void> | null } | { status: "oversized" };
 
 type SessionCoordinator = {
   connectionId: string;
@@ -586,14 +594,13 @@ export class WorkflowServer {
       publishQueued: false,
     };
     this.connections.set(socket, connection);
-    socket.write(
-      encodeProtocolLine({
-        schema: CLIENT_PROTOCOL_SCHEMA,
-        type: "hello",
-        connectionId: connection.id,
-        packageVersion: PACKAGE_VERSION,
-      }),
-    );
+    const hello = this.writeClientFrame(socket, {
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "hello",
+      connectionId: connection.id,
+      packageVersion: PACKAGE_VERSION,
+    });
+    if (hello.status === "sent") void hello.drained?.catch(() => undefined);
     const decoder = new NdjsonFrameDecoder();
     socket.on("data", (chunk: Buffer) => {
       let frames: Buffer[];
@@ -607,7 +614,22 @@ export class WorkflowServer {
         void (async () => {
           const request = parseClientRequest(frame);
           const response = await this.handleClientRequest(connection, request);
-          if (!socket.write(encodeProtocolLine(response))) await waitForSocketDrain(socket);
+          // One request must not lose the connection. A response that cannot fit
+          // one frame is replaced by a bounded failure the caller can read, which
+          // keeps the limit, the socket, and the retry rate safe.
+          const written = this.writeClientFrame(socket, response);
+          if (written.status === "oversized") {
+            const bounded = this.writeClientFrame(socket, {
+              schema: CLIENT_PROTOCOL_SCHEMA,
+              type: "response",
+              requestId: response.requestId,
+              outcome: "rejected",
+              error: "Response exceeds the 1 MiB client frame limit",
+            });
+            if (bounded.status === "sent" && bounded.drained !== null) await bounded.drained;
+          } else if (written.drained !== null) {
+            await written.drained;
+          }
           this.publishConnection(connection);
         })().catch(() => {
           socket.destroy();
@@ -1318,6 +1340,21 @@ export class WorkflowServer {
     }
   }
 
+  /**
+   * The one writer for every outbound frame: the hello message, direct responses,
+   * subscription events, and subscription failures. It measures the complete
+   * frame, so a frame above the client limit never leaves this server. The caller
+   * decides what that means for its own message, and which failures it can see.
+   */
+  private writeClientFrame(socket: Socket, message: ClientMessage): ClientFrameWrite {
+    const line = encodeProtocolFrameOrNull(message);
+    if (line === null) return { status: "oversized" };
+    return {
+      status: "sent",
+      drained: socket.write(line) ? null : waitForSocketDrain(socket),
+    };
+  }
+
   private failSubscription(
     connection: ClientConnection,
     subscriptionId: string,
@@ -1334,13 +1371,10 @@ export class WorkflowServer {
         message: message.slice(0, 300),
       },
     };
-    try {
-      if (!connection.socket.write(encodeProtocolLine(event))) {
-        void waitForSocketDrain(connection.socket).catch(() => undefined);
-      }
-    } catch {
-      // A closed socket needs no failure notice.
-    }
+    // A closed socket needs no failure notice, and this failure frame is small by
+    // construction, so a failed write needs no further handling.
+    const written = this.writeClientFrame(connection.socket, event);
+    if (written.status === "sent") void written.drained?.catch(() => undefined);
   }
 
   private async publishSubscription(
@@ -1379,9 +1413,14 @@ export class WorkflowServer {
         : {}),
       payload,
     };
-    if (!connection.socket.write(encodeProtocolLine(event))) {
-      await waitForSocketDrain(connection.socket);
+    // A frame above the client limit is a projection failure for this one
+    // subscription, so the caller replaces it with the bounded failure frame and
+    // the connection stays open.
+    const written = this.writeClientFrame(connection.socket, event);
+    if (written.status === "oversized") {
+      throw new Error("Projection frame exceeds the 1 MiB client frame limit");
     }
+    if (written.drained !== null) await written.drained;
   }
 
   private async submitInteractionAndWait(request: ClientRequest): Promise<ClientResponse> {
