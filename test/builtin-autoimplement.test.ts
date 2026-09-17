@@ -1120,7 +1120,13 @@ describe("built-in autoimplement", () => {
       route: "ready",
       originatingWorkflow: "autodoc",
       qualifiedNode: "documentation/verify",
-      workspace: {},
+      workspace: {
+        mode: "pullRequest",
+        repository: "/repo",
+        branch: "feat/prompt-evidence",
+        baseBranch: "main",
+        cwd: "/repo",
+      },
       changedFiles: ["src/a.ts"],
       candidateCommands: {
         schema: "pi-workflows.command-batch-result.v1",
@@ -1207,6 +1213,7 @@ describe("built-in autoimplement", () => {
     expect(prompt).toContain(failure);
     expect(prompt).toContain("The failing check is deterministic.");
     expect(prompt).toContain("fingerprint-one");
+    expect(prompt).toContain("feat/prompt-evidence");
     expect(prompt).toMatch(/Observation: (.+)\nRecent attempts: /);
     expect(prompt).toContain("You are the decider for this turn");
   });

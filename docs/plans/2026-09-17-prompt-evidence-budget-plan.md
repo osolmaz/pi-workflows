@@ -181,7 +181,7 @@ collapsed ledger is over budget, every entry is collapsed and the caller reports
 `src/builtins/change-verification.workflow.ts` exports one view for `CHANGE_VERIFICATION_SCHEMA`. It
 keeps:
 
-- `route`, `reason`, `failureFingerprint`, `originatingWorkflow`, `qualifiedNode`;
+- `route`, `reason`, `failureFingerprint`, `originatingWorkflow`, `qualifiedNode`, `workspace`;
 - `changedFiles`, `evidence`, `outputReferences`;
 - the five finding lists as `{ checkId, kind, summary, fingerprint, candidateOutputRef, baseOutputRef }`;
 - `repairAttempts` as `{ attempt, kind, fingerprint, changedFiles, result }`;
@@ -250,8 +250,9 @@ limit.
 - `evidenceRef` is stable for equal values;
 - `projectLedger` projects every entry output;
 - `boundLedger` collapses the oldest entries first, keeps the newest entry whole, leaves a ledger that
-  already fits unchanged, collapses every entry when the budget cannot hold one, and treats a ledger
-  that JSON cannot serialize as over budget instead of throwing.
+  already fits unchanged, counts the ledger brackets and separators when it decides, collapses every
+  entry when the budget cannot hold one, and treats a ledger that JSON cannot serialize as over
+  budget instead of throwing.
 
 `test/builtin-autoimplement.test.ts`, one regression case:
 
@@ -262,8 +263,8 @@ limit.
 - the recorded routes are exactly `implementation`, `redesign`, and `blocked`, so route availability
   is unchanged;
 - the decide prompt built from that record is at or below `PROMPT_CEILING_CHARS`, stays under 50,000
-  characters, keeps the verification reason, the failure summary, and the fingerprint, and contains
-  none of the log text;
+  characters, keeps the verification reason, the failure summary, the fingerprint, and the prepared
+  workspace branch, and contains none of the log text;
 - the prompt still matches `Observation: …\nRecent attempts: …`, and the existing prompt-content
   tests pass with no edit.
 

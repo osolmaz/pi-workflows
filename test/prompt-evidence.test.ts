@@ -183,6 +183,15 @@ describe("boundLedger", () => {
     for (const item of bounded) expect(isEvidenceRef(item.output)).toBe(true);
   });
 
+  it("accounts for the ledger brackets and separators when it decides to collapse", () => {
+    const ledger = [entry(1, { text: "old".repeat(1_000) }), entry(2, { text: "newest" })];
+    const budget = ledgerChars(ledger) - 1;
+    const bounded = boundLedger(ledger, budget);
+    expect(ledgerChars(bounded)).toBeLessThanOrEqual(budget);
+    expect(isEvidenceRef(bounded[0]?.output)).toBe(true);
+    expect(bounded[1]?.output).toEqual({ text: "newest" });
+  });
+
   it("treats a ledger JSON cannot serialize as over budget instead of throwing", () => {
     const cyclic: Record<string, unknown> = { name: "cycle" };
     cyclic.self = cyclic;
