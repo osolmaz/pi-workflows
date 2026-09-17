@@ -551,20 +551,23 @@ const AUTOIMPLEMENT_EVIDENCE_VIEWS: EvidenceViews = new Map([
   ],
 ]);
 
+/** The node whose output the decide prompt shows on its own `Observation:` line. */
+const OBSERVATION_STEP_NODE = "observe";
+
 /**
  * Step results a decide prompt lists, newest last.
  *
- * The observation already shows the latest control attempt, and an include records two steps for one
- * result: the terminal node of the workflow it includes, and a return step that wraps that same
- * output. Listing either one twice would show one result twice without adding evidence, so the ledger
- * keeps the terminal node, which holds the result itself.
+ * The observation already shows the latest control attempt and the output of the step that produced
+ * it, and an include records two steps for one result: the terminal node of the workflow it includes,
+ * and a return step that wraps that same output. Listing either one again would show one result twice
+ * without adding evidence, so the ledger keeps the terminal node, which holds the result itself.
  */
 function controlEvidenceLedger(context: WorkflowNodeContext): EvidenceLedgerEntry[] {
   const latest = latestControlAttempt(context);
   const entries: EvidenceLedgerEntry[] = [];
   for (const step of context.state.steps.slice(-12)) {
     if (step.attemptId === latest?.attemptId) continue;
-    if (isIncludedReturnStep(step.nodeId)) continue;
+    if (step.nodeId === OBSERVATION_STEP_NODE || isIncludedReturnStep(step.nodeId)) continue;
     entries.push(evidenceEntry(step));
   }
   return entries;
@@ -699,7 +702,6 @@ function isIncludedControlReturn(nodeId: string): boolean {
 function isIncludedReturnStep(nodeId: string): boolean {
   return nodeId.includes("__piw_exit_");
 }
-
 function latestControlAttempt(context: WorkflowNodeContext) {
   for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
     const step = context.state.steps[index];
