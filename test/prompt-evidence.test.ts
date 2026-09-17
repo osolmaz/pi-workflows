@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   EVIDENCE_MAX_DEPTH,
+  EVIDENCE_MAX_FIELDS,
   EVIDENCE_MAX_ITEMS,
   EVIDENCE_REF_SCHEMA,
   EVIDENCE_TEXT_CHARS,
   PROMPT_CEILING_CHARS,
+  boundEvidence,
   boundLedger,
   evidenceRef,
   isEvidenceRef,
@@ -67,6 +69,16 @@ describe("projectEvidence", () => {
       schema: EVIDENCE_REF_SCHEMA,
       omitted: 5,
     });
+  });
+
+  it("keeps a bounded number of object fields and names the rest", () => {
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < EVIDENCE_MAX_FIELDS + 5; index += 1)
+      wide[`file-${index}`] = "digest";
+    const projected = projectEvidence(wide, NO_VIEWS) as Record<string, unknown>;
+    expect(Object.keys(projected)).toHaveLength(EVIDENCE_MAX_FIELDS + 1);
+    expect(projected["file-0"]).toBe("digest");
+    expect(projected["omittedFields"]).toMatchObject({ schema: EVIDENCE_REF_SCHEMA, omitted: 5 });
   });
 
   it("collapses a subtree deeper than the depth limit", () => {
@@ -160,6 +172,24 @@ describe("projectEvidence", () => {
     const ref = evidenceRef({ a: 1 });
     expect(ref).toEqual(evidenceRef({ a: 1 }));
     expect(ref.chars).toBe(JSON.stringify({ a: 1 }).length);
+  });
+});
+
+describe("boundEvidence", () => {
+  it("collapses the largest field first and keeps the small fields", () => {
+    const value = { availableRoutes: ["a", "b"], latestAttempt: { blob: longText(200_000) } };
+    const bounded = boundEvidence(value, 400) as Record<string, unknown>;
+    expect(bounded["availableRoutes"]).toEqual(["a", "b"]);
+    expect(isEvidenceRef(bounded["latestAttempt"])).toBe(true);
+  });
+
+  it("leaves a value that already fits unchanged", () => {
+    const value = { availableRoutes: ["a"] };
+    expect(boundEvidence(value, 1_000)).toEqual(value);
+  });
+
+  it("returns a value that is not a plain object unchanged", () => {
+    expect(boundEvidence("text", 1)).toBe("text");
   });
 });
 

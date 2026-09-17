@@ -10,7 +10,11 @@ import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
 import { compute, defineWorkflow } from "../src/workflows/index.js";
-import { PROMPT_CEILING_CHARS } from "../src/workflows/prompt-evidence.js";
+import {
+  EVIDENCE_MAX_ITEMS,
+  EVIDENCE_TEXT_CHARS,
+  PROMPT_CEILING_CHARS,
+} from "../src/workflows/prompt-evidence.js";
 import {
   applyWorkflowSettingsPatch,
   resolveInitialWorkflowSettings,
@@ -1240,6 +1244,38 @@ describe("built-in autoimplement", () => {
         },
       ],
     });
+  });
+
+  it("shortens the largest observation field instead of failing when evidence is too wide", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
+    const cell = "x".repeat(EVIDENCE_TEXT_CHARS);
+    const rows = Array.from({ length: EVIDENCE_MAX_ITEMS }, () => ({
+      cells: Array.from({ length: EVIDENCE_MAX_ITEMS }, () => cell),
+    }));
+    const prompt = await decide.prompt({
+      input: { task: "Ship the fix", repository: "/repo", scope: "Only /repo" },
+      outputs: {
+        observe: {
+          decisionNumber: 3,
+          decisionLimit: 24,
+          consecutiveNoProgressAttempts: 0,
+          progressFingerprint: `sha256:${"b".repeat(64)}`,
+          lastRoute: "documentation",
+          availableRoutes: ["implementation", "redesign", "blocked"],
+          latestAttempt: { nodeId: "documentation", outcome: "ok", output: { rows } },
+        },
+      },
+      results: {},
+      state: { steps: [] },
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CEILING_CHARS);
+    expect(prompt).toContain("availableRoutes");
+    expect(prompt).toContain("pi-workflows.evidence-ref.v1");
+    expect(prompt).not.toContain(cell);
   });
 
   it("uses one controller for all branch choices and returns", async () => {

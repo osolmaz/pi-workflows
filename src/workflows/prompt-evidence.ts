@@ -30,6 +30,9 @@ export const EVIDENCE_TEXT_CHARS = 4_000;
 /** Longest array kept in full. Extra items become one ref that names the count. */
 export const EVIDENCE_MAX_ITEMS = 20;
 
+/** Most fields kept per object. Extra fields become one ref that names the count. */
+export const EVIDENCE_MAX_FIELDS = 200;
+
 /** Deepest structured value kept in full. Deeper subtrees become one ref. */
 export const EVIDENCE_MAX_DEPTH = 8;
 
@@ -89,6 +92,37 @@ export function evidenceRef(value: unknown): EvidenceRef {
 /** Whether a value is already a bounded stand-in. */
 export function isEvidenceRef(value: unknown): value is EvidenceRef {
   return isPlainObject(value) && value["schema"] === EVIDENCE_REF_SCHEMA;
+}
+
+/** Serialized size of one value in characters. An unrepresentable value reads as unbounded. */
+export function evidenceChars(value: unknown): number {
+  try {
+    return JSON.stringify(value ?? null)?.length ?? 0;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+/**
+ * Collapse the largest fields of one projected object until it fits the budget.
+ *
+ * The projection bounds every string, array, object width, and depth, but a value can still be large
+ * overall. This bounds the whole value, which is what one prompt line needs. It collapses the largest
+ * field first, so the small fields, which are the decisive ones, stay readable. A value that is not
+ * a plain object is returned unchanged.
+ */
+export function boundEvidence(value: unknown, budgetChars: number): unknown {
+  if (!isPlainObject(value)) return value;
+  const bounded: Record<string, unknown> = { ...value };
+  const keys = Object.keys(bounded).sort(
+    (left, right) => evidenceChars(bounded[right]) - evidenceChars(bounded[left]),
+  );
+  for (const key of keys) {
+    if (evidenceChars(bounded) <= budgetChars) break;
+    if (isEvidenceRef(bounded[key])) continue;
+    bounded[key] = evidenceRef(bounded[key]);
+  }
+  return bounded;
 }
 
 /** Project every entry of a ledger. */
@@ -187,9 +221,17 @@ function projectObject(
   depth: number,
   applied: ReadonlySet<string>,
 ): Record<string, unknown> {
+  const entries = Object.entries(value);
   const projected: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) {
+  for (const [key, entry] of entries.slice(0, EVIDENCE_MAX_FIELDS)) {
     projected[key] = projectValue(entry, views, depth + 1, applied);
+  }
+  const dropped = entries.slice(EVIDENCE_MAX_FIELDS);
+  if (dropped.length > 0) {
+    projected["omittedFields"] = {
+      ...evidenceRef(Object.fromEntries(dropped)),
+      omitted: dropped.length,
+    };
   }
   return projected;
 }
