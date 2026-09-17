@@ -292,6 +292,19 @@ describe("boundLedger", () => {
     expect(isEvidenceRef(bounded[0]?.output)).toBe(false);
   });
 
+  it("keeps the smallest shape when collapsing the oldest entries is enough", () => {
+    const ledger = [
+      entry(1, { text: longText() }),
+      ...Array.from({ length: 10 }, (_, index) => entry(index + 2, { small: index })),
+    ];
+    const bounded = boundLedger(ledger, 0);
+    // The first entry is the one worth collapsing. Collapsing a tiny output into a reference would
+    // cost more than the output itself.
+    expect(isEvidenceRef(bounded[0]?.output)).toBe(true);
+    expect(isEvidenceRef(bounded[1]?.output)).toBe(false);
+    expect(ledgerChars(bounded)).toBeLessThan(ledgerChars(ledger));
+  });
+
   it("does not wrap an existing reference in another reference", () => {
     const existing = evidenceRef({ text: longText() });
     const bounded = boundLedger([entry(1, existing), entry(2, existing)], 1);

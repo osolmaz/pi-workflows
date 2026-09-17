@@ -155,6 +155,10 @@ export function boundLedger(
 
 Sizes are character counts, matching the `_CHARS` limits that the repository already uses.
 
+`PROMPT_CEILING_CHARS` bounds the prompt a builder writes, which is the value the Pi agent group
+validates. The engine appends its live-control block, whose settings summary is capped at 8,192
+characters, and the step contract after a builder returns, so the ceiling keeps room for that block.
+
 `projectEvidence` rules, applied in this order:
 
 1. An object whose `schema` field is a non-empty string with a registered view is replaced by that
@@ -182,14 +186,14 @@ tree, a failing view, or an unknown value shape. Any of those becomes an `Eviden
 mutates its input.
 
 `boundLedger` collapses from the oldest entry forward. It replaces one entry's `output` with
-`evidenceRef(entry.output)` at a time and stops as soon as the serialized ledger fits the budget. It
-keeps the newest entries intact, because the newest attempt is the one a decision depends on. Call it
-with the projected ledger, so the size it measures is the size a prompt shows. It counts the array
-brackets and separators that a serialized ledger adds. Collapsing an entry adds a digest and a size
-where its output was, so a reference to a tiny output is larger than the output itself. The fully
-collapsed ledger is therefore not always the smallest shape, and the function returns the projected
-ledger when that one is smaller. The result is a true lower bound, which the caller reserves before it
-bounds the observation.
+`evidenceRef(entry.output)` at a time, measures the serialized ledger it would return, and stops as
+soon as that ledger fits the budget. It keeps the newest entries intact, because the newest attempt is
+the one a decision depends on. Call it with the projected ledger, so the size it measures is the size
+a prompt shows. Collapsing an entry adds a digest and a size where its output was, so a reference to a
+tiny output is larger than the output itself. The smallest shape is therefore not always the fully
+collapsed one, and a ledger whose oldest entry is the largest shrinks most when only that entry
+collapses. When no shape fits, the function returns the smallest one its walk built. The result is a
+true lower bound, which the caller reserves before it bounds the observation.
 
 `boundEvidence` does the same for one observation object. It collapses the largest field first and
 stops as soon as the value fits, so the small fields, which are the decisive ones, stay readable.
@@ -279,10 +283,11 @@ limit.
   unchanged, and returns a value that is not a plain object unchanged;
 - `projectLedger` projects every entry output;
 - `boundLedger` collapses the oldest entries first, keeps the newest entry whole, leaves a ledger that
-  already fits unchanged, counts the ledger brackets and separators when it decides, collapses every
-  entry when the budget cannot hold one, returns the projected ledger when collapsing would make it
-  larger, does not wrap an existing reference in another reference, and treats a ledger that JSON
-  cannot serialize as over budget instead of throwing.
+  already fits unchanged, stops as soon as the ledger it would return fits, collapses every entry when
+  the budget cannot hold one, returns the smallest shape when collapsing the oldest entries is enough,
+  returns the projected ledger when collapsing would make it larger, does not wrap an existing
+  reference in another reference, and treats a ledger that JSON cannot serialize as over budget
+  instead of throwing.
 
 `test/builtin-autoimplement.test.ts`, one regression case:
 
