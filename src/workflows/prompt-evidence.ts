@@ -55,7 +55,7 @@ export type EvidenceRef = {
   schema: typeof EVIDENCE_REF_SCHEMA;
   /** Digest of the collapsed value, so a reader can locate the durable record. */
   digest: string;
-  /** Character count of the collapsed value. */
+  /** Character count of the collapsed value, or of the name of a value JSON cannot represent. */
   chars: number;
   /** Head and tail excerpt, set only when the collapsed value was a long string. */
   text?: string;
@@ -101,13 +101,17 @@ export function isEvidenceRef(value: unknown): value is EvidenceRef {
   return isPlainObject(value) && value["schema"] === EVIDENCE_REF_SCHEMA;
 }
 
-/** Serialized size of one value in characters. An unrepresentable value reads as unbounded. */
+/**
+ * Serialized size of one value in characters. A value JSON cannot represent reads as unbounded.
+ */
 export function evidenceChars(value: unknown): number {
   try {
-    return JSON.stringify(value ?? null)?.length ?? 0;
+    const encoded = canonicalJson(value ?? null);
+    if (typeof encoded === "string") return encoded.length;
   } catch {
-    return Number.MAX_SAFE_INTEGER;
+    // A cycle or a bigint throws here, and a function or a symbol is dropped entirely.
   }
+  return Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -312,20 +316,28 @@ function excerpt(value: string): string {
 }
 
 function refDigest(value: unknown): string {
+  return digest(refSource(value));
+}
+
+/**
+ * The value a reference measures and digests.
+ *
+ * A value that JSON cannot represent, such as a bigint, a function, or a cycle, is named by its type,
+ * so a reference carries one digest and one size for everything it can be asked to stand for.
+ */
+function refSource(value: unknown): unknown {
+  const source = value ?? null;
   try {
-    return digest(value ?? null);
+    if (typeof canonicalJson(source) === "string") return source;
   } catch {
-    return digest({ unsupported: describeValue(value) });
+    // A cycle or a bigint throws here. Both fall through to the type name.
   }
+  return { unsupported: describeValue(value) };
 }
 
 function refChars(value: unknown): number {
   if (typeof value === "string") return value.length;
-  try {
-    return canonicalJson(value ?? null).length;
-  } catch {
-    return 0;
-  }
+  return canonicalJson(refSource(value)).length;
 }
 
 function describeValue(value: unknown): string {

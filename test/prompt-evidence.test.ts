@@ -9,6 +9,7 @@ import {
   PROMPT_CEILING_CHARS,
   boundEvidence,
   boundLedger,
+  evidenceChars,
   evidenceRef,
   isEvidenceRef,
   ledgerChars,
@@ -303,6 +304,16 @@ describe("boundLedger", () => {
     expect(isEvidenceRef(bounded[0]?.output)).toBe(true);
     expect(isEvidenceRef(bounded[1]?.output)).toBe(false);
     expect(ledgerChars(bounded)).toBeLessThan(ledgerChars(ledger));
+  });
+
+  it("reports a size for a value JSON cannot represent", () => {
+    const bigint = evidenceRef(1n);
+    expect(bigint.chars).toBeGreaterThan(0);
+    expect(bigint.digest).toMatch(/^sha256:/);
+    // The size describes the same value the digest covers, which is the type name of the value.
+    expect(bigint.chars).toBeGreaterThanOrEqual("bigint".length);
+    expect(evidenceRef(() => undefined).chars).toBeGreaterThan(0);
+    expect(evidenceChars(1n)).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("does not wrap an existing reference in another reference", () => {

@@ -185,6 +185,10 @@ characters, and the step contract after a builder returns, so the ceiling keeps 
 tree, a failing view, or an unknown value shape. Any of those becomes an `EvidenceRef`. It never
 mutates its input.
 
+A reference digests and measures one value. When JSON cannot represent that value, the reference
+describes its type instead, so a reference never reports an empty size. `evidenceChars` reads the same
+value as unbounded, because an unrepresentable value is never small enough to keep whole.
+
 `boundLedger` collapses from the oldest entry forward. It replaces one entry's `output` with
 `evidenceRef(entry.output)` at a time, measures the serialized ledger it would return, and stops as
 soon as that ledger fits the budget. It keeps the newest entries intact, because the newest attempt is
@@ -279,6 +283,7 @@ limit.
 - a cycle terminates, and a bigint, a function, a symbol, and `undefined` do not throw;
 - the same input twice produces the same output, and a frozen input is not mutated;
 - `evidenceRef` is stable for equal values;
+- a reference for a value JSON cannot represent reports the size of the type name it describes;
 - `boundEvidence` collapses the largest field first, keeps the small fields, leaves a value that fits
   unchanged, and returns a value that is not a plain object unchanged;
 - `projectLedger` projects every entry output;
