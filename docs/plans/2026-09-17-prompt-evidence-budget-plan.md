@@ -164,8 +164,10 @@ Sizes are character counts, matching the `_CHARS` limits that the repository alr
 2. An array keeps at most `EVIDENCE_MAX_ITEMS` projected items. Extra items become one `EvidenceRef`
    with `omitted` set to their count.
 3. An object keeps at most `EVIDENCE_MAX_FIELDS` fields in insertion order. Extra fields become one
-   `EvidenceRef` under `omittedFields`, with `omitted` set to their count. A map of digests with
-   thousands of entries is why this rule exists.
+   `EvidenceRef` under `omittedFields`, or under the next free name when the object already has that
+   field. A map of digests with thousands of entries is why this rule exists. The projected object is
+   built on a null prototype, so a recorded `__proto__` field stays an ordinary field and cannot
+   become the prototype of the prompt copy.
 4. A plain object is projected field by field until `EVIDENCE_MAX_DEPTH` is reached, after which the
    whole subtree becomes an `EvidenceRef`.
 5. A string longer than `EVIDENCE_TEXT_CHARS` becomes an `EvidenceRef` whose `text` holds a head and
@@ -255,6 +257,8 @@ limit.
 - a long string becomes a ref with a head and tail excerpt, its character count, and a digest;
 - an array over the cap keeps its first items and one ref that names the count;
 - an object over the field cap keeps its first fields and one ref that names the count;
+- a recorded `__proto__` field stays an ordinary field, and a source field named `omittedFields` keeps
+  its value while the ref uses the next free name;
 - a depth cap replaces the deep subtree with a ref;
 - a registered schema is replaced by its view, the view result is bounded, a view's own fields survive
   however deeply the result is nested, a view runs once per schema on a path, and a field the view

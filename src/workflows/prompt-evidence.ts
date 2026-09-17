@@ -224,18 +224,29 @@ function projectObject(
   applied: ReadonlySet<string>,
 ): Record<string, unknown> {
   const entries = Object.entries(value);
-  const projected: Record<string, unknown> = {};
+  // A null prototype keeps a recorded `__proto__` field an ordinary field instead of a setter.
+  const projected: Record<string, unknown> = Object.create(null);
   for (const [key, entry] of entries.slice(0, EVIDENCE_MAX_FIELDS)) {
     projected[key] = projectValue(entry, views, depth + 1, applied);
   }
   const dropped = entries.slice(EVIDENCE_MAX_FIELDS);
   if (dropped.length > 0) {
-    projected["omittedFields"] = {
+    projected[omittedFieldsKey(projected)] = {
       ...evidenceRef(Object.fromEntries(dropped)),
       omitted: dropped.length,
     };
   }
   return projected;
+}
+
+function omittedFieldsKey(projected: Record<string, unknown>): string {
+  let key = "omittedFields";
+  let index = 2;
+  while (Object.hasOwn(projected, key)) {
+    key = `omittedFields${index}`;
+    index += 1;
+  }
+  return key;
 }
 
 function projectScalar(value: unknown): unknown {
