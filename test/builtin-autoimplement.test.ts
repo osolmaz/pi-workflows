@@ -1310,6 +1310,48 @@ describe("built-in autoimplement", () => {
     );
   });
 
+  it("lists one entry per include result and drops the wrapping return step", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
+    const steps = [
+      {
+        attemptId: "a1",
+        nodeId: "workspace/ready",
+        outcome: "ok",
+        output: { plan: "planned" },
+      },
+      {
+        attemptId: "a2",
+        nodeId: "workspace/__piw_exit_ready",
+        outcome: "ok",
+        output: { exit: "ready", output: { plan: "planned" } },
+      },
+      { attemptId: "a3", nodeId: "implement", outcome: "ok", output: { files: 1 } },
+    ];
+    const prompt = await decide.prompt({
+      input: { task: "Ship the fix", repository: "/repo" },
+      outputs: {
+        observe: {
+          decisionNumber: 2,
+          decisionLimit: 24,
+          consecutiveNoProgressAttempts: 0,
+          progressFingerprint: `sha256:${"c".repeat(64)}`,
+          lastRoute: "implementation",
+          availableRoutes: ["implementation", "blocked"],
+          latestAttempt: { nodeId: "implement", outcome: "ok", output: { files: 1 } },
+        },
+      },
+      results: {},
+      state: { steps },
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    } as never);
+
+    expect(prompt.match(/workspace\/ready/g)).toHaveLength(1);
+    expect(prompt).not.toContain("__piw_exit_");
+    expect(prompt).not.toContain('"a3"');
+  });
+
   it("uses one controller for all branch choices and returns", async () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     const edge = (from: string) => compiled.edges.find((candidate) => candidate.from === from);
