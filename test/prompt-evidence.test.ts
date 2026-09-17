@@ -283,6 +283,15 @@ describe("boundLedger", () => {
     expect(bounded[1]?.output).toEqual({ text: "newest" });
   });
 
+  it("keeps the projected ledger when collapsing would make it larger", () => {
+    // A reference to a tiny output is larger than the output, so the caller must not read a fully
+    // collapsed ledger as the room the ledger needs at least.
+    const ledger = [entry(1, { small: 1 }), entry(2, { small: 2 })];
+    const bounded = boundLedger(ledger, 1);
+    expect(ledgerChars(bounded)).toBe(ledgerChars(ledger));
+    expect(isEvidenceRef(bounded[0]?.output)).toBe(false);
+  });
+
   it("does not wrap an existing reference in another reference", () => {
     const existing = evidenceRef({ text: longText() });
     const bounded = boundLedger([entry(1, existing), entry(2, existing)], 1);

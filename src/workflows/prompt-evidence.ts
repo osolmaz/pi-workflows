@@ -153,8 +153,8 @@ export function ledgerChars(entries: readonly EvidenceLedgerEntry[]): number {
  * Collapse the oldest entries until the ledger fits the budget.
  *
  * The newest entries stay whole, because they are the ones a decision depends on. When even a fully
- * collapsed ledger is over budget, every entry is collapsed and the caller reports the remaining
- * overflow.
+ * collapsed ledger is over budget, every entry is collapsed, or the projected ledger is returned
+ * when it is smaller, and the caller reports the remaining overflow.
  */
 export function boundLedger(
   entries: EvidenceLedgerEntry[],
@@ -174,9 +174,11 @@ export function boundLedger(
     bounded[index] = collapsed;
   }
   if (ledgerChars(bounded) <= budgetChars) return bounded;
-  return bounded.map((entry) =>
-    isEvidenceRef(entry.output) ? entry : { ...entry, output: evidenceRef(entry.output) },
-  );
+  // Collapsing one entry adds a digest and a size in place of its output, so a reference to a tiny
+  // output is larger than the output. The fully collapsed ledger is therefore not always the smallest
+  // shape, and callers read this result as the room the ledger needs at least. Keep the smaller one.
+  if (ledgerChars(bounded) <= ledgerChars(entries)) return bounded;
+  return entries.map((entry) => ({ ...entry }));
 }
 
 function projectValue(

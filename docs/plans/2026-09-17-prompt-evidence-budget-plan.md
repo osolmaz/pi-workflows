@@ -185,8 +185,11 @@ mutates its input.
 `evidenceRef(entry.output)` at a time and stops as soon as the serialized ledger fits the budget. It
 keeps the newest entries intact, because the newest attempt is the one a decision depends on. Call it
 with the projected ledger, so the size it measures is the size a prompt shows. It counts the array
-brackets and separators that a serialized ledger adds. When even a fully collapsed ledger is over
-budget, every entry is collapsed and the caller reports the overflow.
+brackets and separators that a serialized ledger adds. Collapsing an entry adds a digest and a size
+where its output was, so a reference to a tiny output is larger than the output itself. The fully
+collapsed ledger is therefore not always the smallest shape, and the function returns the projected
+ledger when that one is smaller. The result is a true lower bound, which the caller reserves before it
+bounds the observation.
 
 `boundEvidence` does the same for one observation object. It collapses the largest field first and
 stops as soon as the value fits, so the small fields, which are the decisive ones, stay readable.
@@ -218,10 +221,9 @@ registry is the place to add the next result type.
   `controlProgressFingerprint`, and `consecutiveNoProgressAttempts` keep reading the raw result. Route
   availability and the progress fingerprint therefore cannot change.
 - `controlEvidenceLedger` replaces `recentWorkflowAttempts`. It drops the entry that is already shown
-  as `latestAttempt`, and it drops the return step that a control include records
-  (`<mount>/__piw_exit_<exit>`) because the included workflow's terminal node already carries that
-  result, so one result appears once. Each entry carries the attempt id, node id, outcome, error, and
-  output.
+  as `latestAttempt`, and it drops the return step that an include records (`…/__piw_exit_<exit>`,
+  including nested mounts) because the node the include returns from already carries that result, so
+  one result appears once. Each entry carries the attempt id, node id, outcome, error, and output.
 - The decide prompt keeps its exact line labels and their order. The `Observation` and
   `Recent attempts` values are projected. The `Task`, `Plan`, `Scope`, and `Constraints` lines stay
   whole, because the decider must see them.
@@ -278,8 +280,9 @@ limit.
 - `projectLedger` projects every entry output;
 - `boundLedger` collapses the oldest entries first, keeps the newest entry whole, leaves a ledger that
   already fits unchanged, counts the ledger brackets and separators when it decides, collapses every
-  entry when the budget cannot hold one, does not wrap an existing reference in another reference, and
-  treats a ledger that JSON cannot serialize as over budget instead of throwing.
+  entry when the budget cannot hold one, returns the projected ledger when collapsing would make it
+  larger, does not wrap an existing reference in another reference, and treats a ledger that JSON
+  cannot serialize as over budget instead of throwing.
 
 `test/builtin-autoimplement.test.ts`, one regression case:
 
@@ -295,8 +298,8 @@ limit.
   log text;
 - the prompt still matches `Observation: …\nRecent attempts: …`, and the existing prompt-content
   tests pass with no edit;
-- the ledger lists a control include once, through the included workflow's terminal node, and never
-  lists its `<mount>/__piw_exit_<exit>` return step.
+- the ledger lists a control include once, through the node the include returns from, and never lists
+  its `…/__piw_exit_<exit>` return step, at any depth;
 
 The regression case fails on the earlier code with an assembled prompt of 4,006,002 characters, and
 passes after the change. A second case gives the decide node an observation of 1.6 million characters

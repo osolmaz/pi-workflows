@@ -1327,6 +1327,19 @@ describe("built-in autoimplement", () => {
         output: { exit: "ready", output: { plan: "planned" } },
       },
       { attemptId: "a3", nodeId: "implement", outcome: "ok", output: { files: 1 } },
+      {
+        attemptId: "a4",
+        nodeId: "documentation/verification/ready",
+        outcome: "ok",
+        output: { verified: true },
+      },
+      {
+        attemptId: "a5",
+        nodeId: "documentation/verification/__piw_exit_ready",
+        outcome: "ok",
+        output: { exit: "ready", output: { verified: true } },
+      },
+      { attemptId: "a6", nodeId: "implement", outcome: "ok", output: { files: 2 } },
     ];
     const prompt = await decide.prompt({
       input: { task: "Ship the fix", repository: "/repo" },
@@ -1348,8 +1361,10 @@ describe("built-in autoimplement", () => {
     } as never);
 
     expect(prompt.match(/workspace\/ready/g)).toHaveLength(1);
+    expect(prompt.match(/documentation\/verification\/ready/g)).toHaveLength(1);
+    expect(prompt.match(/verified/g)).toHaveLength(1);
     expect(prompt).not.toContain("__piw_exit_");
-    expect(prompt).not.toContain('"a3"');
+    expect(prompt).not.toContain('"a6"');
   });
 
   it("uses one controller for all branch choices and returns", async () => {
