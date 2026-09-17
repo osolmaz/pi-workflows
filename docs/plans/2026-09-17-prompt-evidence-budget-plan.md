@@ -216,9 +216,10 @@ registry is the place to add the next result type.
   `controlProgressFingerprint`, and `consecutiveNoProgressAttempts` keep reading the raw result. Route
   availability and the progress fingerprint therefore cannot change.
 - `controlEvidenceLedger` replaces `recentWorkflowAttempts`. It drops the entry that is already shown
-  as `latestAttempt`, and it drops the included-workflow echo steps whose result repeats a parent
-  node's result, so one result appears once. Each entry carries the attempt id, node id, outcome,
-  error, and output.
+  as `latestAttempt`, and it drops the return step that a control include records
+  (`<mount>/__piw_exit_<exit>`) because the included workflow's terminal node already carries that
+  result, so one result appears once. Each entry carries the attempt id, node id, outcome, error, and
+  output.
 - The decide prompt keeps its exact line labels and their order. The `Observation` and
   `Recent attempts` values are projected. The `Task`, `Plan`, `Scope`, and `Constraints` lines stay
   whole, because the decider must see them.
@@ -289,7 +290,9 @@ limit.
   workspace branch, and the per-command summary of the verification command, and contains none of the
   log text;
 - the prompt still matches `Observation: …\nRecent attempts: …`, and the existing prompt-content
-  tests pass with no edit.
+  tests pass with no edit;
+- the ledger lists a control include once, through the included workflow's terminal node, and never
+  lists its `<mount>/__piw_exit_<exit>` return step.
 
 The regression case fails on the earlier code with an assembled prompt of 4,006,002 characters, and
 passes after the change. A second case gives the decide node an observation of 1.6 million characters
