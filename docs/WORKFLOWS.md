@@ -896,7 +896,10 @@ notification does not start an assistant response. Step prompts, decisions, noti
 One agent prompt is one model request. The request must fit the model context window together with
 the session context and the reserved answer, so an agent prompt has a ceiling.
 `PROMPT_CEILING_CHARS` in `src/workflows/prompt-evidence.ts` is that ceiling, and it is the same
-number that the Pi agent group uses to validate a prompt. This is the named external interface that
+number that the Pi agent group uses to validate a prompt. It bounds the prompt a builder writes. The
+engine then appends the live-control block, whose settings summary is itself capped at 8,192
+characters, and the step contract, so the ceiling keeps room for that block. This is the named
+external interface that
 justifies a limit, and the complete result stays available.
 
 Step results can be large. One verification result can carry command logs of up to

@@ -19,7 +19,7 @@ import { canonicalJson, digest } from "./human-decision.js";
  * on how deeply the prompt happens to nest the result.
  */
 
-/** Ceiling for one assembled agent prompt, in characters. Shared by every prompt builder. */
+/** Ceiling for one authored agent prompt, in characters. Shared by every prompt builder. */
 export const PROMPT_CEILING_CHARS = 96_000;
 
 /** Schema identifier of a collapsed value. */
@@ -152,33 +152,33 @@ export function ledgerChars(entries: readonly EvidenceLedgerEntry[]): number {
 /**
  * Collapse the oldest entries until the ledger fits the budget.
  *
- * The newest entries stay whole, because they are the ones a decision depends on. When even a fully
- * collapsed ledger is over budget, every entry is collapsed, or the projected ledger is returned
- * when it is smaller, and the caller reports the remaining overflow.
+ * The newest entries stay whole, because they are the ones a decision depends on. When no shape fits,
+ * the smallest one this walk built is returned, and the caller reports the remaining overflow.
+ *
+ * Collapsing one entry adds a digest and a size in place of its output, so a reference to a tiny
+ * output is larger than the output itself. The smallest shape is therefore not always the fully
+ * collapsed one, and callers read this result as the room the ledger needs at least.
  */
 export function boundLedger(
   entries: EvidenceLedgerEntry[],
   budgetChars: number,
 ): EvidenceLedgerEntry[] {
   const bounded = entries.map((entry) => ({ ...entry }));
-  const sizes = bounded.map((entry) => entryChars(entry));
-  // The serialized ledger adds one bracket per end plus one separator per boundary.
-  let total = sizes.reduce((sum, size) => sum + size, 0) + bounded.length + 1;
+  let total = ledgerChars(bounded);
+  let smallestChars = total;
+  let smallest: EvidenceLedgerEntry[] | undefined;
   for (let index = 0; index < bounded.length && total > budgetChars; index += 1) {
     const entry = bounded[index];
     if (entry === undefined || isEvidenceRef(entry.output)) continue;
-    const collapsed: EvidenceLedgerEntry = { ...entry, output: evidenceRef(entry.output) };
-    const size = entryChars(collapsed);
-    total = total - (sizes[index] ?? 0) + size;
-    sizes[index] = size;
-    bounded[index] = collapsed;
+    bounded[index] = { ...entry, output: evidenceRef(entry.output) };
+    total = ledgerChars(bounded);
+    if (total <= budgetChars) return bounded;
+    if (total < smallestChars) {
+      smallestChars = total;
+      smallest = bounded.map((item) => ({ ...item }));
+    }
   }
-  if (ledgerChars(bounded) <= budgetChars) return bounded;
-  // Collapsing one entry adds a digest and a size in place of its output, so a reference to a tiny
-  // output is larger than the output. The fully collapsed ledger is therefore not always the smallest
-  // shape, and callers read this result as the room the ledger needs at least. Keep the smaller one.
-  if (ledgerChars(bounded) <= ledgerChars(entries)) return bounded;
-  return entries.map((entry) => ({ ...entry }));
+  return smallest ?? entries.map((entry) => ({ ...entry }));
 }
 
 function projectValue(
@@ -325,14 +325,6 @@ function refChars(value: unknown): number {
     return canonicalJson(value ?? null).length;
   } catch {
     return 0;
-  }
-}
-
-function entryChars(entry: EvidenceLedgerEntry): number {
-  try {
-    return JSON.stringify(entry).length;
-  } catch {
-    return Number.MAX_SAFE_INTEGER;
   }
 }
 
