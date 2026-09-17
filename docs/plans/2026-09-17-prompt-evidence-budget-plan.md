@@ -155,8 +155,9 @@ Sizes are character counts, matching the `_CHARS` limits that the repository alr
 `projectEvidence` rules, applied in this order:
 
 1. An object whose `schema` field is a non-empty string with a registered view is replaced by that
-   view's result. The generic rules then bound the view result, and a view never runs again on its own
-   replacement.
+   view's result. The generic rules then bound the view result, and the view result opens a fresh depth
+   budget, so a view's own fields cannot be cut off by how deeply a prompt nests the result. A view runs
+   once per schema on a path, so it cannot recurse through its own replacement.
 2. An array keeps at most `EVIDENCE_MAX_ITEMS` projected items. Extra items become one `EvidenceRef`
    with `omitted` set to their count.
 3. A plain object is projected field by field until `EVIDENCE_MAX_DEPTH` is reached, after which the
@@ -241,8 +242,9 @@ limit.
 - a long string becomes a ref with a head and tail excerpt, its character count, and a digest;
 - an array over the cap keeps its first items and one ref that names the count;
 - a depth cap replaces the deep subtree with a ref;
-- a registered schema is replaced by its view, the view result is bounded, and a field the view dropped
-  stays dropped;
+- a registered schema is replaced by its view, the view result is bounded, a view's own fields survive
+  however deeply the result is nested, a view runs once per schema on a path, and a field the view
+  dropped stays dropped;
 - an unregistered schema is walked normally;
 - a failing view falls back to the generic rules;
 - a cycle terminates, and a bigint, a function, a symbol, and `undefined` do not throw;
@@ -263,8 +265,9 @@ limit.
 - the recorded routes are exactly `implementation`, `redesign`, and `blocked`, so route availability
   is unchanged;
 - the decide prompt built from that record is at or below `PROMPT_CEILING_CHARS`, stays under 50,000
-  characters, keeps the verification reason, the failure summary, the fingerprint, and the prepared
-  workspace branch, and contains none of the log text;
+  characters, keeps the verification reason, the failure summary, the fingerprint, the prepared
+  workspace branch, and the per-command summary of the verification command, and contains none of the
+  log text;
 - the prompt still matches `Observation: …\nRecent attempts: …`, and the existing prompt-content
   tests pass with no edit.
 

@@ -1114,6 +1114,7 @@ describe("built-in autoimplement", () => {
       throw new Error("decide must be an agent node and observe must be a compute node");
     }
     const logMarker = "LOG-MARKER-";
+    const log = `${logMarker}${"l".repeat(1_000_000)}`;
     const failure = "Candidate verification failed on one check.";
     const verification = {
       schema: CHANGE_VERIFICATION_SCHEMA,
@@ -1138,7 +1139,7 @@ describe("built-in autoimplement", () => {
             command: process.execPath,
             args: ["-e", "1"],
             cwd: "/repo",
-            stdout: `${logMarker}${"l".repeat(1_000_000)}`,
+            stdout: log,
             stderr: "",
             exitCode: 0,
             signal: null,
@@ -1216,6 +1217,29 @@ describe("built-in autoimplement", () => {
     expect(prompt).toContain("feat/prompt-evidence");
     expect(prompt).toMatch(/Observation: (.+)\nRecent attempts: /);
     expect(prompt).toContain("You are the decider for this turn");
+
+    // The observation nests the result deeper than a ledger entry does, so the per-command summary
+    // must survive there too.
+    const shownLine = /Observation: (.+)\nRecent attempts: /.exec(prompt);
+    if (shownLine?.[1] === undefined) throw new Error("the decide prompt must show an observation");
+    const shown = JSON.parse(shownLine[1]) as Record<string, unknown>;
+    const shownAttempt = shown["latestAttempt"] as Record<string, unknown>;
+    const shownWrapper = shownAttempt["output"] as Record<string, unknown>;
+    const shownPlan = shownWrapper["output"] as Record<string, unknown>;
+    const shownVerification = shownPlan["verification"] as Record<string, unknown>;
+    expect(shownVerification["candidateCommands"]).toMatchObject({
+      completed: 1,
+      total: 1,
+      items: [
+        {
+          id: "verify",
+          outcome: "succeeded",
+          exitCode: 0,
+          stdoutChars: log.length,
+          stdoutTruncated: false,
+        },
+      ],
+    });
   });
 
   it("uses one controller for all branch choices and returns", async () => {

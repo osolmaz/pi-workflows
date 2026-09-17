@@ -87,6 +87,29 @@ describe("projectEvidence", () => {
     expect(isEvidenceRef(projected.blob)).toBe(true);
   });
 
+  it("keeps a view's own fields however deeply a prompt nests the result", () => {
+    const views: EvidenceViews = new Map([
+      ["test.v1", (value) => ({ checkId: value.checkId, items: [{ checkId: value.checkId }] })],
+    ]);
+    const projected = JSON.stringify(
+      projectEvidence(deep({ schema: "test.v1", checkId: "verify" }, 5), views),
+    );
+    expect(projected).toContain('"checkId":"verify"');
+    expect(projected).toContain("items");
+    expect(projected).not.toContain(EVIDENCE_REF_SCHEMA);
+  });
+
+  it("applies a view once per schema on a path", () => {
+    const views: EvidenceViews = new Map([
+      ["test.v1", (value) => ({ schema: "test.v1", name: value.name, child: value.child })],
+    ]);
+    const cyclic: Record<string, unknown> = { schema: "test.v1", name: "root" };
+    cyclic.child = cyclic;
+    const projected = projectEvidence(cyclic, views) as Record<string, unknown>;
+    expect(projected.name).toBe("root");
+    expect(JSON.stringify(projected)).toContain(EVIDENCE_REF_SCHEMA);
+  });
+
   it("walks a value whose schema has no registered view", () => {
     const value = { schema: "unregistered.v1", blob: longText() };
     const projected = projectEvidence(value, NO_VIEWS) as Record<string, unknown>;
