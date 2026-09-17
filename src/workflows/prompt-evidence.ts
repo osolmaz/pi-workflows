@@ -12,9 +12,10 @@ import { canonicalJson, digest } from "./human-decision.js";
  * projection only builds the bounded copy that a prompt shows, and every value it removes leaves a
  * digest and a size behind.
  *
- * Two rules keep the walk finite and predictable. A registered view runs once for its schema, and the
- * generic rules bound whatever the view returns. A view never runs twice on the same subtree, so the
- * walk cannot recurse through its own replacement.
+ * Two rules keep the walk finite and predictable. A registered view runs once per schema on a path,
+ * and the generic rules bound whatever the view returns. A view result also opens a fresh depth
+ * budget, because a view is a bounded replacement for a whole subtree and its fields must not depend
+ * on how deeply the prompt happens to nest the result.
  */
 
 /** Ceiling for one assembled agent prompt, in characters. Shared by every prompt builder. */
@@ -36,6 +37,8 @@ const EXCERPT_MARKER_CHARS = 40;
 
 /** Sentinel for a view that failed. A view error falls back to the generic rules. */
 const VIEW_FAILED = Symbol("evidence-view-failed");
+
+const NO_APPLIED_VIEWS: ReadonlySet<string> = new Set();
 
 /** A bounded stand-in for a value that was collapsed out of a prompt. */
 export type EvidenceRef = {
@@ -67,7 +70,7 @@ export type EvidenceLedgerEntry = {
 
 /** Project a value into a bounded copy. Total: it never throws and never mutates its input. */
 export function projectEvidence(value: unknown, views: EvidenceViews): unknown {
-  return projectValue(value, views, 0);
+  return projectValue(value, views, 0, NO_APPLIED_VIEWS);
 }
 
 /** Build the bounded stand-in for one value. */
@@ -133,36 +136,46 @@ export function boundLedger(
   return bounded.map((entry) => ({ ...entry, output: evidenceRef(entry.output) }));
 }
 
-function projectValue(value: unknown, views: EvidenceViews, depth: number): unknown {
-  const viewed = projectRegisteredView(value, views);
-  if (viewed !== VIEW_FAILED) return projectUnregistered(viewed, views, depth + 1);
-  return projectUnregistered(value, views, depth);
-}
-
-function projectRegisteredView(value: unknown, views: EvidenceViews): unknown {
-  const view = knownView(value, views);
-  if (view === undefined) return VIEW_FAILED;
-  try {
-    return view(value as Record<string, unknown>);
-  } catch {
-    return VIEW_FAILED;
+function projectValue(
+  value: unknown,
+  views: EvidenceViews,
+  depth: number,
+  applied: ReadonlySet<string>,
+): unknown {
+  const schema = knownSchema(value, views, applied);
+  if (schema !== undefined) {
+    const viewed = callView(views, schema, value);
+    if (viewed !== VIEW_FAILED) {
+      return projectUnregistered(viewed, views, 0, withApplied(applied, schema));
+    }
   }
+  return projectUnregistered(value, views, depth, applied);
 }
 
-function projectUnregistered(value: unknown, views: EvidenceViews, depth: number): unknown {
+function projectUnregistered(
+  value: unknown,
+  views: EvidenceViews,
+  depth: number,
+  applied: ReadonlySet<string>,
+): unknown {
   if (typeof value === "string") {
     return value.length > EVIDENCE_TEXT_CHARS ? evidenceRef(value) : value;
   }
   if (depth >= EVIDENCE_MAX_DEPTH && isStructured(value)) return evidenceRef(value);
-  if (Array.isArray(value)) return projectArray(value, views, depth);
-  if (isPlainObject(value)) return projectObject(value, views, depth);
+  if (Array.isArray(value)) return projectArray(value, views, depth, applied);
+  if (isPlainObject(value)) return projectObject(value, views, depth, applied);
   return projectScalar(value);
 }
 
-function projectArray(value: readonly unknown[], views: EvidenceViews, depth: number): unknown[] {
+function projectArray(
+  value: readonly unknown[],
+  views: EvidenceViews,
+  depth: number,
+  applied: ReadonlySet<string>,
+): unknown[] {
   const kept = value
     .slice(0, EVIDENCE_MAX_ITEMS)
-    .map((item) => projectValue(item, views, depth + 1));
+    .map((item) => projectValue(item, views, depth + 1, applied));
   const dropped = value.slice(EVIDENCE_MAX_ITEMS);
   if (dropped.length === 0) return kept;
   return [...kept, { ...evidenceRef(dropped), omitted: dropped.length }];
@@ -172,10 +185,11 @@ function projectObject(
   value: Record<string, unknown>,
   views: EvidenceViews,
   depth: number,
+  applied: ReadonlySet<string>,
 ): Record<string, unknown> {
   const projected: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    projected[key] = projectValue(entry, views, depth + 1);
+    projected[key] = projectValue(entry, views, depth + 1, applied);
   }
   return projected;
 }
@@ -187,11 +201,32 @@ function projectScalar(value: unknown): unknown {
   return evidenceRef(value);
 }
 
-function knownView(value: unknown, views: EvidenceViews): EvidenceView | undefined {
+function knownSchema(
+  value: unknown,
+  views: EvidenceViews,
+  applied: ReadonlySet<string>,
+): string | undefined {
   if (!isPlainObject(value)) return undefined;
   const schema = value["schema"];
   if (typeof schema !== "string" || schema.length === 0) return undefined;
-  return views.get(schema);
+  if (applied.has(schema)) return undefined;
+  return views.has(schema) ? schema : undefined;
+}
+
+function callView(views: EvidenceViews, schema: string, value: unknown): unknown {
+  const view = views.get(schema);
+  if (view === undefined) return VIEW_FAILED;
+  try {
+    return view(value as Record<string, unknown>);
+  } catch {
+    return VIEW_FAILED;
+  }
+}
+
+function withApplied(applied: ReadonlySet<string>, schema: string): ReadonlySet<string> {
+  const next = new Set(applied);
+  next.add(schema);
+  return next;
 }
 
 function isStructured(value: unknown): boolean {

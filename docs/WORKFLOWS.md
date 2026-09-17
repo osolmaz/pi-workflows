@@ -917,6 +917,11 @@ it keys off the versioned `schema` identifier that the durable result already ca
 with no registered view is still bounded by the generic rules, so a new producer cannot widen a
 prompt by being added.
 
+Two rules keep the walk finite. A view runs once per schema on a path, so a view cannot recurse
+through its own replacement, and a view result opens a fresh depth budget. Without that second rule,
+what a model saw of one result type would depend on how deeply the prompt happened to nest it: the
+observation nests a result two levels deeper than a ledger entry does.
+
 The change-verification view keeps the route, the reason, the prepared workspace, the findings, and
 the fingerprints, and it names each verification command by its id, outcome, exit code, duration, and
 log size. The view drops the log text only, because the durable result keeps it and
