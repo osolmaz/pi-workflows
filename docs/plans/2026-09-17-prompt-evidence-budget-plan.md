@@ -115,7 +115,7 @@ Public surface:
 export const PROMPT_CEILING_CHARS = 96_000;
 export const EVIDENCE_REF_SCHEMA = "pi-workflows.evidence-ref.v1";
 export const EVIDENCE_TEXT_CHARS = 4_000;
-export const EVIDENCE_MAX_ITEMS = 20;
+export const EVIDENCE_MAX_ITEMS = MAX_COMMAND_BATCH_ITEMS;
 export const EVIDENCE_MAX_FIELDS = 200;
 export const EVIDENCE_MAX_DEPTH = 8;
 
@@ -162,7 +162,9 @@ Sizes are character counts, matching the `_CHARS` limits that the repository alr
    budget, so a view's own fields cannot be cut off by how deeply a prompt nests the result. A view runs
    once per schema on a path, so it cannot recurse through its own replacement.
 2. An array keeps at most `EVIDENCE_MAX_ITEMS` projected items. Extra items become one `EvidenceRef`
-   with `omitted` set to their count.
+   with `omitted` set to their count. The cap is `MAX_COMMAND_BATCH_ITEMS`, because a command batch is
+   the largest list a registered view carries whole, and a smaller cap would drop checks that the
+   change-verification view already named. The size budget bounds the prompt, not this cap.
 3. An object keeps at most `EVIDENCE_MAX_FIELDS` fields in insertion order. Extra fields become one
    `EvidenceRef` under `omittedFields`, or under the next free name when the object already has that
    field. A map of digests with thousands of entries is why this rule exists. The projected object is
@@ -257,6 +259,8 @@ limit.
 - identity for a value under every cap, and for a string exactly at the text cap;
 - a long string becomes a ref with a head and tail excerpt, its character count, and a digest;
 - an array over the cap keeps its first items and one ref that names the count;
+- a full command batch survives a view projection item by item, and the item cap is not smaller than
+  the command batch limit;
 - an object over the field cap keeps its first fields and one ref that names the count;
 - a recorded `__proto__` field stays an ordinary field, and a source field named `omittedFields` keeps
   its value while the ref uses the next free name;

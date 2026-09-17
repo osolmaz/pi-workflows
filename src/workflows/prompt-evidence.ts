@@ -1,3 +1,4 @@
+import { MAX_COMMAND_BATCH_ITEMS } from "./command-batch.js";
 import { canonicalJson, digest } from "./human-decision.js";
 
 /**
@@ -27,8 +28,14 @@ export const EVIDENCE_REF_SCHEMA = "pi-workflows.evidence-ref.v1";
 /** Longest string kept verbatim. Longer strings become a ref with a head and tail excerpt. */
 export const EVIDENCE_TEXT_CHARS = 4_000;
 
-/** Longest array kept in full. Extra items become one ref that names the count. */
-export const EVIDENCE_MAX_ITEMS = 20;
+/**
+ * Longest array kept in full. Extra items become one ref that names the count.
+ *
+ * The largest list that a registered view carries whole is a command batch, whose own limit is
+ * `MAX_COMMAND_BATCH_ITEMS`. A smaller cap here would drop checks that a view already named, and the
+ * size budget, not this cap, is what bounds one prompt. The cap therefore follows that limit.
+ */
+export const EVIDENCE_MAX_ITEMS = MAX_COMMAND_BATCH_ITEMS;
 
 /** Most fields kept per object. Extra fields become one ref that names the count. */
 export const EVIDENCE_MAX_FIELDS = 200;
