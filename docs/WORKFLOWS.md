@@ -891,6 +891,39 @@ notification does not start an assistant response. Step prompts, decisions, noti
 [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) and the approved
 [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md).
 
+## Agent prompt budget
+
+One agent prompt is one model request. The request must fit the model context window together with
+the session context and the reserved answer, so an agent prompt has a ceiling.
+`PROMPT_CEILING_CHARS` in `src/workflows/prompt-evidence.ts` is that ceiling, and it is the same
+number that the Pi agent group uses to validate a prompt. This is the named external interface that
+justifies a limit, and the complete result stays available.
+
+Step results can be large. One verification result can carry command logs of up to
+`MAX_COMMAND_BATCH_OUTPUT_CHARS` per check, and a result that several steps recorded can reach
+several prompt lines. `projectEvidence` builds a bounded copy of a value before it reaches a prompt:
+
+- an object whose `schema` has a registered evidence view is replaced by that view's result;
+- a string longer than `EVIDENCE_TEXT_CHARS` becomes a reference with a head and tail excerpt, its
+  character count, and a digest;
+- an array over `EVIDENCE_MAX_ITEMS` keeps its first items and adds one reference naming the rest;
+- a subtree deeper than `EVIDENCE_MAX_DEPTH` becomes one reference;
+- anything the rules cannot represent, including a cycle, becomes one reference.
+
+An evidence view is a pure function of one typed result, exported next to the type that defines it.
+It keeps the fields a routing decision reads and names a bulk payload by size instead of carrying it.
+The change-verification view in `src/builtins/change-verification.workflow.ts` is the first one, and
+it keys off the versioned `schema` identifier that the durable result already carries. A result type
+with no registered view is still bounded by the generic rules, so a new producer cannot widen a
+prompt by being added.
+
+Projection shapes a prompt only. `state.steps[].output` keeps every complete result and
+`state.steps[].prompt` keeps every complete prompt, so a recorded run stays readable and resumable.
+The autoimplement decide prompt projects its observation and its recent-attempt list, and then
+measures the assembled prompt. When the projected list still does not fit, `boundLedger` collapses
+the oldest entries to references and keeps the newest entries whole. An overflow that remains is a
+named error reporting the line and its size, instead of a request the model cannot answer.
+
 ## Visible responses
 
 Workflow nodes normally produce structured values for routing and persistence.

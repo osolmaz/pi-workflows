@@ -240,6 +240,75 @@ function parseCheck(
   };
 }
 
+/**
+ * Bounded prompt evidence for a change-verification result.
+ *
+ * A routing prompt needs the route, the reason, the failure findings, and the fingerprints. It does
+ * not need the verification command logs, which can be a megabyte each. The complete result, logs
+ * included, stays in run state. This view names every log by command, outcome, size, and truncation
+ * flag instead of carrying its text.
+ */
+export function changeVerificationEvidence(result: ChangeVerificationResult): unknown {
+  return {
+    route: result.route,
+    reason: result.reason,
+    originatingWorkflow: result.originatingWorkflow,
+    qualifiedNode: result.qualifiedNode,
+    changedFiles: result.changedFiles,
+    failureFingerprint: result.failureFingerprint,
+    evidence: result.evidence,
+    outputReferences: result.outputReferences,
+    relatedFailures: result.relatedFailures.map(findingEvidence),
+    unrelatedFailures: result.unrelatedFailures.map(findingEvidence),
+    fixedBaselineFailures: result.fixedBaselineFailures.map(findingEvidence),
+    unknownFailures: result.unknownFailures.map(findingEvidence),
+    untestedChecks: result.untestedChecks.map(findingEvidence),
+    repairAttempts: result.repairAttempts.map((attempt) => ({
+      attempt: attempt.attempt,
+      kind: attempt.kind,
+      fingerprint: attempt.fingerprint,
+      changedFiles: attempt.changedFiles,
+      result: attempt.result,
+    })),
+    candidateCommands: commandBatchEvidence(result.candidateCommands),
+    baseCommands: commandBatchEvidence(result.baseCommands),
+  };
+}
+
+function findingEvidence(finding: VerificationFinding): unknown {
+  return {
+    checkId: finding.checkId,
+    kind: finding.kind,
+    summary: finding.summary,
+    fingerprint: finding.fingerprint,
+    candidateOutputRef: finding.candidateOutputRef ?? null,
+    baseOutputRef: finding.baseOutputRef ?? null,
+  };
+}
+
+function commandBatchEvidence(batch: CommandBatchResult | null): unknown {
+  if (batch === null) return null;
+  return {
+    completed: batch.completed,
+    total: batch.total,
+    items: batch.items.map((item) => ({
+      id: item.id,
+      command: item.command,
+      args: item.args,
+      cwd: item.cwd,
+      outcome: item.outcome,
+      exitCode: item.exitCode,
+      signal: item.signal,
+      durationMs: item.durationMs,
+      stdoutChars: item.stdout.length,
+      stderrChars: item.stderr.length,
+      stdoutTruncated: item.stdoutTruncated,
+      stderrTruncated: item.stderrTruncated,
+      error: item.error ?? null,
+    })),
+  };
+}
+
 export function parseChangeVerificationInput(value: unknown): ChangeVerificationInput {
   const record = requireRecord(value, "change verification input");
   const workspace = parsePreparedWorkspace(record.workspace);

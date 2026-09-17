@@ -16,8 +16,20 @@ import {
   manualEffect,
 } from "../workflows/definition.js";
 import { digest } from "../workflows/human-decision.js";
+import {
+  PROMPT_CEILING_CHARS,
+  boundLedger,
+  projectEvidence,
+  projectLedger,
+  type EvidenceLedgerEntry,
+  type EvidenceViews,
+} from "../workflows/prompt-evidence.js";
 import { allowSettingsPath, workflowSettings } from "../workflows/settings.js";
-import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
+import type {
+  WorkflowActionContext,
+  WorkflowNodeContext,
+  WorkflowStepRecord,
+} from "../workflows/types.js";
 import { IMPLEMENTATION_TIMEOUT_MS } from "./agent-timeouts.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
 import {
@@ -31,7 +43,10 @@ import {
   type PublishedRepository,
 } from "./autoimplement-command-batches.js";
 import changeVerificationWorkflow, {
+  CHANGE_VERIFICATION_SCHEMA,
+  changeVerificationEvidence,
   type ChangeVerificationInput,
+  type ChangeVerificationResult,
   type VerificationCheck,
 } from "./change-verification.workflow.js";
 import { parsePlanApprovalPolicy, type PlanApprovalPolicy } from "./plan-approval.workflow.js";
@@ -519,13 +534,101 @@ function preparedWorkspace(context: WorkflowNodeContext): PreparedWorkspace {
   return result.output;
 }
 
-function recentWorkflowAttempts(context: WorkflowNodeContext): unknown[] {
-  return context.state.steps.slice(-12).map((step) => ({
+/**
+ * Evidence views for results that reach an Autoimplement prompt.
+ *
+ * The schema key is the assertion: a view runs only for a value whose recorded `schema` matches it,
+ * and the generic rules bound whatever the view returns. A result type with no registered view is
+ * still bounded, so a new producer cannot widen a prompt by being added.
+ */
+const AUTOIMPLEMENT_EVIDENCE_VIEWS: EvidenceViews = new Map([
+  [
+    CHANGE_VERIFICATION_SCHEMA,
+    (value) => changeVerificationEvidence(value as ChangeVerificationResult),
+  ],
+]);
+
+/**
+ * Step results a decide prompt lists, newest last.
+ *
+ * The observation already shows the latest control attempt, and an included return repeats the result
+ * of the workflow it includes. Listing either again would show one result twice without adding
+ * evidence.
+ */
+function controlEvidenceLedger(context: WorkflowNodeContext): EvidenceLedgerEntry[] {
+  const latest = latestControlAttempt(context);
+  const entries: EvidenceLedgerEntry[] = [];
+  for (const step of context.state.steps.slice(-12)) {
+    if (step.attemptId === latest?.attemptId) continue;
+    if (isIncludedControlReturn(step.nodeId)) continue;
+    entries.push(evidenceEntry(step));
+  }
+  return entries;
+}
+
+function evidenceEntry(step: WorkflowStepRecord): EvidenceLedgerEntry {
+  return {
+    attemptId: step.attemptId,
     nodeId: step.nodeId,
     outcome: step.outcome,
     output: step.output,
     ...(step.error === undefined ? {} : { error: step.error }),
-  }));
+  };
+}
+
+const DECIDE_PROMPT_RULES = [
+  "Decide the next Autoimplement branch from current evidence.",
+  "You are the decider for this turn. The workflow cannot choose a route without the one you submit. Inspect local and remote state when you need it, but do not edit files and do not perform a mutation.",
+  "Choose exactly one available route. A branch performs one bounded unit of work, then control returns here.",
+  "Do not assume that a failed or timed-out mutation did or did not finish. Inspect durable state before you retry it or move forward.",
+  "Do not skip plan, workspace, documentation, verification, publication, review, comment, CI, authority, or delivery checks.",
+  "Choose complete only when the recorded goal and delivery requirements are complete.",
+  "Choose blocked only when progress is blocked now and no safe route remains within scope or the loop safety limit was reached.",
+  "For blocked, list concrete alternatives already checked. For every route, cite concrete evidence.",
+];
+
+const RECENT_ATTEMPTS_LABEL = "Recent attempts: ";
+
+/**
+ * Build the decide prompt inside one prompt ceiling.
+ *
+ * Every step result is projected first, so one large result cannot fill the request. When the
+ * projected ledger still does not fit, its oldest entries collapse to digests. The complete results
+ * stay in run state, so no evidence is lost, only shortened.
+ */
+function decidePrompt(context: WorkflowNodeContext): string {
+  const request = context.input as AutoimplementInput;
+  const head = [
+    ...DECIDE_PROMPT_RULES,
+    `Task: ${request.task}`,
+    `Plan: ${JSON.stringify(currentPlan(context))}`,
+    `Scope: ${request.scope ?? request.repository}`,
+    `Constraints: ${JSON.stringify(request.constraints ?? [])}`,
+    `Merge allowed now: ${autoimplementSettings(context).merge === true}`,
+    `Observation: ${JSON.stringify(projectEvidence(context.outputs.observe, AUTOIMPLEMENT_EVIDENCE_VIEWS))}`,
+  ];
+  const prefix = `${head.join("\n")}\n${RECENT_ATTEMPTS_LABEL}`;
+  if (prefix.length + 2 > PROMPT_CEILING_CHARS) {
+    throw new Error(
+      `autoimplement decide prompt lines are ${prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(head)}`,
+    );
+  }
+  const ledger = projectLedger(controlEvidenceLedger(context), AUTOIMPLEMENT_EVIDENCE_VIEWS);
+  const complete = `${prefix}${JSON.stringify(ledger)}`;
+  if (complete.length <= PROMPT_CEILING_CHARS) return complete;
+  const bounded = `${prefix}${JSON.stringify(boundLedger(ledger, PROMPT_CEILING_CHARS - prefix.length))}`;
+  if (bounded.length <= PROMPT_CEILING_CHARS) return bounded;
+  throw new Error(
+    `autoimplement recent attempts are ${bounded.length - prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS - prefix.length}`,
+  );
+}
+
+function largestLine(lines: readonly string[]): string {
+  let largest = "";
+  for (const line of lines) {
+    if (line.length > largest.length) largest = line;
+  }
+  return `${largest.slice(0, 80)} (${largest.length} characters)`;
 }
 
 const CONTROL_ATTEMPT_NODES = new Set([
@@ -1596,27 +1699,7 @@ export const autoimplementWorkflow = defineWorkflow({
     decide: agent({
       timeoutMs: 30 * 60_000,
       statusDetail: "choose one route and submit it now",
-      prompt: (context) => {
-        const request = context.input as AutoimplementInput;
-        const observation = context.outputs.observe as AutoimplementObservation;
-        return [
-          "Decide the next Autoimplement branch from current evidence.",
-          "You are the decider for this turn. The workflow cannot choose a route without the one you submit. Inspect local and remote state when you need it, but do not edit files and do not perform a mutation.",
-          "Choose exactly one available route. A branch performs one bounded unit of work, then control returns here.",
-          "Do not assume that a failed or timed-out mutation did or did not finish. Inspect durable state before you retry it or move forward.",
-          "Do not skip plan, workspace, documentation, verification, publication, review, comment, CI, authority, or delivery checks.",
-          "Choose complete only when the recorded goal and delivery requirements are complete.",
-          "Choose blocked only when progress is blocked now and no safe route remains within scope or the loop safety limit was reached.",
-          "For blocked, list concrete alternatives already checked. For every route, cite concrete evidence.",
-          `Task: ${request.task}`,
-          `Plan: ${JSON.stringify(currentPlan(context))}`,
-          `Scope: ${request.scope ?? request.repository}`,
-          `Constraints: ${JSON.stringify(request.constraints ?? [])}`,
-          `Merge allowed now: ${autoimplementSettings(context).merge === true}`,
-          `Observation: ${JSON.stringify(observation)}`,
-          `Recent attempts: ${JSON.stringify(recentWorkflowAttempts(context))}`,
-        ].join("\n");
-      },
+      prompt: (context) => decidePrompt(context),
       expectedOutput: `{ "route": ${AUTOIMPLEMENT_CONTROL_ROUTES.map((route) => `"${route}"`).join(" | ")}, "goalMet": true | false, "blockingNow": true | false, "outsideAuthority": true | false, "canProceed": true | false, "reason": "concise reason", "nextAction": "next action or empty for terminal routes", "alternativesChecked": ["checked alternative"], "evidence": ["concrete evidence"] }`,
       validate: parseControlDecision,
     }),

@@ -5,10 +5,12 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
+import { CHANGE_VERIFICATION_SCHEMA } from "../src/builtins/change-verification.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
 import { compute, defineWorkflow } from "../src/workflows/index.js";
+import { PROMPT_CEILING_CHARS } from "../src/workflows/prompt-evidence.js";
 import {
   applyWorkflowSettingsPatch,
   resolveInitialWorkflowSettings,
@@ -1103,6 +1105,110 @@ describe("built-in autoimplement", () => {
     expect(prompt).toContain("The workflow cannot choose a route without the one you submit");
     expect(prompt).toContain("do not edit files and do not perform a mutation");
     expect(decide.statusDetail).toBe("choose one route and submit it now");
+  });
+
+  it("bounds the decide prompt when one verification result holds megabyte logs", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    const observe = autoimplementWorkflow.nodes.observe;
+    if (decide?.nodeType !== "agent" || observe?.nodeType !== "compute") {
+      throw new Error("decide must be an agent node and observe must be a compute node");
+    }
+    const logMarker = "LOG-MARKER-";
+    const failure = "Candidate verification failed on one check.";
+    const verification = {
+      schema: CHANGE_VERIFICATION_SCHEMA,
+      route: "ready",
+      originatingWorkflow: "autodoc",
+      qualifiedNode: "documentation/verify",
+      workspace: {},
+      changedFiles: ["src/a.ts"],
+      candidateCommands: {
+        schema: "pi-workflows.command-batch-result.v1",
+        completed: 1,
+        total: 1,
+        items: [
+          {
+            id: "verify",
+            command: process.execPath,
+            args: ["-e", "1"],
+            cwd: "/repo",
+            stdout: `${logMarker}${"l".repeat(1_000_000)}`,
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            durationMs: 12,
+            outcome: "succeeded",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          },
+        ],
+      },
+      baseCommands: null,
+      relatedFailures: [],
+      unrelatedFailures: [],
+      fixedBaselineFailures: [],
+      unknownFailures: [
+        {
+          checkId: "verify",
+          kind: "unknown",
+          summary: "The failing check is deterministic.",
+          fingerprint: "fingerprint-one",
+        },
+      ],
+      untestedChecks: [],
+      repairAttempts: [],
+      failureFingerprint: "fingerprint-one",
+      outputReferences: ["log:verify"],
+      reason: failure,
+      evidence: [failure],
+    };
+    const documentedPlan = {
+      status: "ready",
+      task: "Ship the fix",
+      plan: { summary: "Bound the prompt evidence" },
+      planDigest: `sha256:${"a".repeat(64)}`,
+      documentation: { state: "current", files: [], digests: {}, evidence: verification },
+      verification,
+    };
+    const documented = { exit: "ready", output: documentedPlan };
+    const context = {
+      input: { task: "Ship the fix", repository: "/repo", scope: "Only /repo" },
+      outputs: { documentation: documented },
+      results: {},
+      state: {
+        steps: [
+          {
+            attemptId: "attempt-documentation",
+            nodeId: "documentation",
+            outcome: "ok",
+            output: documented,
+          },
+        ],
+      },
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    };
+
+    // The record keeps the complete result, log text included.
+    const observation = observe.run(context as never) as { availableRoutes: string[] };
+    const recorded = JSON.stringify(observation);
+    expect(recorded.length).toBeGreaterThan(2_000_000);
+    expect(recorded).toContain(logMarker);
+    expect(observation.availableRoutes).toEqual(["implementation", "redesign", "blocked"]);
+
+    // The prompt shows the decision evidence and none of the log text.
+    const prompt = await decide.prompt({
+      ...context,
+      outputs: { ...context.outputs, observe: observation },
+    } as never);
+    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CEILING_CHARS);
+    expect(prompt.length).toBeLessThan(50_000);
+    expect(prompt).not.toContain(logMarker);
+    expect(prompt).toContain(failure);
+    expect(prompt).toContain("The failing check is deterministic.");
+    expect(prompt).toContain("fingerprint-one");
+    expect(prompt).toMatch(/Observation: (.+)\nRecent attempts: /);
+    expect(prompt).toContain("You are the decider for this turn");
   });
 
   it("uses one controller for all branch choices and returns", async () => {
