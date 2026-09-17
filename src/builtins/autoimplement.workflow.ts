@@ -624,15 +624,13 @@ function decidePrompt(context: WorkflowNodeContext): string {
     );
   }
   const collapsedLedger = boundLedger(ledger, 0);
-  const shortenedObservation = boundEvidence(observation, budget - ledgerChars(collapsedLedger));
-  const shortened = decidePromptText(
-    prefix,
-    shortenedObservation,
-    boundLedger(ledger, budget - evidenceChars(shortenedObservation)),
-  );
+  const ledgerFloor = ledgerChars(collapsedLedger);
+  const shortenedObservation = boundEvidence(observation, budget - ledgerFloor);
+  const shortenedLedger = boundLedger(ledger, budget - evidenceChars(shortenedObservation));
+  const shortened = decidePromptText(prefix, shortenedObservation, shortenedLedger);
   if (shortened.length <= PROMPT_CEILING_CHARS) return shortened;
   throw new Error(
-    `autoimplement decide prompt is ${shortened.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(lines)}`,
+    `autoimplement decide prompt is ${shortened.length} characters and must be at most ${PROMPT_CEILING_CHARS}; fixed lines ${prefix.length}, observation ${evidenceChars(shortenedObservation)}, recent attempts ${ledgerChars(shortenedLedger)}`,
   );
 }
 

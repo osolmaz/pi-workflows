@@ -1278,6 +1278,38 @@ describe("built-in autoimplement", () => {
     expect(prompt).not.toContain(cell);
   });
 
+  it("names the size of each part when shortening still cannot fit", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
+    const steps = Array.from({ length: 14 }, (_, index) => ({
+      attemptId: `attempt-${index}`,
+      nodeId: "implement",
+      outcome: "ok",
+      output: { index },
+    }));
+    const context = {
+      input: { task: "Ship the fix", repository: "/repo", plan: "p".repeat(94_000) },
+      outputs: {
+        observe: {
+          decisionNumber: 3,
+          decisionLimit: 24,
+          consecutiveNoProgressAttempts: 0,
+          progressFingerprint: `sha256:${"b".repeat(64)}`,
+          lastRoute: "implementation",
+          availableRoutes: ["implementation", "blocked"],
+          latestAttempt: { nodeId: "implement", outcome: "ok", output: { small: 1 } },
+        },
+      },
+      results: {},
+      state: { steps },
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    } as never;
+    await expect(Promise.resolve().then(() => decide.prompt(context))).rejects.toThrow(
+      /must be at most \d+; fixed lines \d+, observation \d+, recent attempts \d+/,
+    );
+  });
+
   it("uses one controller for all branch choices and returns", async () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     const edge = (from: string) => compiled.edges.find((candidate) => candidate.from === from);

@@ -934,8 +934,9 @@ The autoimplement decide prompt projects its observation and its recent-attempt 
 measures the assembled prompt. When the projected evidence still does not fit, the oldest ledger
 entries collapse to references, and then the largest observation field collapses to one. The order is
 fixed, so the prompt keeps the newest results and the small decisive fields, such as the available
-routes, for as long as it can. `boundLedger` and `boundEvidence` do that work, and an overflow that
-remains is a named error reporting the largest line and its size.
+routes, for as long as it can. `boundLedger` and `boundEvidence` do that work. An overflow that
+remains is a named error that reports the size of the fixed lines, the observation, and the
+recent-attempt list, so the next reader knows which part did not fit.
 
 ## Visible responses
 
