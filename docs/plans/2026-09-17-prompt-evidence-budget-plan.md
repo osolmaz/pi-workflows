@@ -239,9 +239,9 @@ registry is the place to add the next result type.
 - After assembly, the prompt is measured against `PROMPT_CEILING_CHARS`. When it does not fit, the
   oldest ledger entries collapse to references, and then the largest observation field collapses to
   one. The order is fixed, so the prompt keeps the newest results and the small decisive fields, such
-  as the available routes, for as long as it can. Only an over-ceiling fixed prefix, which is the
-  instruction lines, task, plan, scope, and constraints, is a named error that reports the largest
-  line and its size, and an overflow that remains after shortening reports the size of each part.
+  as the available routes, for as long as it can. A fixed prefix that leaves no room for evidence is a
+  named error that reports its size and the largest line, and an overflow that remains after
+  shortening reports the size of each part.
 
 ### One ceiling, one owner
 

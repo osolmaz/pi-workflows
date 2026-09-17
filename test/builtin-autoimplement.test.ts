@@ -1278,6 +1278,22 @@ describe("built-in autoimplement", () => {
     expect(prompt).not.toContain(cell);
   });
 
+  it("names the fixed lines when they leave no room for evidence", async () => {
+    const decide = autoimplementWorkflow.nodes.decide;
+    if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
+    const context = {
+      input: { task: "Ship the fix", repository: "/repo", plan: "p".repeat(95_000) },
+      outputs: { observe: { decisionNumber: 1, availableRoutes: ["implementation"] } },
+      results: {},
+      state: { steps: [] },
+      settings: { merge: false, addedInstructions: [] },
+      signal: new AbortController().signal,
+    } as never;
+    await expect(Promise.resolve().then(() => decide.prompt(context))).rejects.toThrow(
+      /leave no room for evidence under the 96000 character ceiling/,
+    );
+  });
+
   it("names the size of each part when shortening still cannot fit", async () => {
     const decide = autoimplementWorkflow.nodes.decide;
     if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");

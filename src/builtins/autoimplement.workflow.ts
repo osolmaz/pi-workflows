@@ -624,7 +624,7 @@ function decidePrompt(context: WorkflowNodeContext): string {
   if (complete.length <= PROMPT_CEILING_CHARS) return complete;
   if (budget <= 0) {
     throw new Error(
-      `autoimplement decide prompt lines are ${prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(lines)}`,
+      `autoimplement decide prompt lines are ${prefix.length} characters and leave no room for evidence under the ${PROMPT_CEILING_CHARS} character ceiling; largest line: ${largestLine(lines)}`,
     );
   }
   const collapsedLedger = boundLedger(ledger, 0);
