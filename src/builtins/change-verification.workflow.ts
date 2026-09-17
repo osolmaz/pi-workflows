@@ -254,6 +254,7 @@ export function changeVerificationEvidence(result: ChangeVerificationResult): un
     reason: result.reason,
     originatingWorkflow: result.originatingWorkflow,
     qualifiedNode: result.qualifiedNode,
+    workspace: result.workspace,
     changedFiles: result.changedFiles,
     failureFingerprint: result.failureFingerprint,
     evidence: result.evidence,

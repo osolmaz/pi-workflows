@@ -917,6 +917,11 @@ it keys off the versioned `schema` identifier that the durable result already ca
 with no registered view is still bounded by the generic rules, so a new producer cannot widen a
 prompt by being added.
 
+The change-verification view keeps the route, the reason, the prepared workspace, the findings, and
+the fingerprints, and it names each verification command by its id, outcome, exit code, duration, and
+log size. The view drops the log text only, because the durable result keeps it and
+`outputReferences` names it.
+
 Projection shapes a prompt only. `state.steps[].output` keeps every complete result and
 `state.steps[].prompt` keeps every complete prompt, so a recorded run stays readable and resumable.
 The autoimplement decide prompt projects its observation and its recent-attempt list, and then

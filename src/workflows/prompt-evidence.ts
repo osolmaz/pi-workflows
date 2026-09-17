@@ -118,7 +118,8 @@ export function boundLedger(
 ): EvidenceLedgerEntry[] {
   const bounded = entries.map((entry) => ({ ...entry }));
   const sizes = bounded.map((entry) => entryChars(entry));
-  let total = sizes.reduce((sum, size) => sum + size, 0);
+  // The serialized ledger adds one bracket per end plus one separator per boundary.
+  let total = sizes.reduce((sum, size) => sum + size, 0) + bounded.length + 1;
   for (let index = 0; index < bounded.length && total > budgetChars; index += 1) {
     const entry = bounded[index];
     if (entry === undefined || isEvidenceRef(entry.output)) continue;
