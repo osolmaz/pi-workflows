@@ -332,15 +332,15 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 All four pass. Coverage for `src/workflows/prompt-evidence.ts` is 100% of lines and 92.75% of
 branches.
 
-The repository also requires one real-model live E2E with a low-cost model. It passed twice, most
-recently on the final revision:
+The repository also requires one real-model live E2E with a low-cost model. It passed three times,
+most recently on the final revision:
 
 ```json
 {
   "api": "openai-completions",
   "mode": "real-model",
   "model": "deepseek/deepseek-v4-flash",
-  "modelCostUsd": 0.0034186046340000005,
+  "modelCostUsd": 0.005111741603999999,
   "modelMaxOutputTokens": 4000,
   "packageVersion": "0.17.3",
   "piVersion": "0.85.0",
