@@ -1310,7 +1310,7 @@ describe("built-in autoimplement", () => {
     );
   });
 
-  it("lists one entry per include result and drops the wrapping return step", async () => {
+  it("lists one entry per recorded result and drops the steps the prompt already shows", async () => {
     const decide = autoimplementWorkflow.nodes.decide;
     if (decide?.nodeType !== "agent") throw new Error("decide must be an agent node");
     const steps = [
@@ -1340,6 +1340,20 @@ describe("built-in autoimplement", () => {
         output: { exit: "ready", output: { verified: true } },
       },
       { attemptId: "a6", nodeId: "implement", outcome: "ok", output: { files: 2 } },
+      {
+        attemptId: "a7",
+        nodeId: "observe",
+        outcome: "ok",
+        output: {
+          decisionNumber: 2,
+          decisionLimit: 24,
+          consecutiveNoProgressAttempts: 0,
+          progressFingerprint: `sha256:${"c".repeat(64)}`,
+          lastRoute: "implementation",
+          availableRoutes: ["implementation", "blocked"],
+          latestAttempt: { nodeId: "implement", outcome: "ok", output: { files: 2 } },
+        },
+      },
     ];
     const prompt = await decide.prompt({
       input: { task: "Ship the fix", repository: "/repo" },
@@ -1363,8 +1377,12 @@ describe("built-in autoimplement", () => {
     expect(prompt.match(/workspace\/ready/g)).toHaveLength(1);
     expect(prompt.match(/documentation\/verification\/ready/g)).toHaveLength(1);
     expect(prompt.match(/verified/g)).toHaveLength(1);
+    // The observation line shows the observe step's output, and the newest control attempt is the
+    // observation's latest attempt, so neither may appear again in the ledger.
+    expect(prompt.match(/sha256:c{64}/g)).toHaveLength(1);
     expect(prompt).not.toContain("__piw_exit_");
     expect(prompt).not.toContain('"a6"');
+    expect(prompt).not.toContain('"a7"');
   });
 
   it("uses one controller for all branch choices and returns", async () => {
