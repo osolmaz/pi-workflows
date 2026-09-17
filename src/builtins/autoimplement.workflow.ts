@@ -690,9 +690,14 @@ function isIncludedControlReturn(nodeId: string): boolean {
   return /^(workspace|documentation|localVerification|redesign)\/(ready|blocked)$/.test(nodeId);
 }
 
-/** The return step a control include records for the same result its terminal node already carries. */
+/**
+ * The return step an include records for the mount it leaves.
+ *
+ * The step's output wraps the result of the node it returns from as `{ exit, output }`, so the ledger
+ * keeps that node's own entry instead. A nested include records the same step below its mount path.
+ */
 function isIncludedReturnStep(nodeId: string): boolean {
-  return /^(workspace|documentation|localVerification|redesign)\/__piw_exit_/.test(nodeId);
+  return nodeId.includes("__piw_exit_");
 }
 
 function latestControlAttempt(context: WorkflowNodeContext) {
