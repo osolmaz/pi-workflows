@@ -81,6 +81,26 @@ describe("projectEvidence", () => {
     expect(projected["omittedFields"]).toMatchObject({ schema: EVIDENCE_REF_SCHEMA, omitted: 5 });
   });
 
+  it("keeps a recorded __proto__ field as an ordinary field", () => {
+    const source = JSON.parse(`{"__proto__": {"polluted": true}, "ok": 1}`) as Record<
+      string,
+      unknown
+    >;
+    const projected = projectEvidence(source, NO_VIEWS) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(projected)).toBe(null);
+    expect(Object.hasOwn(projected, "__proto__")).toBe(true);
+    expect(projected["ok"]).toBe(1);
+  });
+
+  it("keeps a source field that shares the omitted-fields name", () => {
+    const wide: Record<string, unknown> = { omittedFields: "kept" };
+    for (let index = 0; index < EVIDENCE_MAX_FIELDS + 5; index += 1) wide[`file-${index}`] = "d";
+    const projected = projectEvidence(wide, NO_VIEWS) as Record<string, unknown>;
+    expect(projected["omittedFields"]).toBe("kept");
+    expect(Object.keys(projected)).toHaveLength(EVIDENCE_MAX_FIELDS + 1);
+    expect(projected["omittedFields2"]).toMatchObject({ schema: EVIDENCE_REF_SCHEMA, omitted: 6 });
+  });
+
   it("collapses a subtree deeper than the depth limit", () => {
     const shallow = projectEvidence(deep("leaf", EVIDENCE_MAX_DEPTH - 1), NO_VIEWS);
     expect(JSON.stringify(shallow)).toContain("leaf");
