@@ -227,7 +227,7 @@ registry is the place to add the next result type.
   one. The order is fixed, so the prompt keeps the newest results and the small decisive fields, such
   as the available routes, for as long as it can. Only an over-ceiling fixed prefix, which is the
   instruction lines, task, plan, scope, and constraints, is a named error that reports the largest
-  line and its size.
+  line and its size, and an overflow that remains after shortening reports the size of each part.
 
 ### One ceiling, one owner
 
@@ -295,7 +295,9 @@ The regression case fails on the earlier code with an assembled prompt of 4,006,
 passes after the change. A second case gives the decide node an observation of 1.6 million characters
 whose parts all sit exactly at the projection caps. On the earlier code the decide node throws with a
 1,602,830-character prompt. On this branch the prompt is bounded, keeps the available routes, and
-names the collapsed field by its digest.
+names the collapsed field by its digest. A third case makes the shortened evidence still overflow,
+which is the only remaining failure, and checks that the error reports the size of each part instead of
+naming an unrelated line.
 
 ## Verification
 
