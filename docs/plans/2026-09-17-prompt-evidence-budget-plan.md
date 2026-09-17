@@ -269,8 +269,8 @@ limit.
 - `projectLedger` projects every entry output;
 - `boundLedger` collapses the oldest entries first, keeps the newest entry whole, leaves a ledger that
   already fits unchanged, counts the ledger brackets and separators when it decides, collapses every
-  entry when the budget cannot hold one, and treats a ledger that JSON cannot serialize as over
-  budget instead of throwing.
+  entry when the budget cannot hold one, does not wrap an existing reference in another reference, and
+  treats a ledger that JSON cannot serialize as over budget instead of throwing.
 
 `test/builtin-autoimplement.test.ts`, one regression case:
 
@@ -305,14 +305,15 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 All four pass. Coverage for `src/workflows/prompt-evidence.ts` is 100% of lines and 92.75% of
 branches.
 
-The repository also requires one real-model live E2E with a low-cost model. It passed:
+The repository also requires one real-model live E2E with a low-cost model. It passed twice, most
+recently on the final revision:
 
 ```json
 {
   "api": "openai-completions",
   "mode": "real-model",
   "model": "deepseek/deepseek-v4-flash",
-  "modelCostUsd": 0.0034617040260000002,
+  "modelCostUsd": 0.0034186046340000005,
   "modelMaxOutputTokens": 4000,
   "packageVersion": "0.17.3",
   "piVersion": "0.85.0",

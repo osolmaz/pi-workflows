@@ -245,6 +245,13 @@ describe("boundLedger", () => {
     expect(bounded[1]?.output).toEqual({ text: "newest" });
   });
 
+  it("does not wrap an existing reference in another reference", () => {
+    const existing = evidenceRef({ text: longText() });
+    const bounded = boundLedger([entry(1, existing), entry(2, existing)], 1);
+    expect(bounded[0]?.output).toEqual(existing);
+    expect(bounded[1]?.output).toEqual(existing);
+  });
+
   it("treats a ledger JSON cannot serialize as over budget instead of throwing", () => {
     const cyclic: Record<string, unknown> = { name: "cycle" };
     cyclic.self = cyclic;

@@ -167,7 +167,9 @@ export function boundLedger(
     bounded[index] = collapsed;
   }
   if (ledgerChars(bounded) <= budgetChars) return bounded;
-  return bounded.map((entry) => ({ ...entry, output: evidenceRef(entry.output) }));
+  return bounded.map((entry) =>
+    isEvidenceRef(entry.output) ? entry : { ...entry, output: evidenceRef(entry.output) },
+  );
 }
 
 function projectValue(
