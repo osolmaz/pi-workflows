@@ -17,11 +17,11 @@ import {
   type LoadExtensionsResult,
   type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
+import { PROMPT_CEILING_CHARS } from "../workflows/prompt-evidence.js";
 
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const MAX_AGENTS = 8;
 const MAX_CONCURRENCY = 8;
-const MAX_PROMPT_CHARS = 96_000;
 const DEFAULT_FINAL_CHARS = 256_000;
 const MAX_FINAL_CHARS = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60_000;
@@ -1231,7 +1231,7 @@ function validateGroup(
 function validateRequest(request: PiAgentRequest): void {
   if (!REQUEST_ID.test(request.id)) throw new Error(`Invalid Pi agent id: ${request.id}`);
   operationalText(request.role, "Pi agent role", 200);
-  nonEmpty(request.prompt, "Pi agent prompt", MAX_PROMPT_CHARS);
+  nonEmpty(request.prompt, "Pi agent prompt", PROMPT_CEILING_CHARS);
   if (request.prompt.trimStart().startsWith("/")) {
     throw new Error(`Pi agent ${request.id} prompt must not invoke an extension command`);
   }

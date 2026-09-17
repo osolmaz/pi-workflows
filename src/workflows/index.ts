@@ -170,6 +170,23 @@ export {
   validateProgressData,
   validateWorkflowUpdate,
 } from "./updates.js";
+export {
+  EVIDENCE_MAX_DEPTH,
+  EVIDENCE_MAX_ITEMS,
+  EVIDENCE_REF_SCHEMA,
+  EVIDENCE_TEXT_CHARS,
+  PROMPT_CEILING_CHARS,
+  boundLedger,
+  evidenceRef,
+  isEvidenceRef,
+  ledgerChars,
+  projectEvidence,
+  projectLedger,
+  type EvidenceLedgerEntry,
+  type EvidenceRef,
+  type EvidenceView,
+  type EvidenceViews,
+} from "./prompt-evidence.js";
 export { sanitizeText, stripAnsi } from "./text.js";
 export {
   DEFINITION_SNAPSHOT_SCHEMA,
