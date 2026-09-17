@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_COMMAND_BATCH_ITEMS } from "../src/workflows/command-batch.js";
 import {
   EVIDENCE_MAX_DEPTH,
   EVIDENCE_MAX_FIELDS,
@@ -99,6 +100,23 @@ describe("projectEvidence", () => {
     expect(projected["omittedFields"]).toBe("kept");
     expect(Object.keys(projected)).toHaveLength(EVIDENCE_MAX_FIELDS + 1);
     expect(projected["omittedFields2"]).toMatchObject({ schema: EVIDENCE_REF_SCHEMA, omitted: 6 });
+  });
+
+  it("keeps every item of a full command batch that a view returns", () => {
+    // A registered view is the correctness layer for its own result type, so it returns the complete
+    // list of checks. The generic caps must not be smaller than that list.
+    expect(EVIDENCE_MAX_ITEMS).toBeGreaterThanOrEqual(MAX_COMMAND_BATCH_ITEMS);
+    const items = Array.from({ length: MAX_COMMAND_BATCH_ITEMS }, (_, index) => ({
+      id: `check-${index}`,
+    }));
+    const projected = projectEvidence(
+      { schema: "test.command-batch.v1", items },
+      new Map([["test.command-batch.v1", (value) => value]]),
+    ) as { items: unknown[] };
+    expect(projected.items).toHaveLength(MAX_COMMAND_BATCH_ITEMS);
+    expect(projected.items).not.toContainEqual(
+      expect.objectContaining({ schema: EVIDENCE_REF_SCHEMA }),
+    );
   });
 
   it("collapses a subtree deeper than the depth limit", () => {
