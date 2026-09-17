@@ -116,6 +116,7 @@ export const PROMPT_CEILING_CHARS = 96_000;
 export const EVIDENCE_REF_SCHEMA = "pi-workflows.evidence-ref.v1";
 export const EVIDENCE_TEXT_CHARS = 4_000;
 export const EVIDENCE_MAX_ITEMS = 20;
+export const EVIDENCE_MAX_FIELDS = 200;
 export const EVIDENCE_MAX_DEPTH = 8;
 
 export type EvidenceRef = {
@@ -139,6 +140,8 @@ export type EvidenceLedgerEntry = {
 
 export function projectEvidence(value: unknown, views: EvidenceViews): unknown;
 export function evidenceRef(value: unknown): EvidenceRef;
+export function evidenceChars(value: unknown): number;
+export function boundEvidence(value: unknown, budgetChars: number): unknown;
 export function projectLedger(
   entries: readonly EvidenceLedgerEntry[],
   views: EvidenceViews,
@@ -160,11 +163,14 @@ Sizes are character counts, matching the `_CHARS` limits that the repository alr
    once per schema on a path, so it cannot recurse through its own replacement.
 2. An array keeps at most `EVIDENCE_MAX_ITEMS` projected items. Extra items become one `EvidenceRef`
    with `omitted` set to their count.
-3. A plain object is projected field by field until `EVIDENCE_MAX_DEPTH` is reached, after which the
+3. An object keeps at most `EVIDENCE_MAX_FIELDS` fields in insertion order. Extra fields become one
+   `EvidenceRef` under `omittedFields`, with `omitted` set to their count. A map of digests with
+   thousands of entries is why this rule exists.
+4. A plain object is projected field by field until `EVIDENCE_MAX_DEPTH` is reached, after which the
    whole subtree becomes an `EvidenceRef`.
-4. A string longer than `EVIDENCE_TEXT_CHARS` becomes an `EvidenceRef` whose `text` holds a head and
+5. A string longer than `EVIDENCE_TEXT_CHARS` becomes an `EvidenceRef` whose `text` holds a head and
    tail excerpt inside the cap, plus `chars` and `digest`.
-5. A number, boolean, or null passes through. `undefined` becomes `null`, so a JSON round trip is
+6. A number, boolean, or null passes through. `undefined` becomes `null`, so a JSON round trip is
    stable.
 
 `projectEvidence` is total. It never throws on a cycle, a bigint, a function, a symbol, a very deep
@@ -174,8 +180,12 @@ mutates its input.
 `boundLedger` collapses from the oldest entry forward. It replaces one entry's `output` with
 `evidenceRef(entry.output)` at a time and stops as soon as the serialized ledger fits the budget. It
 keeps the newest entries intact, because the newest attempt is the one a decision depends on. Call it
-with the projected ledger, so the size it measures is the size a prompt shows. When even a fully
-collapsed ledger is over budget, every entry is collapsed and the caller reports the overflow.
+with the projected ledger, so the size it measures is the size a prompt shows. It counts the array
+brackets and separators that a serialized ledger adds. When even a fully collapsed ledger is over
+budget, every entry is collapsed and the caller reports the overflow.
+
+`boundEvidence` does the same for one observation object. It collapses the largest field first and
+stops as soon as the value fits, so the small fields, which are the decisive ones, stay readable.
 
 ### `changeVerificationEvidence`
 
@@ -210,9 +220,12 @@ registry is the place to add the next result type.
 - The decide prompt keeps its exact line labels and their order. The `Observation` and
   `Recent attempts` values are projected. The `Task`, `Plan`, `Scope`, and `Constraints` lines stay
   whole, because the decider must see them.
-- After assembly, the prompt is measured against `PROMPT_CEILING_CHARS`. If it is over, the ledger is
-  rebuilt with `boundLedger` against the remaining budget. If it is still over, the build throws an
-  error that names the largest line and its size, instead of sending an impossible request.
+- After assembly, the prompt is measured against `PROMPT_CEILING_CHARS`. When it does not fit, the
+  oldest ledger entries collapse to references, and then the largest observation field collapses to
+  one. The order is fixed, so the prompt keeps the newest results and the small decisive fields, such
+  as the available routes, for as long as it can. Only an over-ceiling fixed prefix, which is the
+  instruction lines, task, plan, scope, and constraints, is a named error that reports the largest
+  line and its size.
 
 ### One ceiling, one owner
 
@@ -241,6 +254,7 @@ limit.
 - identity for a value under every cap, and for a string exactly at the text cap;
 - a long string becomes a ref with a head and tail excerpt, its character count, and a digest;
 - an array over the cap keeps its first items and one ref that names the count;
+- an object over the field cap keeps its first fields and one ref that names the count;
 - a depth cap replaces the deep subtree with a ref;
 - a registered schema is replaced by its view, the view result is bounded, a view's own fields survive
   however deeply the result is nested, a view runs once per schema on a path, and a field the view
@@ -250,6 +264,8 @@ limit.
 - a cycle terminates, and a bigint, a function, a symbol, and `undefined` do not throw;
 - the same input twice produces the same output, and a frozen input is not mutated;
 - `evidenceRef` is stable for equal values;
+- `boundEvidence` collapses the largest field first, keeps the small fields, leaves a value that fits
+  unchanged, and returns a value that is not a plain object unchanged;
 - `projectLedger` projects every entry output;
 - `boundLedger` collapses the oldest entries first, keeps the newest entry whole, leaves a ledger that
   already fits unchanged, counts the ledger brackets and separators when it decides, collapses every
@@ -272,7 +288,10 @@ limit.
   tests pass with no edit.
 
 The regression case fails on the earlier code with an assembled prompt of 4,006,002 characters, and
-passes after the change.
+passes after the change. A second case gives the decide node an observation of 1.6 million characters
+whose parts all sit exactly at the projection caps. On the earlier code the decide node throws with a
+1,602,830-character prompt. On this branch the prompt is bounded, keeps the available routes, and
+names the collapsed field by its digest.
 
 ## Verification
 
@@ -310,6 +329,7 @@ The repository also requires one real-model live E2E with a low-cost model. It p
 | The projection changes route availability or the fingerprint. | Project at prompt time only. The recorded observation keeps the raw result, and a regression test compares the recorded routes with the raw fixture. |
 | The walker throws on an unusual value shape.                  | Make it total: a depth cap, a cycle guard, and a ref for anything it cannot represent. One test per case.                                            |
 | A result type with no view stays large.                       | The generic rules bound it, and `boundLedger` collapses the oldest entries. The view registry is the place to add the next type.                     |
+| The evidence is still over the ceiling after projection.      | The prompt shortens the largest observation field, so the request stays valid and the decisive fields stay readable.                                 |
 | The prompt is still over the ceiling after projection.        | The build throws a named error with per-line sizes, so the failure is local and legible instead of a dead run.                                       |
 | Two prompt ceilings drift apart.                              | One exported constant, used by both callers.                                                                                                         |
 

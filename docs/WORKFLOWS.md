@@ -907,6 +907,7 @@ several prompt lines. `projectEvidence` builds a bounded copy of a value before 
 - a string longer than `EVIDENCE_TEXT_CHARS` becomes a reference with a head and tail excerpt, its
   character count, and a digest;
 - an array over `EVIDENCE_MAX_ITEMS` keeps its first items and adds one reference naming the rest;
+- an object over `EVIDENCE_MAX_FIELDS` keeps its first fields and adds one reference naming the rest;
 - a subtree deeper than `EVIDENCE_MAX_DEPTH` becomes one reference;
 - anything the rules cannot represent, including a cycle, becomes one reference.
 
@@ -930,9 +931,11 @@ log size. The view drops the log text only, because the durable result keeps it 
 Projection shapes a prompt only. `state.steps[].output` keeps every complete result and
 `state.steps[].prompt` keeps every complete prompt, so a recorded run stays readable and resumable.
 The autoimplement decide prompt projects its observation and its recent-attempt list, and then
-measures the assembled prompt. When the projected list still does not fit, `boundLedger` collapses
-the oldest entries to references and keeps the newest entries whole. An overflow that remains is a
-named error reporting the line and its size, instead of a request the model cannot answer.
+measures the assembled prompt. When the projected evidence still does not fit, the oldest ledger
+entries collapse to references, and then the largest observation field collapses to one. The order is
+fixed, so the prompt keeps the newest results and the small decisive fields, such as the available
+routes, for as long as it can. `boundLedger` and `boundEvidence` do that work, and an overflow that
+remains is a named error reporting the largest line and its size.
 
 ## Visible responses
 

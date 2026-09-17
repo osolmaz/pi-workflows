@@ -172,11 +172,14 @@ export {
 } from "./updates.js";
 export {
   EVIDENCE_MAX_DEPTH,
+  EVIDENCE_MAX_FIELDS,
   EVIDENCE_MAX_ITEMS,
   EVIDENCE_REF_SCHEMA,
   EVIDENCE_TEXT_CHARS,
   PROMPT_CEILING_CHARS,
+  boundEvidence,
   boundLedger,
+  evidenceChars,
   evidenceRef,
   isEvidenceRef,
   ledgerChars,

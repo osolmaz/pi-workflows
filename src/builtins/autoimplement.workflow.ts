@@ -18,7 +18,10 @@ import {
 import { digest } from "../workflows/human-decision.js";
 import {
   PROMPT_CEILING_CHARS,
+  boundEvidence,
   boundLedger,
+  evidenceChars,
+  ledgerChars,
   projectEvidence,
   projectLedger,
   type EvidenceLedgerEntry,
@@ -593,34 +596,52 @@ const RECENT_ATTEMPTS_LABEL = "Recent attempts: ";
  * Build the decide prompt inside one prompt ceiling.
  *
  * Every step result is projected first, so one large result cannot fill the request. When the
- * projected ledger still does not fit, its oldest entries collapse to digests. The complete results
- * stay in run state, so no evidence is lost, only shortened.
+ * projected evidence still does not fit, the oldest ledger entries collapse to digests, and then the
+ * largest observation field collapses to a digest. The order is fixed, so the workflow keeps the
+ * newest evidence and the small decisive fields for as long as it can. The complete results stay in
+ * run state, so nothing is lost, only shortened.
  */
 function decidePrompt(context: WorkflowNodeContext): string {
   const request = context.input as AutoimplementInput;
-  const head = [
+  const lines = [
     ...DECIDE_PROMPT_RULES,
     `Task: ${request.task}`,
     `Plan: ${JSON.stringify(currentPlan(context))}`,
     `Scope: ${request.scope ?? request.repository}`,
     `Constraints: ${JSON.stringify(request.constraints ?? [])}`,
     `Merge allowed now: ${autoimplementSettings(context).merge === true}`,
-    `Observation: ${JSON.stringify(projectEvidence(context.outputs.observe, AUTOIMPLEMENT_EVIDENCE_VIEWS))}`,
   ];
-  const prefix = `${head.join("\n")}\n${RECENT_ATTEMPTS_LABEL}`;
-  if (prefix.length + 2 > PROMPT_CEILING_CHARS) {
+  const observation = projectEvidence(context.outputs.observe, AUTOIMPLEMENT_EVIDENCE_VIEWS);
+  const ledger = projectLedger(controlEvidenceLedger(context), AUTOIMPLEMENT_EVIDENCE_VIEWS);
+  const prefix = `${[...lines, "Observation: "].join("\n")}`;
+  // Reserve the line break before the ledger line and the ledger label itself.
+  const budget = PROMPT_CEILING_CHARS - prefix.length - RECENT_ATTEMPTS_LABEL.length - 1;
+  const complete = decidePromptText(prefix, observation, ledger);
+  if (complete.length <= PROMPT_CEILING_CHARS) return complete;
+  if (budget <= 0) {
     throw new Error(
-      `autoimplement decide prompt lines are ${prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(head)}`,
+      `autoimplement decide prompt lines are ${prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(lines)}`,
     );
   }
-  const ledger = projectLedger(controlEvidenceLedger(context), AUTOIMPLEMENT_EVIDENCE_VIEWS);
-  const complete = `${prefix}${JSON.stringify(ledger)}`;
-  if (complete.length <= PROMPT_CEILING_CHARS) return complete;
-  const bounded = `${prefix}${JSON.stringify(boundLedger(ledger, PROMPT_CEILING_CHARS - prefix.length))}`;
-  if (bounded.length <= PROMPT_CEILING_CHARS) return bounded;
-  throw new Error(
-    `autoimplement recent attempts are ${bounded.length - prefix.length} characters and must be at most ${PROMPT_CEILING_CHARS - prefix.length}`,
+  const collapsedLedger = boundLedger(ledger, 0);
+  const shortenedObservation = boundEvidence(observation, budget - ledgerChars(collapsedLedger));
+  const shortened = decidePromptText(
+    prefix,
+    shortenedObservation,
+    boundLedger(ledger, budget - evidenceChars(shortenedObservation)),
   );
+  if (shortened.length <= PROMPT_CEILING_CHARS) return shortened;
+  throw new Error(
+    `autoimplement decide prompt is ${shortened.length} characters and must be at most ${PROMPT_CEILING_CHARS}; largest line: ${largestLine(lines)}`,
+  );
+}
+
+function decidePromptText(
+  prefix: string,
+  observation: unknown,
+  ledger: readonly EvidenceLedgerEntry[],
+): string {
+  return `${prefix}${JSON.stringify(observation)}\n${RECENT_ATTEMPTS_LABEL}${JSON.stringify(ledger)}`;
 }
 
 function largestLine(lines: readonly string[]): string {
