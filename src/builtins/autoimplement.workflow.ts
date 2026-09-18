@@ -551,8 +551,13 @@ const AUTOIMPLEMENT_EVIDENCE_VIEWS: EvidenceViews = new Map([
   ],
 ]);
 
-/** The node whose output the decide prompt shows on its own `Observation:` line. */
-const OBSERVATION_STEP_NODE = "observe";
+/**
+ * Nodes whose step output the decide prompt shows somewhere else.
+ *
+ * The observation node produces the `Observation:` line, and the dispatch node returns the decision
+ * that the `decide` step already recorded.
+ */
+const PROMPT_ECHO_STEP_NODES: ReadonlySet<string> = new Set(["observe", "dispatch"]);
 
 /**
  * Step results a decide prompt lists, newest last.
@@ -567,7 +572,7 @@ function controlEvidenceLedger(context: WorkflowNodeContext): EvidenceLedgerEntr
   const entries: EvidenceLedgerEntry[] = [];
   for (const step of context.state.steps.slice(-12)) {
     if (step.attemptId === latest?.attemptId) continue;
-    if (step.nodeId === OBSERVATION_STEP_NODE || isIncludedReturnStep(step.nodeId)) continue;
+    if (PROMPT_ECHO_STEP_NODES.has(step.nodeId) || isIncludedReturnStep(step.nodeId)) continue;
     entries.push(evidenceEntry(step));
   }
   return entries;

@@ -229,10 +229,11 @@ registry is the place to add the next result type.
   `controlProgressFingerprint`, and `consecutiveNoProgressAttempts` keep reading the raw result. Route
   availability and the progress fingerprint therefore cannot change.
 - `controlEvidenceLedger` replaces `recentWorkflowAttempts` dropping the entry that is already shown
-  as `latestAttempt`, the `observe` step whose output is the value the `Observation:` line prints, and
-  the return step that an include records for a result the node it returns from already carries
-  (`…/__piw_exit_<exit>`, including nested mounts), so one result appears once. Each entry carries the
-  attempt id, node id, outcome, error, and output.
+  as `latestAttempt`, the steps whose output the prompt already shows (the `observe` step, whose output
+  is the `Observation:` line, and the `dispatch` step, which returns the decision the `decide` step
+  recorded), and the return step that an include records for a result the node it returns from already
+  carries (`…/__piw_exit_<exit>`, including nested mounts), so one result appears once. Each entry
+  carries the attempt id, node id, outcome, error, and output.
 - The decide prompt keeps its exact line labels and their order. The `Observation` and
   `Recent attempts` values are projected. The `Task`, `Plan`, `Scope`, and `Constraints` lines stay
   whole, because the decider must see them.
@@ -309,8 +310,8 @@ limit.
   log text;
 - the prompt still matches `Observation: …\nRecent attempts: …`, and the existing prompt-content
   tests pass with no edit;
-- the ledger lists one entry per recorded result: the include return step and the `observe` step
-  never appear, at any depth;
+- the ledger lists one entry per recorded result: the include return step, the `observe` step, and
+  the `dispatch` step never appear, at any depth;
 
 The regression case fails on the earlier code with an assembled prompt of 4,006,002 characters, and
 passes after the change. A second case gives the decide node an observation of 1.6 million characters
@@ -329,18 +330,18 @@ npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 ```
 
-All four pass. Coverage for `src/workflows/prompt-evidence.ts` is 100% of lines and 92.75% of
+All four pass. Coverage for `src/workflows/prompt-evidence.ts` is 100% of lines and 94.38% of
 branches.
 
-The repository also requires one real-model live E2E with a low-cost model. It passed three times,
-most recently on the final revision:
+The repository also requires one real-model live E2E with a low-cost model. It passed four times,
+most recently on this revision:
 
 ```json
 {
   "api": "openai-completions",
   "mode": "real-model",
   "model": "deepseek/deepseek-v4-flash",
-  "modelCostUsd": 0.005111741603999999,
+  "modelCostUsd": 0.00240289357,
   "modelMaxOutputTokens": 4000,
   "packageVersion": "0.17.3",
   "piVersion": "0.85.0",
@@ -351,15 +352,16 @@ most recently on the final revision:
 
 ## Risks
 
-| Risk                                                          | Mitigation                                                                                                                                           |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A view drops a field the routing decision needs.              | Keep the fields `resultRoutes` reads: route, status, reason, findings, fingerprints. Add a test that asserts them.                                   |
-| The projection changes route availability or the fingerprint. | Project at prompt time only. The recorded observation keeps the raw result, and a regression test compares the recorded routes with the raw fixture. |
-| The walker throws on an unusual value shape.                  | Make it total: a depth cap, a cycle guard, and a ref for anything it cannot represent. One test per case.                                            |
-| A result type with no view stays large.                       | The generic rules bound it, and `boundLedger` collapses the oldest entries. The view registry is the place to add the next type.                     |
-| The evidence is still over the ceiling after projection.      | The prompt shortens the largest observation field, so the request stays valid and the decisive fields stay readable.                                 |
-| The prompt is still over the ceiling after projection.        | The build throws a named error with per-line sizes, so the failure is local and legible instead of a dead run.                                       |
-| Two prompt ceilings drift apart.                              | One exported constant, used by both callers.                                                                                                         |
+| Risk                                                          | Mitigation                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A view drops a field the routing decision needs.              | Keep the fields `resultRoutes` reads: route, status, reason, findings, fingerprints. Add a test that asserts them.                                                                                                                          |
+| The projection changes route availability or the fingerprint. | Project at prompt time only. The recorded observation keeps the raw result, and a regression test compares the recorded routes with the raw fixture.                                                                                        |
+| The walker throws on an unusual value shape.                  | Make it total: a depth cap, a cycle guard, and a ref for anything it cannot represent. One test per case.                                                                                                                                   |
+| A result type with no view stays large.                       | The generic rules bound it, and `boundLedger` collapses the oldest entries. The view registry is the place to add the next type.                                                                                                            |
+| The `Plan:` line is the one value the prompt keeps whole.     | It is the decider's main input, so it stays whole. A plan near the ceiling makes the decide node fail with a named error, and the controller blocks after three failures. Accepted: the plan must be visible, and the error names the line. |
+| The observation shortens field by field, never as one value.  | Collapsing the whole observation would also drop `availableRoutes` and the other small decisive fields that a decider needs. Accepted: the failure names the sizes instead.                                                                 |
+| The prompt is still over the ceiling after projection.        | The build throws a named error with the size of each part, so the failure is local and legible instead of a dead run.                                                                                                                       |
+| Two prompt ceilings drift apart.                              | One exported constant, used by both callers.                                                                                                                                                                                                |
 
 ## Rollout
 

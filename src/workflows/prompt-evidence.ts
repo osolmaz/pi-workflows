@@ -53,7 +53,10 @@ const NO_APPLIED_VIEWS: ReadonlySet<string> = new Set();
 /** A bounded stand-in for a value that was collapsed out of a prompt. */
 export type EvidenceRef = {
   schema: typeof EVIDENCE_REF_SCHEMA;
-  /** Digest of the collapsed value, so a reader can locate the durable record. */
+  /**
+   * Digest of the collapsed prompt value. A projection that collapsed a recorded subtree directly
+   * digests that recorded value, which is the payload a durable blob holds.
+   */
   digest: string;
   /** Character count of the collapsed value, or of the name of a value JSON cannot represent. */
   chars: number;
@@ -332,17 +335,10 @@ function refSource(value: unknown): unknown {
   } catch {
     // A cycle or a bigint throws here. Both fall through to the type name.
   }
-  return { unsupported: describeValue(value) };
+  return { unsupported: typeof value };
 }
 
 function refChars(value: unknown): number {
   if (typeof value === "string") return value.length;
   return canonicalJson(refSource(value)).length;
-}
-
-function describeValue(value: unknown): string {
-  if (typeof value === "bigint") return "bigint";
-  if (typeof value === "function") return "function";
-  if (typeof value === "symbol") return "symbol";
-  return typeof value;
 }
