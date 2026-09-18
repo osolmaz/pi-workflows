@@ -898,9 +898,9 @@ the session context and the reserved answer, so an agent prompt has a ceiling.
 `PROMPT_CEILING_CHARS` in `src/workflows/prompt-evidence.ts` is that ceiling, and it is the same
 number that the Pi agent group uses to validate a prompt. It bounds the prompt a builder writes. The
 engine then appends the live-control block, whose settings summary is itself capped at 8,192
-characters, and the step contract, so the ceiling keeps room for that block. This is the named
-external interface that
-justifies a limit, and the complete result stays available.
+characters, and the step contract, so one complete request can be that much larger than the ceiling.
+That headroom is far below the context window the ceiling protects. The context window is the named
+external interface that justifies a limit, and the complete result stays available in run state.
 
 Step results can be large. One verification result can carry command logs of up to
 `MAX_COMMAND_BATCH_OUTPUT_CHARS` per check, and a result that several steps recorded can reach

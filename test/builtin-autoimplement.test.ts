@@ -1342,22 +1342,33 @@ describe("built-in autoimplement", () => {
         outcome: "ok",
         output: { exit: "ready", output: { plan: "planned" } },
       },
-      { attemptId: "a3", nodeId: "implement", outcome: "ok", output: { files: 1 } },
       {
-        attemptId: "a4",
+        attemptId: "a3",
         nodeId: "documentation/verification/ready",
         outcome: "ok",
         output: { verified: true },
       },
       {
-        attemptId: "a5",
+        attemptId: "a4",
         nodeId: "documentation/verification/__piw_exit_ready",
         outcome: "ok",
         output: { exit: "ready", output: { verified: true } },
       },
-      { attemptId: "a6", nodeId: "implement", outcome: "ok", output: { files: 2 } },
       {
-        attemptId: "a7",
+        attemptId: "a5",
+        nodeId: "decide",
+        outcome: "ok",
+        output: { route: "implementation", reason: "ROUTE-REASON-MARKER" },
+      },
+      {
+        attemptId: "a6",
+        nodeId: "dispatch",
+        outcome: "ok",
+        output: { route: "implementation", reason: "ROUTE-REASON-MARKER" },
+      },
+      { attemptId: "a7", nodeId: "implement", outcome: "ok", output: { files: 2 } },
+      {
+        attemptId: "a8",
         nodeId: "observe",
         outcome: "ok",
         output: {
@@ -1393,12 +1404,15 @@ describe("built-in autoimplement", () => {
     expect(prompt.match(/workspace\/ready/g)).toHaveLength(1);
     expect(prompt.match(/documentation\/verification\/ready/g)).toHaveLength(1);
     expect(prompt.match(/verified/g)).toHaveLength(1);
-    // The observation line shows the observe step's output, and the newest control attempt is the
-    // observation's latest attempt, so neither may appear again in the ledger.
+    // The observation line shows the observe step's output, the newest control attempt is the
+    // observation's latest attempt, and the dispatch step repeats the decision the decide step
+    // recorded, so none of them may appear again in the ledger.
     expect(prompt.match(/sha256:c{64}/g)).toHaveLength(1);
+    expect(prompt.match(/ROUTE-REASON-MARKER/g)).toHaveLength(1);
     expect(prompt).not.toContain("__piw_exit_");
     expect(prompt).not.toContain('"a6"');
     expect(prompt).not.toContain('"a7"');
+    expect(prompt).not.toContain('"a8"');
   });
 
   it("uses one controller for all branch choices and returns", async () => {
