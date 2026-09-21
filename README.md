@@ -283,6 +283,23 @@ pi-workflows focuses it instead of opening a duplicate.
 The plugin uses Herdr's public pane APIs and runs no service or polling loop. It
 is also available through the [Herdr plugin marketplace](https://herdr.dev/plugins/).
 
+The viewer pane does not look up `piw` on its own `PATH`. Pi resolves the client
+once and passes the absolute path in, so a pane always runs the client that
+belongs to the loaded package. Resolution order: `PIW_BIN`, then the package-local
+platform binary, then the first `piw` on `PATH`. The resolved version must equal
+the package version, and a mismatch is reported with both versions instead of
+opening a pane.
+
+The pane receives `PIW_BIN`, `PIW_SOCKET` with the socket of the session that owns
+the state, and `PIW_NO_AUTOSTART=1`, so a pane never starts a server of its own. A
+pane that cannot run keeps its message on screen and states the failure in its
+label. See [the client resolution plan](docs/2026-09-21-piw-client-resolution-plan.md).
+
+The next release ships the client inside the npm package as per-platform packages
+named like `@osolmaz/piw-linux-arm64`, declared as `optionalDependencies` with the
+same version, so the client and the package cannot drift apart. Until then,
+`cargo install pi-workflows` remains the install path.
+
 ## Node types
 
 A workflow is a graph of named nodes with exactly one entry point. Each node
