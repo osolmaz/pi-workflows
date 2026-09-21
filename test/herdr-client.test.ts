@@ -65,6 +65,23 @@ describe("piw client resolution", () => {
     });
   });
 
+  it("hands over an absolute path for a relative PIW_BIN", async () => {
+    const root = await makeClientRoot("piw-client-relative");
+    const client = await writeFakePiw(path.join(root, "relative"), packageVersion);
+    const relative = path.relative(process.cwd(), client);
+
+    const inspection = inspectPiwClient(clientOptions(root, { PIW_BIN: relative, PATH: "" }));
+
+    expect(path.isAbsolute(relative)).toBe(false);
+    expect(inspection.ok).toBe(true);
+    expect(inspection.ok === true && inspection.path).toBe(client);
+    expect(piwPaneEnvironment(client, "/tmp/session.sock")).toEqual([
+      `PIW_BIN=${client}`,
+      "PIW_NO_AUTOSTART=1",
+      "PIW_SOCKET=/tmp/session.sock",
+    ]);
+  });
+
   it("refuses an unusable PIW_BIN instead of falling back to PATH", async () => {
     const root = await makeClientRoot("piw-client-unusable");
     const onPath = await writeFakePiw(path.join(root, "on-path"), packageVersion);

@@ -184,14 +184,15 @@ export function inspectPiwClient(options: PiwClientOptions = {}): PiwClientInspe
 
   const explicit = env[PIW_BIN_ENV]?.trim() ?? "";
   if (explicit.length > 0) {
-    if (!isExecutableFile(explicit)) {
+    const resolvedExplicit = path.resolve(explicit);
+    if (!isExecutableFile(resolvedExplicit)) {
       return {
         ok: false,
         kind: "missing",
-        message: `${PIW_BIN_ENV} points at ${explicit}, which is not an executable file. ${installHint(expectedVersion)}`,
+        message: `${PIW_BIN_ENV} points at ${resolvedExplicit}, which is not an executable file. ${installHint(expectedVersion)}`,
       };
     }
-    return inspectCandidate(explicit, "PIW_BIN", expectedVersion, options.readVersion);
+    return inspectCandidate(resolvedExplicit, "PIW_BIN", expectedVersion, options.readVersion);
   }
 
   const packageBinary = piwPackageBinaryPath(root, platform, options.arch ?? process.arch);
@@ -236,12 +237,15 @@ function inspectCandidate(
   expectedVersion: string,
   readVersion: ((file: string) => string | undefined) | undefined,
 ): PiwClientInspection {
-  const version = (readVersion ?? readPiwVersion)(file);
-  const check = checkPiwVersion(version, expectedVersion, file);
+  // A pane runs the client from its own working directory, so the session hands over one absolute
+  // path instead of letting the pane resolve the same value a second time.
+  const candidate = path.resolve(file);
+  const version = (readVersion ?? readPiwVersion)(candidate);
+  const check = checkPiwVersion(version, expectedVersion, candidate);
   if (check.compatible === false) {
     return { ok: false, kind: "mismatch", message: check.reason };
   }
-  return { ok: true, path: file, source, version: check.version, expectedVersion };
+  return { ok: true, path: candidate, source, version: check.version, expectedVersion };
 }
 
 function triedLocations(packageBinary: string | undefined, env: NodeJS.ProcessEnv): string {
