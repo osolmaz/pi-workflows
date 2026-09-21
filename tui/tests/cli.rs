@@ -98,3 +98,42 @@ fn once_reports_an_invalid_snapshot_without_waiting_for_the_loading_timeout() {
     assert!(stderr.contains("Workflow run snapshot is invalid: display is missing."));
     assert!(!stderr.contains("timed out waiting for workflow run"));
 }
+
+#[cfg(unix)]
+#[test]
+fn refuses_to_start_a_server_when_autostart_is_disabled() {
+    let home = tempfile::tempdir().unwrap();
+    let derived = home.path().join(".pi/agent/workflows/server/server.sock");
+    let output = piw()
+        .env("HOME", home.path())
+        .env("PIW_NO_AUTOSTART", "1")
+        .args(["--once", "run-no-server"])
+        .output()
+        .expect("piw should start");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("PIW_NO_AUTOSTART"));
+    assert!(stderr.contains(derived.to_str().unwrap()));
+}
+
+#[cfg(unix)]
+#[test]
+fn pins_the_socket_path_from_the_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let pinned = home.path().join("pinned/pinned.sock");
+    std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+    let derived = home.path().join(".pi/agent/workflows/server/server.sock");
+    let output = piw()
+        .env("HOME", home.path())
+        .env("PIW_SOCKET", &pinned)
+        .env("PIW_NO_AUTOSTART", "1")
+        .args(["--once", "run-pinned"])
+        .output()
+        .expect("piw should start");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains(pinned.to_str().unwrap()));
+    assert!(!stderr.contains(derived.to_str().unwrap()));
+}

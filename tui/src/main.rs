@@ -1,11 +1,16 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use piw::{server, ui};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
+
+/// The Pi session that opens a viewer pane pins the client contract here.
+const PIW_SOCKET_ENV: &str = "PIW_SOCKET";
+const PIW_NO_AUTOSTART_ENV: &str = "PIW_NO_AUTOSTART";
 
 /// Terminal viewer and client relay for workflow server state.
 #[derive(Parser)]
@@ -57,6 +62,9 @@ fn state_directory() -> PathBuf {
 }
 
 fn default_socket() -> PathBuf {
+    if let Some(pinned) = pinned_socket(std::env::var_os(PIW_SOCKET_ENV).as_deref()) {
+        return pinned;
+    }
     let state_directory = state_directory();
     #[cfg(unix)]
     return state_directory.join("server").join("server.sock");
@@ -72,6 +80,22 @@ fn default_socket() -> PathBuf {
     }
     #[cfg(not(any(unix, windows)))]
     state_directory.join("server").join("server.sock")
+}
+
+/// A pane must reach the server that owns its session state, so the session that opened it pins the
+/// socket. An empty value means the path is not pinned.
+fn pinned_socket(value: Option<&OsStr>) -> Option<PathBuf> {
+    value.filter(|path| !path.is_empty()).map(PathBuf::from)
+}
+
+/// `PIW_NO_AUTOSTART` keeps a viewer pane from starting a server of its own. The empty string, `0`,
+/// and `false` mean off, so a human in a shell keeps the autostart behavior.
+fn autostart_disabled() -> bool {
+    autostart_disabled_value(std::env::var(PIW_NO_AUTOSTART_ENV).ok().as_deref())
+}
+
+fn autostart_disabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !matches!(value.trim(), "" | "0" | "false"))
 }
 
 /// Operating systems limit one local socket path. Linux allows 107 bytes. macOS and the BSDs use a
@@ -113,6 +137,13 @@ async fn server_available(socket_path: &PathBuf) -> bool {
 async fn ensure_server(socket_path: &PathBuf) -> Result<()> {
     if server_available(socket_path).await {
         return Ok(());
+    }
+    if autostart_disabled() {
+        anyhow::bail!(
+            "workflow server is not reachable at {} and {} is set, so this client will not start one",
+            socket_path.display(),
+            PIW_NO_AUTOSTART_ENV
+        );
     }
     let status = ProcessCommand::new("pi-workflows")
         .args(["server", "start"])
@@ -187,5 +218,25 @@ mod tests {
         let error = check_socket_path(&long).expect_err("a path above the limit must fail");
         assert!(error.to_string().contains("operating system limit"));
         check_socket_path(&PathBuf::from("/tmp/piw.sock")).expect("a short path must pass");
+    }
+
+    #[test]
+    fn pins_the_socket_path_only_when_the_session_supplies_one() {
+        assert_eq!(
+            pinned_socket(Some(OsStr::new("/tmp/pinned.sock"))),
+            Some(PathBuf::from("/tmp/pinned.sock"))
+        );
+        assert_eq!(pinned_socket(Some(OsStr::new(""))), None);
+        assert_eq!(pinned_socket(None), None);
+    }
+
+    #[test]
+    fn reads_the_autostart_switch_conservatively() {
+        assert!(!autostart_disabled_value(None));
+        assert!(!autostart_disabled_value(Some("")));
+        assert!(!autostart_disabled_value(Some("0")));
+        assert!(!autostart_disabled_value(Some("false")));
+        assert!(autostart_disabled_value(Some("1")));
+        assert!(autostart_disabled_value(Some("true")));
     }
 }
