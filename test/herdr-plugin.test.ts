@@ -3,11 +3,17 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { piwPackageVersion } from "../src/herdr/client.js";
 import { makeTempDir } from "./helpers.js";
 
 const VIEWER_ENTRY = path.resolve("plugins/herdr/viewer.mjs");
+const PACKAGE_VERSION = piwPackageVersion() ?? "";
 
-async function writeFakeCommand(directory: string, name: string): Promise<void> {
+async function writeFakeCommand(
+  directory: string,
+  name: string,
+  printsVersion = false,
+): Promise<void> {
   const commandPath = path.join(directory, name);
   await fs.writeFile(
     commandPath,
@@ -18,6 +24,7 @@ fs.appendFileSync(
   process.env.TEST_COMMAND_LOG,
   JSON.stringify({ command: path.basename(process.argv[1]), args: process.argv.slice(2) }) + "\\n",
 );
+${printsVersion ? `process.stdout.write("piw ${PACKAGE_VERSION}\\n");` : ""}
 `,
   );
   await fs.chmod(commandPath, 0o700);
@@ -33,7 +40,7 @@ describe("Herdr piw plugin", () => {
       await fs.mkdir(binaryDirectory);
       await Promise.all([
         writeFakeCommand(binaryDirectory, "herdr"),
-        writeFakeCommand(binaryDirectory, "piw"),
+        writeFakeCommand(binaryDirectory, "piw", true),
       ]);
 
       const child = spawn(process.execPath, [VIEWER_ENTRY], {
@@ -57,7 +64,9 @@ describe("Herdr piw plugin", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { command: string; args: string[] });
+      // The client is found on PATH, checked against the package version, and only then run.
       expect(calls).toEqual([
+        { command: "piw", args: ["--version"] },
         {
           command: "herdr",
           args: ["pane", "rename", "w1:p1", "piw · 20260903T120000Z-autoplan-test"],

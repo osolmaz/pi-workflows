@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   HerdrWorkflowViewer,
   parseViewerPlacement,
@@ -6,6 +8,26 @@ import {
   viewerPaneLabel,
   type WorkflowViewTarget,
 } from "../src/extension/herdr-viewer.js";
+import { piwPackageVersion } from "../src/herdr/client.js";
+import { makeTempDir } from "./helpers.js";
+
+const packageVersion = piwPackageVersion() ?? "";
+let clientBinary = "";
+
+beforeAll(async () => {
+  const directory = await makeTempDir("piw-viewer-client");
+  clientBinary = path.join(directory, "piw");
+  await fs.writeFile(
+    clientBinary,
+    `#!/usr/bin/env node\nprocess.stdout.write("piw ${packageVersion}\\n");\n`,
+  );
+  await fs.chmod(clientBinary, 0o755);
+});
+
+/** The session resolves the client once, so every viewer test hands it a resolved client. */
+function viewerEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { HERDR_ENV: "1", PIW_BIN: clientBinary, ...overrides };
+}
 
 const target: WorkflowViewTarget = {
   runId: "20260818T120000Z-monitor-a1b2c3d4",
@@ -90,20 +112,18 @@ describe("HerdrWorkflowViewer", () => {
           }),
         };
       }
-      if (key === "piw --version") return { stdout: "piw 0.1.0\n" };
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.probe()).resolves.toEqual({ available: true });
     expect(harness.calls.map(commandKey)).toEqual([
       "herdr pane current --current",
       "herdr plugin list --plugin osolmaz.pi-workflows --json",
-      "piw --version",
     ]);
   });
 
-  it("reports unavailable plugin, piw, and malformed Herdr responses", async () => {
+  it("reports unavailable plugin, client, and malformed Herdr responses", async () => {
     const missingPlugin = execHarness((call) => {
       const key = commandKey(call);
       if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
@@ -122,12 +142,12 @@ describe("HerdrWorkflowViewer", () => {
       }
       throw new Error(`Unexpected command: ${key}`);
     });
-    await expect(
-      new HerdrWorkflowViewer(missingPlugin.exec, { HERDR_ENV: "1" }).probe(),
-    ).resolves.toEqual({
-      available: false,
-      reason: "Herdr plugin osolmaz.pi-workflows is not linked and enabled.",
-    });
+    await expect(new HerdrWorkflowViewer(missingPlugin.exec, viewerEnv()).probe()).resolves.toEqual(
+      {
+        available: false,
+        reason: "Herdr plugin osolmaz.pi-workflows is not linked and enabled.",
+      },
+    );
 
     const missingPiw = execHarness((call) => {
       const key = commandKey(call);
@@ -139,40 +159,48 @@ describe("HerdrWorkflowViewer", () => {
           }),
         };
       }
-      if (key === "piw --version") return { code: 1, stderr: "piw missing" };
       throw new Error(`Unexpected command: ${key}`);
     });
-    await expect(
-      new HerdrWorkflowViewer(missingPiw.exec, { HERDR_ENV: "1" }).probe(),
-    ).resolves.toEqual({ available: false, reason: "piw failed: piw missing" });
+    const missingCapability = await new HerdrWorkflowViewer(
+      missingPiw.exec,
+      viewerEnv({ PIW_BIN: path.join("/nonexistent", "piw") }),
+    ).probe();
+    expect(missingCapability.available).toBe(false);
+    if (!missingCapability.available) {
+      expect(missingCapability.reason).toContain("PIW_BIN");
+      expect(missingCapability.reason).toContain("not an executable file");
+      expect(missingCapability.reason).toContain(
+        `cargo install pi-workflows --version ${packageVersion}`,
+      );
+    }
 
     const malformed = execHarness(() => ({ stdout: "not json" }));
-    await expect(
-      new HerdrWorkflowViewer(malformed.exec, { HERDR_ENV: "1" }).probe(),
-    ).resolves.toEqual({ available: false, reason: "herdr returned invalid JSON." });
+    await expect(new HerdrWorkflowViewer(malformed.exec, viewerEnv()).probe()).resolves.toEqual({
+      available: false,
+      reason: "herdr returned invalid JSON.",
+    });
   });
 
   it("bounds command, timeout, and malformed snapshot failures", async () => {
     const killed = execHarness(() => ({ killed: true }));
-    await expect(new HerdrWorkflowViewer(killed.exec, { HERDR_ENV: "1" }).probe()).resolves.toEqual(
-      { available: false, reason: "herdr timed out." },
-    );
+    await expect(new HerdrWorkflowViewer(killed.exec, viewerEnv()).probe()).resolves.toEqual({
+      available: false,
+      reason: "herdr timed out.",
+    });
 
     const large = execHarness(() => ({ stdout: "x".repeat(1_000_001) }));
-    await expect(new HerdrWorkflowViewer(large.exec, { HERDR_ENV: "1" }).probe()).resolves.toEqual({
+    await expect(new HerdrWorkflowViewer(large.exec, viewerEnv()).probe()).resolves.toEqual({
       available: false,
       reason: "herdr returned too much data.",
     });
 
     const missingPanes = execHarness(() => ({ stdout: json({ result: { snapshot: {} } }) }));
     await expect(
-      new HerdrWorkflowViewer(missingPanes.exec, { HERDR_ENV: "1" }).find(target),
+      new HerdrWorkflowViewer(missingPanes.exec, viewerEnv()).find(target),
     ).rejects.toThrow("snapshot has no panes");
 
     const longFailure = execHarness(() => ({ code: 1, stderr: "x".repeat(400) }));
-    const capability = await new HerdrWorkflowViewer(longFailure.exec, {
-      HERDR_ENV: "1",
-    }).probe();
+    const capability = await new HerdrWorkflowViewer(longFailure.exec, viewerEnv()).probe();
     expect(capability.available).toBe(false);
     if (!capability.available) {
       expect(capability.reason.length).toBeLessThan(330);
@@ -189,7 +217,7 @@ describe("HerdrWorkflowViewer", () => {
         if (key.includes("plugin pane open")) return { stdout: json(openedPane()) };
         throw new Error(`Unexpected command: ${key}`);
       });
-      const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+      const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
       await expect(viewer.open(target, placement, "/repo")).resolves.toEqual({
         paneId: "w1:p2",
@@ -200,6 +228,9 @@ describe("HerdrWorkflowViewer", () => {
       );
       expect(open?.command).toBe("herdr");
       expect(open?.args).toContain(`PI_WORKFLOWS_RUN_ID=${target.runId}`);
+      expect(open?.args).toContain(`PIW_BIN=${clientBinary}`);
+      expect(open?.args).toContain("PIW_NO_AUTOSTART=1");
+      expect(open?.args).not.toContain(expect.stringContaining("PIW_SOCKET="));
       expect(open?.args).not.toContain(expect.stringContaining("PI_WORKFLOWS_RUN_DIR="));
       expect(open?.args).not.toContain("--cwd");
       expect(open?.args).toContain("--target-pane");
@@ -217,7 +248,7 @@ describe("HerdrWorkflowViewer", () => {
         if (key === "herdr pane swap --source-pane w1:p2 --target-pane w1:p1") return {};
         throw new Error(`Unexpected command: ${key}`);
       });
-      const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+      const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
       await viewer.open(target, placement, "/repo");
       expect(harness.calls.map(commandKey)).toContain(
@@ -236,7 +267,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key === "herdr plugin pane close w1:p2") return {};
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.open(target, "left", "/repo")).rejects.toThrow("swap failed");
     expect(harness.calls.map(commandKey)).toContain("herdr plugin pane close w1:p2");
@@ -250,7 +281,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key.includes("plugin pane open")) return { stdout: json(openedPane("w1:p2", "w1:t2")) };
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await viewer.open(target, "tab", "/repo");
     const open = harness.calls.find(
@@ -270,11 +301,7 @@ describe("HerdrWorkflowViewer", () => {
       throw new Error(`Unexpected command: ${key}`);
     });
     await expect(
-      new HerdrWorkflowViewer(malformedPane.exec, { HERDR_ENV: "1" }).open(
-        target,
-        "right",
-        "/repo",
-      ),
+      new HerdrWorkflowViewer(malformedPane.exec, viewerEnv()).open(target, "right", "/repo"),
     ).rejects.toThrow("plugin pane response has no plugin_pane");
 
     const malformedWorkspace = execHarness((call) => {
@@ -285,7 +312,7 @@ describe("HerdrWorkflowViewer", () => {
       throw new Error(`Unexpected command: ${key}`);
     });
     await expect(
-      new HerdrWorkflowViewer(malformedWorkspace.exec, { HERDR_ENV: "1" }).open(
+      new HerdrWorkflowViewer(malformedWorkspace.exec, viewerEnv()).open(
         target,
         "workspace",
         "/repo",
@@ -314,7 +341,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key === "herdr tab close w2:t1") return {};
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.open(target, "workspace", "/repo")).resolves.toEqual({
       paneId: "w2:p2",
@@ -353,7 +380,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key === "herdr tab close w2:t1") return { code: 1, stderr: "temporary failure" };
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     const result = await viewer.open(target, "workspace", "/repo");
     expect(result).toMatchObject({ paneId: "w2:p2", reused: false });
@@ -380,7 +407,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key === "herdr workspace close w2") return {};
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.open(target, "workspace", "/repo")).rejects.toThrow("launch failed");
     expect(harness.calls.map(commandKey)).toContain("herdr workspace close w2");
@@ -407,7 +434,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key === "herdr plugin pane focus w9:p4") return {};
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.open(target, "right", "/repo")).resolves.toEqual({
       paneId: "w9:p4",
@@ -434,7 +461,7 @@ describe("HerdrWorkflowViewer", () => {
       }
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     const first = viewer.open(target, "right", "/repo");
     const second = viewer.open(target, "below", "/repo");
@@ -478,7 +505,7 @@ describe("HerdrWorkflowViewer", () => {
       if (key.includes("plugin pane open")) return { stdout: json(openedPane()) };
       throw new Error(`Unexpected command: ${key}`);
     });
-    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv());
 
     await expect(viewer.open(target, "right", "/repo")).resolves.toEqual({
       paneId: "w1:p2",
@@ -490,5 +517,38 @@ describe("HerdrWorkflowViewer", () => {
     expect(parseViewerPlacement("workspace")).toBe("workspace");
     expect(parseViewerPlacement("diagonal")).toBeUndefined();
     expect(PIW_SHORTCUT).toBe("ctrl+shift+r");
+  });
+
+  it("refuses a stale client before it opens or reuses any pane", async () => {
+    const directory = await makeTempDir("piw-viewer-stale");
+    const staleBinary = path.join(directory, "piw");
+    await fs.writeFile(staleBinary, '#!/usr/bin/env node\nprocess.stdout.write("piw 0.0.1\\n");\n');
+    await fs.chmod(staleBinary, 0o755);
+    const harness = execHarness(() => {
+      throw new Error("a stale client must not reach Herdr");
+    });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv({ PIW_BIN: staleBinary }));
+
+    await expect(viewer.open(target, "right", "/repo")).rejects.toThrow(
+      `The client at ${staleBinary} is 0.0.1 but this pi-workflows package is ${packageVersion}.`,
+    );
+    expect(harness.calls).toEqual([]);
+  });
+
+  it("passes the socket of the session that opened the pane", async () => {
+    const harness = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin pane open")) return { stdout: json(openedPane()) };
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    const viewer = new HerdrWorkflowViewer(harness.exec, viewerEnv(), () => "/tmp/session.sock");
+
+    await viewer.open(target, "right", "/repo");
+    const open = harness.calls.find(
+      (call) => call.args.slice(0, 3).join(" ") === "plugin pane open",
+    );
+    expect(open?.args).toContain("PIW_SOCKET=/tmp/session.sock");
   });
 });

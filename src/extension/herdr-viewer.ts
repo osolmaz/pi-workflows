@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { inspectPiwClient, piwPaneEnvironment } from "../herdr/client.js";
 import { HERDR_PLUGIN_ENTRYPOINT, HERDR_PLUGIN_ID } from "../herdr/constants.js";
 export const PIW_SHORTCUT = "ctrl+shift+r";
 export const PIW_SHORTCUT_HINT = "Ctrl+Shift+R piw";
@@ -46,6 +47,7 @@ export class HerdrWorkflowViewer {
   constructor(
     private readonly exec: Exec,
     private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly socketPath: () => string | undefined = () => undefined,
   ) {}
 
   async probe(): Promise<HerdrCapability> {
@@ -67,7 +69,10 @@ export class HerdrWorkflowViewer {
           reason: `Herdr plugin ${HERDR_PLUGIN_ID} is not linked and enabled.`,
         };
       }
-      await this.run("piw", ["--version"]);
+      const client = inspectPiwClient({ env: this.env });
+      if (!client.ok) {
+        return { available: false, reason: client.message };
+      }
       return { available: true };
     } catch (error) {
       return { available: false, reason: errorMessage(error) };
@@ -98,6 +103,12 @@ export class HerdrWorkflowViewer {
     placement: ViewerPlacement,
     cwd: string,
   ): Promise<ViewerOpenResult> {
+    // Resolve the client first: a stale client must not reuse or focus an existing pane.
+    const client = inspectPiwClient({ env: this.env });
+    if (!client.ok) {
+      throw new Error(client.message);
+    }
+    const paneEnvironment = piwPaneEnvironment(client.path, this.socketPath());
     const existingPaneId = await this.findAndFocus(target);
     if (existingPaneId !== undefined) {
       return { paneId: existingPaneId, reused: true };
@@ -105,12 +116,12 @@ export class HerdrWorkflowViewer {
 
     const caller = await this.currentPane();
     if (placement === "workspace") {
-      const opened = await this.openWorkspace(target, cwd);
+      const opened = await this.openWorkspace(target, cwd, paneEnvironment);
       this.knownPanes.set(target.runId, opened.paneId);
       return { ...opened, reused: false };
     }
 
-    const opened = await this.openPluginPane(target, placement, caller);
+    const opened = await this.openPluginPane(target, placement, caller, paneEnvironment);
     if (placement === "left" || placement === "above") {
       try {
         await this.run("herdr", [
@@ -166,6 +177,7 @@ export class HerdrWorkflowViewer {
     target: WorkflowViewTarget,
     placement: Exclude<ViewerPlacement, "workspace">,
     caller: HerdrPane,
+    paneEnvironment: string[],
   ): Promise<OpenedPane> {
     const args = [
       "plugin",
@@ -175,6 +187,7 @@ export class HerdrWorkflowViewer {
       HERDR_PLUGIN_ID,
       "--entrypoint",
       HERDR_PLUGIN_ENTRYPOINT,
+      ...paneEnvironmentArgs(paneEnvironment),
       "--env",
       `PI_WORKFLOWS_RUN_ID=${target.runId}`,
       "--focus",
@@ -197,6 +210,7 @@ export class HerdrWorkflowViewer {
   private async openWorkspace(
     target: WorkflowViewTarget,
     cwd: string,
+    paneEnvironment: string[],
   ): Promise<{ paneId: string; warning?: string }> {
     const created = parseCreatedWorkspace(
       await this.runJson("herdr", [
@@ -220,6 +234,7 @@ export class HerdrWorkflowViewer {
           HERDR_PLUGIN_ID,
           "--entrypoint",
           HERDR_PLUGIN_ENTRYPOINT,
+          ...paneEnvironmentArgs(paneEnvironment),
           "--placement",
           "tab",
           "--workspace",
@@ -280,6 +295,10 @@ export function parseViewerPlacement(value: string): ViewerPlacement | undefined
 
 export function viewerPaneLabel(runId: string): string {
   return `${VIEWER_LABEL_PREFIX}${runId}`;
+}
+
+function paneEnvironmentArgs(entries: string[]): string[] {
+  return entries.flatMap((entry) => ["--env", entry]);
 }
 
 function pluginIsEnabled(value: unknown): boolean {

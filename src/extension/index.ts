@@ -22,6 +22,7 @@ import {
   PIW_SHORTCUT,
   PIW_SHORTCUT_HINT,
   VIEWER_PLACEMENTS,
+  type ViewerOpenResult,
   type ViewerPlacement,
 } from "./herdr-viewer.js";
 import { SessionRecorder } from "./recorder.js";
@@ -180,7 +181,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   registerWorkflowAgentStepMessageRenderer(pi);
   registerTerminalMessageRenderer(pi);
   let client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
-  const herdrViewer = new HerdrWorkflowViewer(pi.exec);
+  const herdrViewer = new HerdrWorkflowViewer(pi.exec, process.env, () => client.endpoint);
   let sessionContext: ExtensionContext | null = null;
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
@@ -318,11 +319,19 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         | undefined);
     if (placement === undefined) return;
     const workflowName = run.workflowName.length > 0 ? run.workflowName : run.runId;
-    const opened = await herdrViewer.open(
-      { runId: run.runId, workflowName },
-      placement as ViewerPlacement,
-      ctx.cwd,
-    );
+    let opened: ViewerOpenResult;
+    try {
+      opened = await herdrViewer.open(
+        { runId: run.runId, workflowName },
+        placement as ViewerPlacement,
+        ctx.cwd,
+      );
+    } catch (error) {
+      // The pane is the last step, so a client that became unusable is reported here instead of
+      // leaving the user with a pane that closes on its own.
+      ctx.ui.notify(errorMessage(error), "warning");
+      return;
+    }
     ctx.ui.notify(
       opened.reused ? "Focused the existing piw view." : "Opened piw in Herdr.",
       "info",
