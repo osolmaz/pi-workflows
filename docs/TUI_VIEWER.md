@@ -49,22 +49,25 @@ opened it. See [the client resolution plan](2026-09-21-piw-client-resolution-pla
 The resolution order is:
 
 1. `PIW_BIN`, when it is set and points at an executable file;
-2. the package-local platform binary from the optional dependency, at `bin/piw` or `bin/piw.exe`; and
+2. the package-local platform binary when one is installed, at `node_modules/@osolmaz/piw-<os>-<arch>/bin/piw` or `bin/piw.exe`, which is a forward hook because no platform package ships today; and
 3. the first `piw` on `PATH`, which keeps the behavior of a machine with no package-local binary.
 
 When all three fail, the error names every location that was tried. The resolved
 client version must equal the running package version; the parser tolerates a
-`piw ` prefix and a leading `v`, and a mismatch reports both versions.
+`piw ` prefix and a leading `v`, and a mismatch reports both versions together
+with the command that fixes it, `cargo install pi-workflows --version <expected>`.
 
 The Herdr viewer passes three values to its pane: `PIW_BIN` with the resolved
 absolute path, `PIW_SOCKET` with the socket path of the session that owns the
 state, and `PIW_NO_AUTOSTART=1`. A pane that cannot run keeps its message on
 screen instead of exiting, and its label states the failure.
 
-The next release ships the client inside the npm package as per-platform packages
-named like `@osolmaz/piw-linux-arm64`, with the binary at `bin/piw`, declared as
-`optionalDependencies` with the same version as `@osolmaz/pi-workflows`. Until
-that release exists, `cargo install pi-workflows` remains the install path.
+The npm package ships JavaScript only and contains no compiled client, so the
+release automation is unchanged. The client binary belongs to crates.io:
+`cargo install pi-workflows --version <x>`. The Pi session resolves the client
+once, passes its absolute path to the pane, and the strict version check keeps the
+client and the package from drifting apart. A prebuilt client distribution is a
+planned follow-up and is not shipped today.
 
 ## Modes
 

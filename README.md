@@ -286,7 +286,7 @@ is also available through the [Herdr plugin marketplace](https://herdr.dev/plugi
 The viewer pane does not look up `piw` on its own `PATH`. Pi resolves the client
 once and passes the absolute path in, so a pane always runs the client that
 belongs to the loaded package. Resolution order: `PIW_BIN`, then the package-local
-platform binary, then the first `piw` on `PATH`. The resolved version must equal
+platform binary when one is installed, then the first `piw` on `PATH`. The resolved version must equal
 the package version, and a mismatch is reported with both versions instead of
 opening a pane.
 
@@ -295,10 +295,14 @@ the state, and `PIW_NO_AUTOSTART=1`, so a pane never starts a server of its own.
 pane that cannot run keeps its message on screen and states the failure in its
 label. See [the client resolution plan](docs/2026-09-21-piw-client-resolution-plan.md).
 
-The next release ships the client inside the npm package as per-platform packages
-named like `@osolmaz/piw-linux-arm64`, declared as `optionalDependencies` with the
-same version, so the client and the package cannot drift apart. Until then,
-`cargo install pi-workflows` remains the install path.
+The npm package ships JavaScript only: the extension, the pane launcher, and the
+resolution helper. It contains no compiled client, and the release automation is
+unchanged. The client binary belongs to crates.io, and
+`cargo install pi-workflows --version <x>` is the install path. The two cannot
+drift apart because the strict version check compares the resolved client against
+the package version and reports both when they differ. A prebuilt client
+distribution is a planned follow-up, and the resolver already has the `PIW_BIN`
+hook and the package-local lookup for it.
 
 ## Node types
 
