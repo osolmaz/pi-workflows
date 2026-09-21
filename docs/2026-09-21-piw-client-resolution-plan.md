@@ -66,11 +66,11 @@ the mismatch is reported with both versions rather than hidden.
 
 The extension passes three values to the pane:
 
-| Variable | Value | Purpose |
-| --- | --- | --- |
-| `PIW_BIN` | The resolved absolute client path | The pane runs this file, never a `PATH` lookup |
-| `PIW_SOCKET` | The socket path this Pi session's server uses | The pane reaches the server that owns the state |
-| `PIW_NO_AUTOSTART` | `1` | The pane never starts a server |
+| Variable           | Value                                         | Purpose                                         |
+| ------------------ | --------------------------------------------- | ----------------------------------------------- |
+| `PIW_BIN`          | The resolved absolute client path             | The pane runs this file, never a `PATH` lookup  |
+| `PIW_SOCKET`       | The socket path this Pi session's server uses | The pane reaches the server that owns the state |
+| `PIW_NO_AUTOSTART` | `1`                                           | The pane never starts a server                  |
 
 ### Loud failure
 
