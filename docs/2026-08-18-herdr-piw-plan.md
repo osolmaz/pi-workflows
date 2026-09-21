@@ -46,7 +46,7 @@ Herdr's public snapshot does not expose plugin metadata tokens. The launcher wil
 
 ## Non-goals
 
-- Do not change Herdr core or `piw`.
+- Do not change Herdr core. The client-side part of this non-goal is replaced by [the piw client resolution plan](2026-09-21-piw-client-resolution-plan.md), which changes how `piw` is found, versioned, and run in a pane.
 - Do not add a companion Pi extension, event bridge, protocol version, daemon, poller, or new state store.
 - Do not install or link the Herdr plugin automatically during Pi startup.
 - Do not expose viewer control to the model-visible workflow tool.

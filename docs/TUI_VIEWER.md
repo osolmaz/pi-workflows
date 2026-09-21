@@ -40,9 +40,35 @@ command:
 cargo install pi-workflows
 ```
 
+## Client resolution
+
+A viewer pane never looks up `piw` on its own `PATH`. The client is resolved once
+and passed in, so a pane always runs the client that belongs to the package that
+opened it. See [the client resolution plan](2026-09-21-piw-client-resolution-plan.md).
+
+The resolution order is:
+
+1. `PIW_BIN`, when it is set and points at an executable file;
+2. the package-local platform binary from the optional dependency, at `bin/piw` or `bin/piw.exe`; and
+3. the first `piw` on `PATH`, which keeps the behavior of a machine with no package-local binary.
+
+When all three fail, the error names every location that was tried. The resolved
+client version must equal the running package version; the parser tolerates a
+`piw ` prefix and a leading `v`, and a mismatch reports both versions.
+
+The Herdr viewer passes three values to its pane: `PIW_BIN` with the resolved
+absolute path, `PIW_SOCKET` with the socket path of the session that owns the
+state, and `PIW_NO_AUTOSTART=1`. A pane that cannot run keeps its message on
+screen instead of exiting, and its label states the failure.
+
+The next release ships the client inside the npm package as per-platform packages
+named like `@osolmaz/piw-linux-arm64`, with the binary at `bin/piw`, declared as
+`optionalDependencies` with the same version as `@osolmaz/pi-workflows`. Until
+that release exists, `cargo install pi-workflows` remains the install path.
+
 ## Modes
 
-- `piw` connects to the local package-owned workflow server. If the socket is absent, it runs the installed `pi-workflows server start` command.
+- `piw` connects to the local package-owned workflow server. If the socket is absent, it runs the installed `pi-workflows server start` command, unless `PIW_NO_AUTOSTART` is set, which reports the missing server instead of starting one.
 - `piw <runId>` opens one server-owned run view.
 - `piw <runId> --once` waits for that run, renders one complete 120 × 40 plain-text frame, and exits. It returns a nonzero status for server, protocol, missing-run, or snapshot-timeout failures.
 - `piw serve [--bind 127.0.0.1:9377]` relays each WebSocket connection to one server socket over the [live client protocol](LIVE_REPLAY_PROTOCOL.md). Only loopback addresses are accepted; use an SSH tunnel for remote viewing.
