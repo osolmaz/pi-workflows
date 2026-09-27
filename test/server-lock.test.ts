@@ -185,10 +185,11 @@ describe("server lock acquisition", () => {
     const { lockPath } = await lockDirectory("pw-lock-acquire-missing");
     const probe = vi.fn();
     const record = { pid: 1, startIdentity: "platform-start:0", serverId: "server-new" };
-    await acquireServerLock(lockPath, record, {
+    const missing = await acquireServerLock(lockPath, record, {
       socketPath: path.join("/tmp", "unused.sock"),
       probe,
     });
+    expect(missing.displaced).toBeUndefined();
     expect(probe).not.toHaveBeenCalled();
     expect(readServerLock(lockPath)).toEqual(record);
 
@@ -200,10 +201,11 @@ describe("server lock acquisition", () => {
       startIdentity: "platform-start:0",
       serverId: "server-gone",
     });
-    await acquireServerLock(lockPath, record, {
+    const dead = await acquireServerLock(lockPath, record, {
       socketPath: path.join("/tmp", "unused.sock"),
       probe,
     });
+    expect(dead.displaced).toBeUndefined();
     expect(probe).not.toHaveBeenCalled();
     expect(readServerLock(lockPath)).toEqual(record);
   });
@@ -229,13 +231,15 @@ describe("server lock acquisition", () => {
     const { lockPath } = await lockDirectory("pw-lock-acquire-deaf");
     const child = await startIdleProcess();
     try {
-      writeServerLock(lockPath, recordFor(child, "server-shutdown-bound"));
+      const holderRecord = recordFor(child, "server-shutdown-bound");
+      writeServerLock(lockPath, holderRecord);
       const probe = vi.fn(async () => false);
       const record = recordFor(child, "server-next");
-      await acquireServerLock(lockPath, record, {
+      const taken = await acquireServerLock(lockPath, record, {
         socketPath: path.join("/tmp", "unused.sock"),
         probe,
       });
+      expect(taken.displaced).toEqual(holderRecord);
       expect(probe).toHaveBeenCalledOnce();
       expect(readServerLock(lockPath)).toEqual(record);
     } finally {

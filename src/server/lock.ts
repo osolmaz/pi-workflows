@@ -112,14 +112,19 @@ export async function probeServerServing(socketPath: string, timeoutMs: number):
  * newer takeover. Creation stays exclusive (`wx`), so a racing creator loses
  * and re-reads. Concurrent starters can therefore only displace a holder that
  * is provably not serving, and the epoch claim fences whichever of them wins.
+ *
+ * The returned `displaced` record is the live holder this start replaced, so a
+ * starter whose claim is then fenced can restore the holder's lock file
+ * instead of leaving the serving holder without one.
  */
 export async function acquireServerLock(
   lockPath: string,
   record: { pid: number; startIdentity: string; serverId: string },
   options: { socketPath: string; probeTimeoutMs?: number; probe?: ServerLockProbe },
-): Promise<void> {
+): Promise<{ displaced: ServerLockRecord | undefined }> {
   const probe = options.probe ?? probeServerServing;
   const timeoutMs = options.probeTimeoutMs ?? 500;
+  let displaced: ServerLockRecord | undefined;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const existing = readServerLock(lockPath);
     if (existing !== undefined && matchesProcessIdentity(existing)) {
@@ -136,11 +141,14 @@ export async function acquireServerLock(
       ) {
         continue;
       }
+      displaced = existing;
+    } else if (existing === undefined) {
+      displaced = undefined;
     }
     fs.rmSync(lockPath, { force: true });
     try {
       writeServerLock(lockPath, record);
-      return;
+      return { displaced };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
       // Another starter created the lock first; re-read and converge.

@@ -109,7 +109,13 @@ import {
   type ChannelEffectRecord,
 } from "./channel-effects.js";
 import { ChannelAdapterSupervisor } from "./channel-supervisor.js";
-import { acquireServerLock, isServerLockRecord } from "./lock.js";
+import {
+  acquireServerLock,
+  isServerLockRecord,
+  readServerLock,
+  writeServerLock,
+  type ServerLockRecord,
+} from "./lock.js";
 import { ServerProcessRegistry, processParentPid, processStartIdentity } from "./processes.js";
 import type {
   ResourceRunnerLaunchEnvelope,
@@ -272,6 +278,8 @@ export class WorkflowServer {
   private server: net.Server | null = null;
   /** The socket path this server actually bound, or null while it has not. */
   private boundSocketPath: string | null = null;
+  /** The live holder's lock record this start displaced, if any. */
+  private displacedLock: ServerLockRecord | undefined;
   private claim: ServerClaim | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -359,11 +367,12 @@ export class WorkflowServer {
     if (startIdentity === undefined) {
       throw new Error("Cannot attest the workflow server process start identity");
     }
-    await acquireServerLock(
+    const { displaced } = await acquireServerLock(
       this.lockPath,
       { pid: process.pid, startIdentity, serverId: this.serverId },
       { socketPath: this.socketPath },
     );
+    this.displacedLock = displaced;
     try {
       const reaped = this.registry.reapOrphans();
       if (reaped.length > 0) this.log(`reaped ${reaped.length} exact orphan process(es)`);
@@ -381,6 +390,7 @@ export class WorkflowServer {
       await this.listen();
       this.startTimers();
       this.started = true;
+      this.displacedLock = undefined;
       this.log(`ready on ${this.socketPath} at epoch ${this.claim.epoch}`);
       this.requestAutomaticStatePrune();
       void this.expireTimedOutDecision().finally(() => this.resumeAutomaticStatePruneIfDue());
@@ -404,6 +414,7 @@ export class WorkflowServer {
       }
       this.claim = null;
       if (released) this.removeBoundSocket();
+      else this.restoreDisplacedLock();
       this.releaseLock();
       throw error;
     }
@@ -642,6 +653,26 @@ export class WorkflowServer {
     // loser that cleans up after a fenced start must leave the winner's socket
     // alone.
     this.boundSocketPath = this.socketPath;
+  }
+
+  /**
+   * Put back the lock record a fenced start displaced: the holder that kept
+   * serving must keep its lock file, or the version-mismatch stop path and
+   * later recovery lose track of it. A record another starter already wrote
+   * stays in place.
+   */
+  private restoreDisplacedLock(): void {
+    const displaced = this.displacedLock;
+    if (displaced === undefined) return;
+    this.displacedLock = undefined;
+    const current = readServerLock(this.lockPath);
+    if (current !== undefined && current.serverId !== this.serverId) return;
+    fs.rmSync(this.lockPath, { force: true });
+    try {
+      writeServerLock(this.lockPath, displaced);
+    } catch {
+      // A racing writer recreated the lock; its record is authoritative.
+    }
   }
 
   /** Remove the socket file only when this server bound it. */

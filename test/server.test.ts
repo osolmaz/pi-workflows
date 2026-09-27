@@ -3781,6 +3781,8 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         .run(Date.now() + 60_000);
       const second = new WorkflowServer({ databasePath });
       await expect(second.start()).rejects.toThrow(/live Pi Workflows server/);
+      // The fenced starter restores the holder's lock record.
+      expect(readServerLock(serverLockPath(databasePath))?.pid).toBe(holderPid);
       // The fenced starter must leave the winner's bound socket alone.
       expect(existsSync(socketPath)).toBe(true);
       // The frozen holder wakes and keeps serving on its original socket.
