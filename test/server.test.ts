@@ -3736,6 +3736,23 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
+  /** Rewind or extend the server claim lease, retrying through SQLite busy windows. */
+  async function updateServerLease(store: ServerStateStore, expiresAt: number): Promise<void> {
+    const statement = store.state.connection.prepare(
+      "UPDATE workflow_server_state SET expires_at = ? WHERE id = 1",
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        statement.run(expiresAt);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "SQLITE_BUSY") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+    throw new Error("the server claim row stayed busy");
+  }
+
   it("keeps serving when the lease expired while the process was frozen", async () => {
     const databasePath = path.join(await makeTempDir("server-suspend-renew"), "state.sqlite");
     const server = new WorkflowServer({ databasePath, serverRenewMs: 100, serverLeaseMs: 500 });
@@ -3746,9 +3763,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await waitUntil(() => store.serverStatus().live, 10_000);
       // A suspend let wall-clock time pass without a heartbeat: rewind the lease
       // into the past without changing ownership.
-      store.state.connection
-        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
-        .run(Date.now() - 10_000);
+      await updateServerLease(store, Date.now() - 10_000);
       // The next heartbeat re-arms the expired-but-ours lease instead of
       // stopping the server.
       await waitUntil(() => store.serverStatus().live, 10_000);
@@ -3772,13 +3787,12 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const holder = readServerLock(serverLockPath(databasePath));
       holderPid = holder?.pid;
       expect(typeof holderPid).toBe("number");
-      // Freeze the holder and extend its lease, so a second starter passes the
-      // lock probe (the frozen holder does not answer) but must lose the claim.
-      process.kill(holderPid as number, "SIGSTOP");
+      // Extend the holder's lease while it is still running, then freeze it:
+      // a second starter passes the lock probe (the frozen holder does not
+      // answer) but must lose the claim.
       const store = new ServerStateStore(databasePath);
-      store.state.connection
-        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
-        .run(Date.now() + 60_000);
+      await updateServerLease(store, Date.now() + 60_000);
+      process.kill(holderPid as number, "SIGSTOP");
       const second = new WorkflowServer({ databasePath });
       await expect(second.start()).rejects.toThrow(/live Pi Workflows server/);
       // The fenced starter restores the holder's lock record.
@@ -3828,13 +3842,14 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await client.ensureAvailable();
       holderPid = readServerLock(serverLockPath(databasePath))?.pid;
       expect(typeof holderPid).toBe("number");
+      // Rewind the holder's lease while it is still running: a frozen process
+      // can hold the SQLite write lock, and the lease self-renewal re-arms an
+      // expired lease within one heartbeat, so freeze immediately after.
+      const store = new ServerStateStore(databasePath);
+      await updateServerLease(store, Date.now() - 10_000);
       // Freeze the holder with an expired lease so the replacement takes over
       // the claim and rebinds the socket path.
       process.kill(holderPid as number, "SIGSTOP");
-      const store = new ServerStateStore(databasePath);
-      store.state.connection
-        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
-        .run(Date.now() - 10_000);
       replacement = new WorkflowServer({ databasePath, serverRenewMs: 100 });
       await replacement.start();
       // Wake the holder: its renewal fails against the new epoch and it stops.
@@ -3901,9 +3916,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const store = new ServerStateStore(databasePath);
     try {
       await waitUntil(() => store.serverStatus().live, 10_000);
-      store.state.connection
-        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
-        .run(Date.now() - 10_000);
+      await updateServerLease(store, Date.now() - 10_000);
       const takeover = store.acquireServer({
         serverId: "server-takeover",
         pid: 1,
