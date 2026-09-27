@@ -104,21 +104,49 @@ export async function probeServerServing(socketPath: string, timeoutMs: number):
  * caller must not start. Fencing against a second live server stays with the
  * epoch claim, not with this file: a probe misfire costs one wasted start, and
  * the loser exits when its claim fails.
+ *
+ * The probe awaits, so the lock record can change while it runs. After a
+ * not-serving verdict the record is re-read, and the lock is only removed when
+ * it still names the same silent holder; a record another starter already
+ * replaced makes this starter re-read and converge instead of clobbering the
+ * newer takeover. Creation stays exclusive (`wx`), so a racing creator loses
+ * and re-reads. Concurrent starters can therefore only displace a holder that
+ * is provably not serving, and the epoch claim fences whichever of them wins.
  */
 export async function acquireServerLock(
   lockPath: string,
   record: { pid: number; startIdentity: string; serverId: string },
   options: { socketPath: string; probeTimeoutMs?: number; probe?: ServerLockProbe },
 ): Promise<void> {
-  const existing = readServerLock(lockPath);
-  if (existing !== undefined && matchesProcessIdentity(existing)) {
-    const probe = options.probe ?? probeServerServing;
-    if (await probe(options.socketPath, options.probeTimeoutMs ?? 500)) {
-      throw new Error(`A workflow server is already running with PID ${existing.pid}`);
+  const probe = options.probe ?? probeServerServing;
+  const timeoutMs = options.probeTimeoutMs ?? 500;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = readServerLock(lockPath);
+    if (existing !== undefined && matchesProcessIdentity(existing)) {
+      if (await probe(options.socketPath, timeoutMs)) {
+        throw new Error(`A workflow server is already running with PID ${existing.pid}`);
+      }
+      const current = readServerLock(lockPath);
+      if (
+        current !== undefined &&
+        matchesProcessIdentity(current) &&
+        (current.pid !== existing.pid ||
+          current.startIdentity !== existing.startIdentity ||
+          current.serverId !== existing.serverId)
+      ) {
+        continue;
+      }
+    }
+    fs.rmSync(lockPath, { force: true });
+    try {
+      writeServerLock(lockPath, record);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      // Another starter created the lock first; re-read and converge.
     }
   }
-  fs.rmSync(lockPath, { force: true });
-  writeServerLock(lockPath, record);
+  throw new Error(`Could not acquire the workflow server lock at ${lockPath}`);
 }
 
 /**

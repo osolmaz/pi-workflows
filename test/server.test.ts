@@ -16,6 +16,7 @@ import {
   type ClientRequest,
   type ClientResponse,
 } from "../src/client/protocol.js";
+import { readServerLock, serverLockPath } from "../src/server/lock.js";
 import { ServerProcessRegistry } from "../src/server/processes.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore } from "../src/server/state.js";
@@ -3759,6 +3760,60 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await server.stop();
     }
   }, 30_000);
+
+  it("keeps the serving socket when a fenced starter loses the claim", async () => {
+    const databasePath = path.join(await makeTempDir("server-fenced-starter"), "state.sqlite");
+    const socketPath = path.join(path.dirname(serverLockPath(databasePath)), "server.sock");
+    const client = new WorkflowClient({ databasePath });
+    let holderPid: number | undefined;
+    try {
+      // Spawn the real holder and connect to it.
+      await client.ensureAvailable();
+      const holder = readServerLock(serverLockPath(databasePath));
+      holderPid = holder?.pid;
+      expect(typeof holderPid).toBe("number");
+      // Freeze the holder and extend its lease, so a second starter passes the
+      // lock probe (the frozen holder does not answer) but must lose the claim.
+      process.kill(holderPid as number, "SIGSTOP");
+      const store = new ServerStateStore(databasePath);
+      store.state.connection
+        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
+        .run(Date.now() + 60_000);
+      const second = new WorkflowServer({ databasePath });
+      await expect(second.start()).rejects.toThrow(/live Pi Workflows server/);
+      // The fenced starter must leave the winner's bound socket alone.
+      expect(existsSync(socketPath)).toBe(true);
+      // The frozen holder wakes and keeps serving on its original socket.
+      process.kill(holderPid as number, "SIGCONT");
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        let serving = false;
+        try {
+          await client.request({ operation: "server.status" });
+          serving = true;
+        } catch {
+          serving = false;
+        }
+        if (serving) break;
+        if (Date.now() > deadline) throw new Error("the holder did not resume serving");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      if (holderPid !== undefined) {
+        try {
+          process.kill(holderPid, "SIGCONT");
+        } catch {
+          // The holder already exited.
+        }
+        try {
+          process.kill(holderPid, "SIGTERM");
+        } catch {
+          // The holder already exited.
+        }
+      }
+      await client.close();
+    }
+  }, 45_000);
 
   it("stops when another server claims the superseded epoch", async () => {
     const databasePath = path.join(await makeTempDir("server-superseded-stop"), "state.sqlite");

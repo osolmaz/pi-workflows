@@ -242,6 +242,61 @@ describe("server lock acquisition", () => {
       killIfAlive(child);
     }
   });
+
+  it("revalidates the holder after the probe and keeps a newer serving starter", async () => {
+    const { lockPath } = await lockDirectory("pw-lock-revalidate");
+    const holder = await startIdleProcess();
+    try {
+      const holderRecord = recordFor(holder, "server-holder");
+      const starterRecord = selfRecord("server-starter");
+      writeServerLock(lockPath, holderRecord);
+      // A competing starter takes over the silent holder while this probe
+      // awaits, and answers on the socket before the caller re-reads.
+      const probe = vi.fn(async () => {
+        fs.rmSync(lockPath, { force: true });
+        writeServerLock(lockPath, starterRecord);
+        return probe.mock.calls.length > 1;
+      });
+      await expect(
+        acquireServerLock(lockPath, selfRecord("server-next"), {
+          socketPath: path.join("/tmp", "unused.sock"),
+          probe,
+        }),
+      ).rejects.toThrow(new RegExp(`already running with PID ${process.pid}`));
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(readServerLock(lockPath)?.serverId).toBe("server-starter");
+    } finally {
+      killIfAlive(holder);
+    }
+  });
+
+  it("converges when another starter replaces the holder during the probe", async () => {
+    const { lockPath } = await lockDirectory("pw-lock-converge");
+    const holder = await startIdleProcess();
+    try {
+      const holderRecord = recordFor(holder, "server-holder");
+      const starterRecord = selfRecord("server-starter");
+      writeServerLock(lockPath, holderRecord);
+      // The first probe sees the silent holder while a competing starter takes
+      // over; the second probe sees the new holder still silent, so the caller
+      // converges on the newest silent holder instead of clobbering blindly.
+      const probe = vi.fn(async () => {
+        if (readServerLock(lockPath)?.serverId === "server-holder") {
+          fs.rmSync(lockPath, { force: true });
+          writeServerLock(lockPath, starterRecord);
+        }
+        return false;
+      });
+      await acquireServerLock(lockPath, selfRecord("server-next"), {
+        socketPath: path.join("/tmp", "unused.sock"),
+        probe,
+      });
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(readServerLock(lockPath)?.serverId).toBe("server-next");
+    } finally {
+      killIfAlive(holder);
+    }
+  });
 });
 
 describe("server serving probe", () => {

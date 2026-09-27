@@ -270,6 +270,8 @@ export class WorkflowServer {
   private readonly sockets = new Set<Socket>();
   private readonly connections = new Map<Socket, ClientConnection>();
   private server: net.Server | null = null;
+  /** The socket path this server actually bound, or null while it has not. */
+  private boundSocketPath: string | null = null;
   private claim: ServerClaim | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -399,7 +401,7 @@ export class WorkflowServer {
         }
       }
       this.claim = null;
-      if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
+      this.removeBoundSocket();
       this.releaseLock();
       throw error;
     }
@@ -460,7 +462,7 @@ export class WorkflowServer {
     this.registry.killAll();
     if (this.claim !== null) this.serverState.releaseServer(this.claim);
     this.claim = null;
-    if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
+    this.removeBoundSocket();
     this.releaseLock();
     this.runStore.close();
     this.queue.close();
@@ -585,6 +587,18 @@ export class WorkflowServer {
     });
     server.on("error", (error) => this.log(`socket error: ${errorMessage(error)}`));
     if (process.platform !== "win32") fs.chmodSync(this.socketPath, 0o600);
+    // Only a server that bound the socket may ever remove its file: a claim
+    // loser that cleans up after a fenced start must leave the winner's socket
+    // alone.
+    this.boundSocketPath = this.socketPath;
+  }
+
+  /** Remove the socket file only when this server bound it. */
+  private removeBoundSocket(): void {
+    if (process.platform === "win32") return;
+    if (this.boundSocketPath !== this.socketPath) return;
+    fs.rmSync(this.socketPath, { force: true });
+    this.boundSocketPath = null;
   }
 
   private handleConnection(socket: Socket): void {
