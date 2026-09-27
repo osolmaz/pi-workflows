@@ -1,5 +1,6 @@
 import { Type, type Static, type TObject, type TProperties, type TSchema } from "typebox";
 import { Parse, ParseError } from "typebox/value";
+import { parseJson } from "../state/json.js";
 
 const noExtraProperties = { additionalProperties: false } as const;
 
@@ -207,6 +208,61 @@ function providerObjectSchema(variants: readonly TObject[]): TObject {
   );
 }
 
+/**
+ * Structured (untyped) tool parameters. Some tool transports deliver these as raw
+ * JSON text instead of a parsed value, and one workflow runner crash per start is
+ * too late to learn about it. Coerce the text into a value before schema validation
+ * so malformed text fails in the tool result with a clear message.
+ */
+const structuredFieldsByAction: Readonly<Record<string, readonly string[]>> = {
+  start: ["input"],
+  answer: ["input"],
+  submit: ["output"],
+  update: ["update"],
+  "change-settings": ["patch"],
+};
+
+function coerceStructuredFields(
+  action: string,
+  value: Record<string, unknown>,
+  label: string,
+): Record<string, unknown> {
+  const fields = structuredFieldsByAction[action];
+  if (fields === undefined) return value;
+  const coerced = { ...value };
+  for (const field of fields) {
+    const raw = coerced[field];
+    if (typeof raw !== "string") continue;
+    if (action === "answer" && field === "input") {
+      // Free-text answers are legitimate: the command path wraps text that is not
+      // JSON in { answer: text }, and the tool path must behave the same.
+      const parsed = tryParseJsonText(raw);
+      coerced[field] = parsed === undefined ? { answer: raw } : parsed;
+      continue;
+    }
+    coerced[field] = parseJsonText(raw, `${label} ${field}`);
+  }
+  return coerced;
+}
+
+function tryParseJsonText(text: string): unknown {
+  try {
+    return parseJson(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonText(text: string, label: string): unknown {
+  try {
+    return parseJson(text);
+  } catch (error) {
+    throw new Error(`Invalid ${label}: the parameter arrived as text and is not valid JSON.`, {
+      cause: error,
+    });
+  }
+}
+
 function parseSelectedAction<Output>(
   parsers: Readonly<Record<string, ToolInputParser<Output>>>,
   value: unknown,
@@ -215,7 +271,7 @@ function parseSelectedAction<Output>(
   if (!isRecord(value) || typeof value.action !== "string") throw unknownAction(label);
   const parser = parsers[value.action];
   if (parser === undefined) throw unknownAction(label);
-  return parser(value);
+  return parser(coerceStructuredFields(value.action, value, label));
 }
 
 function unknownAction(label: string): Error {

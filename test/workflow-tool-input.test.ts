@@ -70,6 +70,70 @@ describe("workflow tool input", () => {
     );
   });
 
+  it("coerces JSON text parameters into values before validation", () => {
+    expect(
+      parseWorkflowToolInput({ action: "start", workflow: "monitor", input: '{"task": "check"}' }),
+    ).toEqual({ action: "start", workflow: "monitor", input: { task: "check" } });
+    expect(
+      parseWorkflowToolInput({
+        action: "change-settings",
+        patch: '[{"op":"add","path":"/a","value":1}]',
+      }),
+    ).toEqual({
+      action: "change-settings",
+      patch: [{ op: "add", path: "/a", value: 1 }],
+    });
+    expect(
+      parseWorkflowToolInput({
+        action: "submit",
+        requestId: "request-1",
+        output: '{"result":"ok"}',
+      }),
+    ).toEqual({ action: "submit", requestId: "request-1", output: { result: "ok" } });
+    expect(
+      parseWorkflowToolInput({
+        action: "update",
+        requestId: "request-1",
+        update: '{"type":"progress","key":"items","data":{"done":1}}',
+      }),
+    ).toEqual({
+      action: "update",
+      requestId: "request-1",
+      update: { type: "progress", key: "items", data: { done: 1 } },
+    });
+  });
+
+  it("wraps unparseable answer text like the command path", () => {
+    expect(
+      parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: "approve now" }),
+    ).toEqual({ action: "answer", requestId: "request-1", input: { answer: "approve now" } });
+    expect(
+      parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: '"plain"' }),
+    ).toEqual({ action: "answer", requestId: "request-1", input: "plain" });
+    expect(
+      parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: "null" }),
+    ).toEqual({ action: "answer", requestId: "request-1", input: null });
+  });
+
+  it("rejects unparseable structured text in the tool result instead of the runner", () => {
+    expect(() =>
+      parseWorkflowToolInput({ action: "start", workflow: "monitor", input: "{task: check}" }),
+    ).toThrow("Invalid workflow input: the parameter arrived as text and is not valid JSON.");
+    expect(() =>
+      parseWorkflowSubmissionInput({
+        action: "submit",
+        requestId: "request-1",
+        output: "{result:",
+      }),
+    ).toThrow("Invalid workflow submission output: the parameter arrived as text");
+  });
+
+  it("keeps object parameters unchanged", () => {
+    expect(
+      parseWorkflowToolInput({ action: "start", workflow: "monitor", input: { task: "check" } }),
+    ).toEqual({ action: "start", workflow: "monitor", input: { task: "check" } });
+  });
+
   it("keeps the RPC bridge limited to update and submit", () => {
     expect(
       parseWorkflowSubmissionInput({ action: "update", requestId: "request-1", update }),
