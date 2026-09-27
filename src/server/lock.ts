@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { killProcessGroup, matchesProcessIdentity, type ProcessIdentity } from "./processes.js";
 
@@ -66,6 +67,58 @@ export function writeServerLock(lockPath: string, record: ServerLockRecord): voi
     mode: 0o600,
     flag: "wx",
   });
+}
+
+/** One bounded socket probe: does a server accept connections here and answer? */
+export type ServerLockProbe = (socketPath: string, timeoutMs: number) => Promise<boolean>;
+
+/**
+ * Ask the socket whether a server is really serving. Serving means the connect
+ * succeeds and the server's hello arrives within the timeout; a connect error or
+ * a silent window means the holder is alive but not serving, as during shutdown
+ * or while frozen. The probe socket is always destroyed.
+ */
+export async function probeServerServing(socketPath: string, timeoutMs: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const socket = net.connect(socketPath);
+    let settled = false;
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    const finish = (serving: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(serving);
+    };
+    socket.once("data", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("close", () => finish(false));
+  });
+}
+
+/**
+ * Take the exclusive server lock for a starting server. A lock whose recorded
+ * process is gone, or whose process is alive but provably not serving, is stale
+ * and is removed. A holder that answers on the socket keeps the lock, and the
+ * caller must not start. Fencing against a second live server stays with the
+ * epoch claim, not with this file: a probe misfire costs one wasted start, and
+ * the loser exits when its claim fails.
+ */
+export async function acquireServerLock(
+  lockPath: string,
+  record: { pid: number; startIdentity: string; serverId: string },
+  options: { socketPath: string; probeTimeoutMs?: number; probe?: ServerLockProbe },
+): Promise<void> {
+  const existing = readServerLock(lockPath);
+  if (existing !== undefined && matchesProcessIdentity(existing)) {
+    const probe = options.probe ?? probeServerServing;
+    if (await probe(options.socketPath, options.probeTimeoutMs ?? 500)) {
+      throw new Error(`A workflow server is already running with PID ${existing.pid}`);
+    }
+  }
+  fs.rmSync(lockPath, { force: true });
+  writeServerLock(lockPath, record);
 }
 
 /**

@@ -109,13 +109,8 @@ import {
   type ChannelEffectRecord,
 } from "./channel-effects.js";
 import { ChannelAdapterSupervisor } from "./channel-supervisor.js";
-import { isServerLockRecord, writeServerLock } from "./lock.js";
-import {
-  ServerProcessRegistry,
-  matchesProcessIdentity,
-  processParentPid,
-  processStartIdentity,
-} from "./processes.js";
+import { acquireServerLock, isServerLockRecord } from "./lock.js";
+import { ServerProcessRegistry, processParentPid, processStartIdentity } from "./processes.js";
 import type {
   ResourceRunnerLaunchEnvelope,
   ResourceRunnerMessage,
@@ -361,7 +356,11 @@ export class WorkflowServer {
     if (startIdentity === undefined) {
       throw new Error("Cannot attest the workflow server process start identity");
     }
-    acquireServerLock(this.lockPath, { pid: process.pid, startIdentity, serverId: this.serverId });
+    await acquireServerLock(
+      this.lockPath,
+      { pid: process.pid, startIdentity, serverId: this.serverId },
+      { socketPath: this.socketPath },
+    );
     try {
       const reaped = this.registry.reapOrphans();
       if (reaped.length > 0) this.log(`reaped ${reaped.length} exact orphan process(es)`);
@@ -528,6 +527,9 @@ export class WorkflowServer {
           }
         }
       } catch (error) {
+        // Renewal fails only when the epoch row no longer carries this server's
+        // exact identity and token. A lease that expired while the process was
+        // frozen, as across a laptop suspend, re-arms instead of stopping.
         this.log(`server claim lost: ${errorMessage(error)}`);
         void this.stop();
       }
@@ -5120,23 +5122,6 @@ function channelEffectMessageReferences(value: JsonValue | undefined): TelegramM
 function channelEventPayload(message: ChannelAdapterMessage): JsonValue {
   const { expectedRevision: _expectedRevision, sequence: _sequence, ...payload } = message;
   return payload as unknown as JsonValue;
-}
-
-function acquireServerLock(
-  lockPath: string,
-  record: { pid: number; startIdentity: string; serverId: string },
-): void {
-  try {
-    const existing = JSON.parse(fs.readFileSync(lockPath, "utf8")) as unknown;
-    if (isServerLockRecord(existing) && matchesProcessIdentity(existing)) {
-      throw new Error(`A workflow server is already running with PID ${existing.pid}`);
-    }
-    fs.rmSync(lockPath, { force: true });
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith("A workflow server is already"))
-      throw error;
-  }
-  writeServerLock(lockPath, record);
 }
 
 function runnerRunCommand(

@@ -82,7 +82,7 @@ describe("server protocol", () => {
 });
 
 describe("server durable state", () => {
-  it("fences server epochs and never revives an expired server", async () => {
+  it("fences server epochs and never revives a superseded claim", async () => {
     const { server, queue } = await fixture();
     const first = server.acquireServer({
       serverId: "server-1",
@@ -113,6 +113,55 @@ describe("server durable state", () => {
     expect(server.renewServer(second, 1_000, 2_100).expiresAt).toBe(3_100);
     expect(server.releaseServer(first, 2_200)).toBe(false);
     expect(server.releaseServer(second, 2_200)).toBe(true);
+    server.close();
+    queue.close();
+  });
+
+  it("re-arms an expired lease while the row still carries the owner's identity", async () => {
+    const { server, queue } = await fixture();
+    const claim = server.acquireServer({
+      serverId: "server-1",
+      pid: 100,
+      processStartIdentity: "start-1",
+      leaseMs: 1_000,
+      now: 1_000,
+    });
+    // A suspend let wall-clock time pass without a heartbeat: the lease
+    // expired, but no other server claimed the epoch.
+    server.state.connection
+      .prepare("UPDATE workflow_server_state SET expires_at = 500 WHERE id = 1")
+      .run();
+    expect(server.renewServer(claim, 1_000, 10_000).expiresAt).toBe(11_000);
+    expect(
+      server.state.connection
+        .prepare("SELECT heartbeat_at, expires_at FROM workflow_server_state WHERE id = 1")
+        .get(),
+    ).toEqual({ heartbeat_at: 10_000, expires_at: 11_000 });
+    server.close();
+    queue.close();
+  });
+
+  it("refuses renewal for a released or wrongly authenticated claim", async () => {
+    const { server, queue } = await fixture();
+    const claim = server.acquireServer({
+      serverId: "server-1",
+      pid: 100,
+      processStartIdentity: "start-1",
+      leaseMs: 1_000,
+      now: 1_000,
+    });
+    expect(server.releaseServer(claim, 1_100)).toBe(true);
+    expect(() => server.renewServer(claim, 1_000, 1_200)).toThrow(/claim lost/);
+    const other = server.acquireServer({
+      serverId: "server-2",
+      pid: 200,
+      processStartIdentity: "start-2",
+      leaseMs: 1_000,
+      now: 1_300,
+    });
+    expect(() =>
+      server.renewServer({ ...other, token: "not-the-real-token" }, 1_000, 1_400),
+    ).toThrow(/claim lost/);
     server.close();
     queue.close();
   });

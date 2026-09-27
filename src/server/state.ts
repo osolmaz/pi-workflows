@@ -151,6 +151,15 @@ export class ServerStateStore {
     });
   }
 
+  /**
+   * Re-arm the lease of the authenticated owner. The update matches the full
+   * recorded identity (epoch, server id, token hash, pid, and process start
+   * identity) instead of requiring an unexpired lease: expiry gates takeover,
+   * it never kills the owner, so a lease that lapsed while the process was
+   * frozen, as across a laptop suspend, re-arms instead of stopping the
+   * server. A row another server claimed no longer carries this identity, so
+   * the update fails and the caller stops exactly as before.
+   */
   renewServer(claim: ServerClaim, leaseMs: number, now: number = Date.now()): ServerClaim {
     requireLeaseMs(leaseMs);
     return this.state.transaction(() => {
@@ -159,7 +168,7 @@ export class ServerStateStore {
         .prepare(
           `UPDATE workflow_server_state SET heartbeat_at = ?, expires_at = ?
            WHERE id = 1 AND epoch = ? AND server_id = ? AND token_hash = ?
-             AND pid = ? AND process_start_identity = ? AND expires_at > ?`,
+             AND pid = ? AND process_start_identity = ?`,
         )
         .run(
           now,
@@ -169,7 +178,6 @@ export class ServerStateStore {
           tokenHash(claim.token),
           claim.pid,
           claim.processStartIdentity,
-          now,
         );
       if (changed.changes !== 1) throw new Error("Pi Workflows server claim lost");
       return { ...claim, expiresAt };

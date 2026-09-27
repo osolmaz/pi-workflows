@@ -15,6 +15,7 @@ import {
   parseClientMessage,
   type ClientRequest,
 } from "../src/client/protocol.js";
+import { serverLockPath, stopRecordedServer } from "../src/server/lock.js";
 import { WorkflowServer } from "../src/server/server.js";
 import type { JsonValue } from "../src/state/json.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
@@ -141,6 +142,46 @@ describe("WorkflowClient", () => {
       );
       await vi.advanceTimersByTimeAsync(10_050);
       await unavailable;
+    } finally {
+      vi.useRealTimers();
+      await client.close();
+    }
+  });
+
+  it("re-spawns when the first replacement exits without becoming ready", async () => {
+    const databasePath = path.join(await makeTempDir("client-respawn"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    const start = vi
+      .spyOn(client as unknown as { startDetached: () => Promise<Error> }, "startDetached")
+      // The first replacement loses the lock race and exits with a diagnostic.
+      .mockImplementationOnce(() =>
+        Promise.resolve(new Error("A workflow server is already running with PID 4242")),
+      );
+    try {
+      const hello = await client.ensureAvailable();
+      expect(hello.type).toBe("hello");
+      expect(start).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.close();
+      await stopRecordedServer(serverLockPath(databasePath));
+    }
+  }, 30_000);
+
+  it("caps re-spawn attempts and reports the last spawn diagnostic", async () => {
+    const databasePath = path.join(await makeTempDir("client-respawn-cap"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    const start = vi
+      .spyOn(client as unknown as { startDetached: () => Promise<Error> }, "startDetached")
+      .mockResolvedValue(new Error("spawn lost the lock race again"));
+    vi.spyOn(client, "connect").mockRejectedValue(new Error("connect ENOENT server.sock"));
+    vi.useFakeTimers();
+    try {
+      const unavailable = expect(client.ensureAvailable()).rejects.toThrow(
+        "Workflow server did not become ready: spawn lost the lock race again",
+      );
+      await vi.advanceTimersByTimeAsync(10_050);
+      await unavailable;
+      expect(start).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
       await client.close();

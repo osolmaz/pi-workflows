@@ -35,6 +35,10 @@ const RECONNECT_BASE_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 10_000;
 /** After this many failed attempts the client reports a blocker and stops looping. */
 const RECONNECT_MAX_ATTEMPTS = 12;
+/** Spawn attempts within one start window; each loser exits under the lock fence. */
+const MAX_START_SPAWN_ATTEMPTS = 3;
+/** After a spawned child exits, keep polling this long for a competing holder. */
+const SPAWN_EXIT_GRACE_MS = 250;
 const RESOLVER_TIMEOUT_MS = 30_000;
 const CLIENT_PACKAGE_VERSION = runtimePackageVersion();
 
@@ -239,6 +243,14 @@ export class WorkflowClient {
     return true;
   }
 
+  /**
+   * Start the server if needed and wait for a working connection. One spawn
+   * that exits without becoming ready, for example a replacement that lost the
+   * lock race to a holder that then died, must not consume the whole start
+   * window, so the loop spawns again within the deadline and a small attempt
+   * cap. The server lock and the epoch claim fence concurrent spawns, so a
+   * losing spawn exits in milliseconds.
+   */
   async ensureAvailable(): Promise<ClientHello> {
     try {
       return await this.connect();
@@ -248,20 +260,35 @@ export class WorkflowClient {
       // child that can never serve it.
       assertSocketPathSupported(this.endpoint);
       this.resetConnection();
-      const startupFailure = this.startDetached();
-      let startupError: Error | undefined;
-      void startupFailure.then((error) => {
-        startupError = error;
-      });
       const deadline = Date.now() + START_TIMEOUT_MS;
       let lastError: unknown;
-      while (Date.now() < deadline) {
-        await delay(50);
-        try {
-          return await this.connect();
-        } catch (error) {
-          lastError = error;
-          this.resetConnection();
+      let startupError: Error | undefined;
+      let spawnAttempts = 0;
+      spawn: while (Date.now() < deadline) {
+        let exitedAt: number | undefined;
+        if (spawnAttempts < MAX_START_SPAWN_ATTEMPTS) {
+          spawnAttempts += 1;
+          const startupFailure = this.startDetached();
+          void startupFailure.then((error) => {
+            startupError = error;
+            exitedAt = Date.now();
+          });
+        }
+        while (Date.now() < deadline) {
+          await delay(50);
+          try {
+            return await this.connect();
+          } catch (error) {
+            lastError = error;
+            this.resetConnection();
+          }
+          if (
+            exitedAt !== undefined &&
+            Date.now() >= exitedAt + SPAWN_EXIT_GRACE_MS &&
+            spawnAttempts < MAX_START_SPAWN_ATTEMPTS
+          ) {
+            continue spawn;
+          }
         }
       }
       throw new Error(

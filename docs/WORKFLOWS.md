@@ -1010,6 +1010,32 @@ resume` takes a new generation and reruns only work after the last durable
 - Server status reports safe counts and timestamps. It does not report session
   IDs, project paths, prompts, payloads, tokens, process IDs, or credentials.
 
+## Wake recovery
+
+The server survives laptop suspend and resume instead of restarting on every
+wake:
+
+- The authenticated owner re-arms its own expired lease. Lease renewal matches
+  the recorded epoch, server id, token hash, pid, and process start identity,
+  so a lease that expired while the machine slept re-arms on the first
+  post-wake heartbeat and the server keeps serving. The server stops only when
+  its claim was genuinely superseded, meaning another server took the epoch.
+- Takeover requires the recorded holder to be provably not serving. A starting
+  server probes the holder's socket with a bounded hello check before it may
+  remove the server lock file. A holder that answers keeps the lock, and the
+  new server exits with its `already running` message. A dead holder, or a live
+  holder that is mid-shutdown or frozen and does not answer, loses the lock and
+  the new server takes over. The epoch claim row stays the fencing authority:
+  a probe misfire costs one wasted start, never two serving servers.
+- Clients re-spawn failed replacements. When a spawned server exits without
+  becoming ready, the client starts the next one within the same start window,
+  capped at three attempts, so one lost race costs milliseconds instead of the
+  whole window.
+
+`expires_at` in the server claim answers whether the lease is currently valid
+for takeover arbitration. It does not answer whether the owner process is
+alive; ownership is proven by identity and token.
+
 ## Run history retention
 
 Pi Workflows keeps a terminal root run and all its explicit restart descendants for 30 days from `finished_at`. The server can remove the tree after that point only when every descendant is terminal and no protected work or outside reference remains.

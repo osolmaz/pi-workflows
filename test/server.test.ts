@@ -3735,6 +3735,70 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
+  it("keeps serving when the lease expired while the process was frozen", async () => {
+    const databasePath = path.join(await makeTempDir("server-suspend-renew"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, serverRenewMs: 100, serverLeaseMs: 500 });
+    const client = new WorkflowClient({ databasePath });
+    await server.start();
+    const store = new ServerStateStore(databasePath);
+    try {
+      await waitUntil(() => store.serverStatus().live, 10_000);
+      // A suspend let wall-clock time pass without a heartbeat: rewind the lease
+      // into the past without changing ownership.
+      store.state.connection
+        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
+        .run(Date.now() - 10_000);
+      // The next heartbeat re-arms the expired-but-ours lease instead of
+      // stopping the server.
+      await waitUntil(() => store.serverStatus().live, 10_000);
+      const status = await client.request({ operation: "server.status" });
+      expect(status.outcome).toBe("accepted");
+    } finally {
+      store.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 30_000);
+
+  it("stops when another server claims the superseded epoch", async () => {
+    const databasePath = path.join(await makeTempDir("server-superseded-stop"), "state.sqlite");
+    const server = new WorkflowServer({ databasePath, serverRenewMs: 100, serverLeaseMs: 500 });
+    const client = new WorkflowClient({ databasePath });
+    await server.start();
+    const store = new ServerStateStore(databasePath);
+    try {
+      await waitUntil(() => store.serverStatus().live, 10_000);
+      store.state.connection
+        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
+        .run(Date.now() - 10_000);
+      const takeover = store.acquireServer({
+        serverId: "server-takeover",
+        pid: 1,
+        processStartIdentity: "start-takeover",
+        leaseMs: 30_000,
+      });
+      expect(takeover.epoch).toBeGreaterThan(1);
+      // The frozen server's next renewal fails against the new epoch, and the
+      // claim-lost path stops it.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        let stopped = false;
+        try {
+          await client.request({ operation: "server.status" });
+        } catch {
+          stopped = true;
+        }
+        if (stopped) break;
+        if (Date.now() > deadline) throw new Error("waitUntil timed out");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      store.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 30_000);
+
   it("retries an interrupted idempotent effect and adopts its durable reservation", async () => {
     const cwd = await makeTempDir("server-idempotent-effect-project");
     const databasePath = path.join(

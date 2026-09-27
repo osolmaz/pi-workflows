@@ -1,8 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  acquireServerLock,
+  probeServerServing,
   readServerLock,
   serverLockPath,
   stopRecordedServer,
@@ -49,6 +53,18 @@ function recordFor(
   if (startIdentity === undefined)
     throw new Error(`The test process has no start identity: ${pid}`);
   return { pid, startIdentity, serverId };
+}
+
+/** The test process itself: always alive, so its lock record always matches. */
+function selfRecord(serverId: string): {
+  pid: number;
+  startIdentity: string;
+  serverId: string;
+} {
+  const startIdentity = processStartIdentity(process.pid);
+  if (startIdentity === undefined)
+    throw new Error(`The test process has no start identity: ${process.pid}`);
+  return { pid: process.pid, startIdentity, serverId };
 }
 
 function killIfAlive(child: ChildProcess): void {
@@ -160,6 +176,151 @@ describe("workflow server lock file", () => {
       await waitUntil(() => processStartIdentity(record.pid) === undefined);
     } finally {
       killIfAlive(child);
+    }
+  });
+});
+
+describe("server lock acquisition", () => {
+  it("takes over a missing lock or a dead holder without probing", async () => {
+    const { lockPath } = await lockDirectory("pw-lock-acquire-missing");
+    const probe = vi.fn();
+    const record = { pid: 1, startIdentity: "platform-start:0", serverId: "server-new" };
+    await acquireServerLock(lockPath, record, {
+      socketPath: path.join("/tmp", "unused.sock"),
+      probe,
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(readServerLock(lockPath)).toEqual(record);
+
+    const exited = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    await new Promise((resolve) => exited.once("exit", resolve));
+    fs.rmSync(lockPath, { force: true });
+    writeServerLock(lockPath, {
+      pid: exited.pid as number,
+      startIdentity: "platform-start:0",
+      serverId: "server-gone",
+    });
+    await acquireServerLock(lockPath, record, {
+      socketPath: path.join("/tmp", "unused.sock"),
+      probe,
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(readServerLock(lockPath)).toEqual(record);
+  });
+
+  it("keeps the already-running error for a holder that answers on the socket", async () => {
+    const { lockPath } = await lockDirectory("pw-lock-acquire-serving");
+    const child = await startIdleProcess();
+    try {
+      writeServerLock(lockPath, recordFor(child, "server-serving"));
+      await expect(
+        acquireServerLock(lockPath, recordFor(child, "server-next"), {
+          socketPath: path.join("/tmp", "unused.sock"),
+          probe: async () => true,
+        }),
+      ).rejects.toThrow(/already running with PID/);
+      expect(readServerLock(lockPath)?.serverId).toBe("server-serving");
+    } finally {
+      killIfAlive(child);
+    }
+  });
+
+  it("takes over a live holder that is provably not serving", async () => {
+    const { lockPath } = await lockDirectory("pw-lock-acquire-deaf");
+    const child = await startIdleProcess();
+    try {
+      writeServerLock(lockPath, recordFor(child, "server-shutdown-bound"));
+      const probe = vi.fn(async () => false);
+      const record = recordFor(child, "server-next");
+      await acquireServerLock(lockPath, record, {
+        socketPath: path.join("/tmp", "unused.sock"),
+        probe,
+      });
+      expect(probe).toHaveBeenCalledOnce();
+      expect(readServerLock(lockPath)).toEqual(record);
+    } finally {
+      killIfAlive(child);
+    }
+  });
+});
+
+describe("server serving probe", () => {
+  it("reports a hello-writing server as serving", async () => {
+    const socketPath = path.join(await makeTempDir("pw-probe-hello"), "s.sock");
+    const server = net.createServer((socket) => {
+      socket.end('{"type":"hello"}\n');
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    try {
+      expect(await probeServerServing(socketPath, 1_000)).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("reports a silent bound socket as not serving", async () => {
+    const socketPath = path.join(await makeTempDir("pw-probe-silent"), "s.sock");
+    const server = net.createServer(() => undefined);
+    server.listen(socketPath);
+    await once(server, "listening");
+    try {
+      expect(await probeServerServing(socketPath, 300)).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("reports a missing socket path as not serving without connecting", async () => {
+    const socketPath = path.join(await makeTempDir("pw-probe-missing"), "gone.sock");
+    expect(await probeServerServing(socketPath, 300)).toBe(false);
+  });
+
+  it("takes over a real deaf holder that still owns the lock file", async () => {
+    const directory = await makeTempDir("pw-probe-takeover");
+    const lockPath = path.join(directory, "server.lock.json");
+    const socketPath = path.join(directory, "s.sock");
+    // The test process itself is the live holder: its start identity matches,
+    // and its bound socket accepts connections but never answers.
+    const holder = selfRecord("server-deaf");
+    writeServerLock(lockPath, holder);
+    const server = net.createServer(() => undefined);
+    server.listen(socketPath);
+    await once(server, "listening");
+    try {
+      const record = { ...holder, serverId: "server-next" };
+      await acquireServerLock(lockPath, record, { socketPath, probeTimeoutMs: 300 });
+      expect(readServerLock(lockPath)).toEqual(record);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("keeps the lock error against a real hello-writing holder", async () => {
+    const directory = await makeTempDir("pw-probe-serving");
+    const lockPath = path.join(directory, "server.lock.json");
+    const socketPath = path.join(directory, "s.sock");
+    const holder = selfRecord("server-real");
+    writeServerLock(lockPath, holder);
+    const server = net.createServer((socket) => {
+      socket.end('{"type":"hello"}\n');
+    });
+    server.listen(socketPath);
+    await once(server, "listening");
+    try {
+      await expect(
+        acquireServerLock(
+          lockPath,
+          { ...holder, serverId: "server-next" },
+          {
+            socketPath,
+            probeTimeoutMs: 1_000,
+          },
+        ),
+      ).rejects.toThrow(/already running with PID/);
+      expect(readServerLock(lockPath)?.serverId).toBe("server-real");
+    } finally {
+      server.close();
     }
   });
 });
