@@ -289,6 +289,7 @@ export class WorkflowServer {
   private automaticStatePruneTimer: ReturnType<typeof setTimeout> | null = null;
   private automaticStatePruneScheduled = false;
   private automaticStatePruneDue = true;
+  private rebindingSocket = false;
   private lastAutomaticStatePruneAt: number | null = null;
   private nextAutomaticStatePruneAttemptAt = 0;
   private nextTerminalMessageReconciliationAt = 0;
@@ -393,15 +394,16 @@ export class WorkflowServer {
       const server = this.server;
       this.server = null;
       await this.closeServer(server);
+      let released = false;
       if (this.claim !== null) {
         try {
-          this.serverState.releaseServer(this.claim);
+          released = this.serverState.releaseServer(this.claim);
         } catch {
           // Preserve the startup error when cleanup cannot release an already-lost claim.
         }
       }
       this.claim = null;
-      this.removeBoundSocket();
+      if (released) this.removeBoundSocket();
       this.releaseLock();
       throw error;
     }
@@ -460,9 +462,19 @@ export class WorkflowServer {
       await Promise.allSettled([this.automaticStatePruneTask]);
     }
     this.registry.killAll();
-    if (this.claim !== null) this.serverState.releaseServer(this.claim);
-    this.claim = null;
-    this.removeBoundSocket();
+    // The explicit socket-file removal is gated on releasing this server's own
+    // claim, and closing the listener is gated the same way inside
+    // closeServer, because closing unlinks the bound path.
+    let released = false;
+    if (this.claim !== null) {
+      try {
+        released = this.serverState.releaseServer(this.claim);
+      } catch (error) {
+        this.log(`claim release failed during stop: ${errorMessage(error)}`);
+      }
+      this.claim = null;
+    }
+    if (released) this.removeBoundSocket();
     this.releaseLock();
     this.runStore.close();
     this.queue.close();
@@ -471,12 +483,49 @@ export class WorkflowServer {
     this.started = false;
   }
 
+  /**
+   * Re-create the socket file when a superseded predecessor's exit removed it:
+   * a process that exits unlinks the socket path its own listener bound, and
+   * after a takeover that path belongs to this server. The claim row must
+   * still name this server, or a newer server owns the path now.
+   */
+  private ensureSocketFile(): void {
+    if (process.platform === "win32" || this.rebindingSocket) return;
+    if (fs.existsSync(this.socketPath)) return;
+    const row = this.serverState.serverStatus();
+    if (row.serverId !== this.serverId || (this.claim !== null && row.epoch !== this.claim.epoch)) {
+      return;
+    }
+    this.rebindingSocket = true;
+    this.log("the socket file disappeared; rebinding");
+    const previous = this.server;
+    this.server = null;
+    if (previous !== null) {
+      try {
+        previous.close(() => undefined);
+      } catch {
+        // The handle is already closed.
+      }
+    }
+    void this.listen()
+      .then(() => this.log(`socket rebound on ${this.socketPath}`))
+      .catch((error) => {
+        this.rebindingSocket = false;
+        this.log(`socket rebind failed: ${errorMessage(error)}`);
+        void this.stop();
+      });
+  }
+
   private async closeServer(server: net.Server | null): Promise<void> {
     const closed = new Promise<void>((resolve) => {
       if (server === null || !server.listening) {
         resolve();
         return;
       }
+      // Closing the listener unlinks the bound path. After a takeover that
+      // path belongs to the replacement, so the unlink is transient: this
+      // server's poll re-creates the socket file while its claim still names
+      // it (ensureSocketFile), and clients retry through the brief window.
       try {
         server.close(() => resolve());
       } catch {
@@ -539,6 +588,7 @@ export class WorkflowServer {
     this.heartbeatTimer.unref?.();
     this.pollTimer = setInterval(() => {
       try {
+        this.ensureSocketFile();
         this.serverState.syncActiveTime();
         this.recovery.sample();
         this.reconcileSubmissionReminders();
@@ -559,6 +609,7 @@ export class WorkflowServer {
   }
 
   private async listen(): Promise<void> {
+    this.rebindingSocket = false;
     if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
     const server = net.createServer((socket) => this.handleConnection(socket));
     this.server = server;
@@ -597,6 +648,7 @@ export class WorkflowServer {
   private removeBoundSocket(): void {
     if (process.platform === "win32") return;
     if (this.boundSocketPath !== this.socketPath) return;
+    // DIAGNOSTIC
     fs.rmSync(this.socketPath, { force: true });
     this.boundSocketPath = null;
   }

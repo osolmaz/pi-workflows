@@ -3815,6 +3815,82 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
+  it("keeps the replacement serving when the superseded holder stops", async () => {
+    const databasePath = path.join(await makeTempDir("server-handover-socket"), "state.sqlite");
+    const socketPath = path.join(path.dirname(serverLockPath(databasePath)), "server.sock");
+    const client = new WorkflowClient({ databasePath });
+    let holderPid: number | undefined;
+    let replacement: WorkflowServer | null = null;
+    try {
+      // Spawn the holder and connect to it.
+      await client.ensureAvailable();
+      holderPid = readServerLock(serverLockPath(databasePath))?.pid;
+      expect(typeof holderPid).toBe("number");
+      // Freeze the holder with an expired lease so the replacement takes over
+      // the claim and rebinds the socket path.
+      process.kill(holderPid as number, "SIGSTOP");
+      const store = new ServerStateStore(databasePath);
+      store.state.connection
+        .prepare("UPDATE workflow_server_state SET expires_at = ? WHERE id = 1")
+        .run(Date.now() - 10_000);
+      replacement = new WorkflowServer({ databasePath, serverRenewMs: 100 });
+      await replacement.start();
+      // Wake the holder: its renewal fails against the new epoch and it stops.
+      process.kill(holderPid as number, "SIGCONT");
+      const stopDeadline = Date.now() + 25_000;
+      for (;;) {
+        let alive = true;
+        try {
+          process.kill(holderPid as number, 0);
+        } catch {
+          alive = false;
+        }
+        if (!alive) break;
+        if (Date.now() > stopDeadline) throw new Error("the superseded holder did not stop");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // The superseded holder's exit unlinks the socket path its own listener
+      // bound; the replacement re-creates the file within one poll tick and
+      // keeps serving on it.
+      const restoreDeadline = Date.now() + 10_000;
+      for (;;) {
+        if (existsSync(socketPath)) break;
+        if (Date.now() > restoreDeadline) {
+          throw new Error("the replacement did not restore the socket file");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        let serving = false;
+        try {
+          const status = await client.request({ operation: "server.status" });
+          serving = status.outcome === "accepted";
+        } catch {
+          serving = false;
+        }
+        if (serving) break;
+        if (Date.now() > deadline) throw new Error("the replacement did not keep serving");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      if (holderPid !== undefined) {
+        try {
+          process.kill(holderPid, "SIGCONT");
+        } catch {
+          // The holder already exited.
+        }
+        try {
+          process.kill(holderPid, "SIGTERM");
+        } catch {
+          // The holder already exited.
+        }
+      }
+      if (replacement !== null) await replacement.stop();
+      await client.close();
+    }
+  }, 60_000);
+
   it("stops when another server claims the superseded epoch", async () => {
     const databasePath = path.join(await makeTempDir("server-superseded-stop"), "state.sqlite");
     const server = new WorkflowServer({ databasePath, serverRenewMs: 100, serverLeaseMs: 500 });

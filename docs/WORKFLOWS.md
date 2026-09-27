@@ -1026,7 +1026,11 @@ wake:
   new server exits with its `already running` message. A dead holder, or a live
   holder that is mid-shutdown or frozen and does not answer, loses the lock and
   the new server takes over. The epoch claim row stays the fencing authority:
-  a probe misfire costs one wasted start, never two serving servers.
+  a probe misfire costs one wasted start, never two serving servers. When the
+  superseded holder's process later exits, the operating system unlinks the
+  socket path its own listener bound, which is the path the replacement now
+  serves; the replacement re-creates the socket file within one poll tick
+  while its claim still names it, and clients retry through the brief window.
 - Clients re-spawn failed replacements. When a spawned server exits without
   becoming ready, the client starts the next one within the same start window,
   capped at three attempts, so one lost race costs milliseconds instead of the
