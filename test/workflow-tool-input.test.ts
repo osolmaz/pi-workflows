@@ -103,29 +103,34 @@ describe("workflow tool input", () => {
     });
   });
 
-  it("wraps unparseable answer text like the command path", () => {
+  it("wraps free-text answer text like the command path", () => {
     expect(
       parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: "approve now" }),
     ).toEqual({ action: "answer", requestId: "request-1", input: { answer: "approve now" } });
     expect(
-      parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: '"plain"' }),
-    ).toEqual({ action: "answer", requestId: "request-1", input: "plain" });
-    expect(
       parseWorkflowToolInput({ action: "answer", requestId: "request-1", input: "null" }),
-    ).toEqual({ action: "answer", requestId: "request-1", input: null });
+    ).toEqual({ action: "answer", requestId: "request-1", input: { answer: "null" } });
   });
 
-  it("rejects unparseable structured text in the tool result instead of the runner", () => {
-    expect(() =>
+  it("keeps literal strings for fields the workflow may receive as text", () => {
+    expect(
+      parseWorkflowToolInput({ action: "submit", requestId: "request-1", output: "just text" }),
+    ).toEqual({ action: "submit", requestId: "request-1", output: "just text" });
+    expect(
       parseWorkflowToolInput({ action: "start", workflow: "monitor", input: "{task: check}" }),
-    ).toThrow("Invalid workflow input: the parameter arrived as text and is not valid JSON.");
-    expect(() =>
+    ).toEqual({ action: "start", workflow: "monitor", input: "{task: check}" });
+    expect(
       parseWorkflowSubmissionInput({
         action: "submit",
         requestId: "request-1",
         output: "{result:",
       }),
-    ).toThrow("Invalid workflow submission output: the parameter arrived as text");
+    ).toEqual({ action: "submit", requestId: "request-1", output: "{result:" });
+    expect(parseWorkflowToolInput({ action: "start", workflow: "monitor", input: "123" })).toEqual({
+      action: "start",
+      workflow: "monitor",
+      input: "123",
+    });
   });
 
   it("keeps object parameters unchanged", () => {

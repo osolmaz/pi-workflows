@@ -209,10 +209,14 @@ function providerObjectSchema(variants: readonly TObject[]): TObject {
 }
 
 /**
- * Structured (untyped) tool parameters. Some tool transports deliver these as raw
- * JSON text instead of a parsed value, and one workflow runner crash per start is
- * too late to learn about it. Coerce the text into a value before schema validation
- * so malformed text fails in the tool result with a clear message.
+ * Structured (untyped) tool parameters. Some tool transports deliver these as
+ * raw JSON text instead of a parsed value, and one workflow runner crash per
+ * start is too late to learn about it. A transport-encoded structured value
+ * always serializes as JSON text that starts with `{` or `[`, so only such
+ * text is parsed; every other string is a genuine literal and passes through
+ * untouched. Scalars stay literal because a transport-encoded scalar such as
+ * `123` is indistinguishable from the literal text, and the runner's own
+ * validation still rejects a value whose shape the workflow cannot accept.
  */
 const structuredFieldsByAction: Readonly<Record<string, readonly string[]>> = {
   start: ["input"],
@@ -225,7 +229,7 @@ const structuredFieldsByAction: Readonly<Record<string, readonly string[]>> = {
 function coerceStructuredFields(
   action: string,
   value: Record<string, unknown>,
-  label: string,
+  _label: string,
 ): Record<string, unknown> {
   const fields = structuredFieldsByAction[action];
   if (fields === undefined) return value;
@@ -233,34 +237,23 @@ function coerceStructuredFields(
   for (const field of fields) {
     const raw = coerced[field];
     if (typeof raw !== "string") continue;
-    if (action === "answer" && field === "input") {
-      // Free-text answers are legitimate: the command path wraps text that is not
-      // JSON in { answer: text }, and the tool path must behave the same.
-      const parsed = tryParseJsonText(raw);
-      coerced[field] = parsed === undefined ? { answer: raw } : parsed;
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      if (action === "answer" && field === "input") {
+        // Free-text answers are legitimate: the command path wraps text that
+        // is not JSON in { answer: text }, and the tool path behaves the same.
+        coerced[field] = { answer: raw };
+      }
       continue;
     }
-    coerced[field] = parseJsonText(raw, `${label} ${field}`);
+    try {
+      coerced[field] = parseJson(raw);
+    } catch {
+      // Text that merely looks like JSON is a literal string; the runner's
+      // input validation reports it if the shape cannot be accepted.
+    }
   }
   return coerced;
-}
-
-function tryParseJsonText(text: string): unknown {
-  try {
-    return parseJson(text);
-  } catch {
-    return undefined;
-  }
-}
-
-function parseJsonText(text: string, label: string): unknown {
-  try {
-    return parseJson(text);
-  } catch (error) {
-    throw new Error(`Invalid ${label}: the parameter arrived as text and is not valid JSON.`, {
-      cause: error,
-    });
-  }
 }
 
 function parseSelectedAction<Output>(
