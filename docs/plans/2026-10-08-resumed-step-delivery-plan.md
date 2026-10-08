@@ -87,7 +87,7 @@ With these rules, the result no longer depends on when Pi writes the entry.
 - No change to reports that name no message. They keep their current rule.
 - No change to the status text for a pending step.
 - No upgrade of the Pi development dependency from 0.85.0. The unit tests model the deferred Pi
-  delivery directly, and the live E2E runs on the installed Pi.
+  delivery directly, and the E2E suite can run on a newer Pi through `PI_WORKFLOWS_E2E_PI_ENTRY`.
 - Post-workflow turns and missing-submission reminders keep their behavior. Reminder steps are a
   second message for a request, so this fix also stops the server from cancelling them.
 
@@ -114,3 +114,14 @@ npx -y @simpledoc/simpledoc check
 ```
 
 Then run the real-model live E2E from `AGENTS.md` with a low-cost model.
+
+The E2E test "delivers a step resumed from a model turn and the step after it" replays the incident
+on a real Pi with a local mock model. `PI_WORKFLOWS_E2E_PI_ENTRY` points the E2E suite at another Pi
+`cli.js`. With Pi 1.0.4 and without this fix, the test hangs at the second step with "A step is
+pending delivery. It starts a new model turn after this turn ends." With the fix, it passes, and so
+does the whole workflow E2E file:
+
+```bash
+PI_WORKFLOWS_E2E_PI_ENTRY=/path/to/pi-coding-agent/dist/cli.js \
+  npx vitest run --config vitest.e2e.config.ts test/e2e/workflow.e2e.test.ts
+```
