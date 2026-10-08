@@ -455,6 +455,10 @@ export class WorkflowMessageStore {
    * a new resumed message that later keeps its own identity. Only that one message
    * changes, so a source can never hold two pending messages at once. A terminal or
    * notification message needs no re-delivery, so it does not come through here.
+   *
+   * The named message can also be cancelled: the recovery cancels the pending
+   * messages of its source before it names the message to return, and that can be
+   * the same row. The request still waits, so that row returns as pending as well.
    */
   reopenMessage(workflowMessageId: string, now: number = Date.now()): number {
     return this.state.transaction(
@@ -463,7 +467,8 @@ export class WorkflowMessageStore {
           .prepare(
             `UPDATE workflow_messages
              SET status = 'pending', pi_session_entry_id = NULL, updated_at = ?
-             WHERE workflow_message_id = ? AND status = 'sent' AND kind IN ('step', 'decision')`,
+             WHERE workflow_message_id = ? AND status IN ('sent', 'cancelled')
+               AND kind IN ('step', 'decision')`,
           )
           .run(now, workflowMessageId).changes,
     );

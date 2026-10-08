@@ -29,6 +29,8 @@ type OwnedTurn = {
   workflowTurnId: string;
   message: WorkflowSessionMessage;
   startedReported: boolean;
+  /** The server received Pi's entry for this message outside the current-message report. */
+  entryReported: boolean;
   stopRequested: boolean;
   abortSent: boolean;
 } & ({ phase: "delivering" | "running" } | { phase: "settled"; end: SettledTurn });
@@ -216,6 +218,7 @@ export class WorkflowMessageCoordinator {
             workflowTurnId: open.workflowTurnId,
             message: candidate,
             startedReported: true,
+            entryReported: false,
             stopRequested:
               view.workflowMessage?.workflowMessageId === candidate.workflowMessageId &&
               view.workflowMessage.deliveryCancelled,
@@ -225,6 +228,14 @@ export class WorkflowMessageCoordinator {
         }
       }
       this.abortCancelledTurn(ctx);
+      // Pi can add a delivered message after the send call returns, and the
+      // server can cancel that message before the entry arrives. A visible entry
+      // makes the message sent again, so report the owned delivery even when the
+      // server now names another message. Its turn can then be settled.
+      const ownedDelivery = this.unreportedOwnedDelivery(view, ctx);
+      if (ownedDelivery !== undefined) {
+        await this.reportBranch(client, ctx, view, ownedDelivery);
+      }
       // Settle a locally completed owned turn before reporting Pi idle. Otherwise
       // the workflow server can mistake its saved response for a lost turn and block recovery.
       if (this.turn?.phase === "settled") {
@@ -286,6 +297,7 @@ export class WorkflowMessageCoordinator {
           workflowTurnId: `workflow-turn-${randomUUID()}`,
           message,
           startedReported: false,
+          entryReported: false,
           stopRequested: false,
           abortSent: false,
           phase: "delivering",
@@ -390,8 +402,16 @@ export class WorkflowMessageCoordinator {
     let message = pending.message;
     if (!pending.startedReported && !pending.stopRequested) {
       const confirmed = messageById(view, message.workflowMessageId);
-      if (confirmed?.status !== "sent") return;
-      message = confirmed;
+      if (confirmed !== undefined) {
+        if (confirmed.status !== "sent") return;
+        message = confirmed;
+      } else if (!pending.entryReported) {
+        // The server names another message and has no entry for this one yet.
+        return;
+      }
+      // The server names another message, but it holds Pi's entry for this one.
+      // Its turn receipt alone decides whether this turn is still workflow work,
+      // so the turn can never wait for a confirmation the view will not carry.
       const receipt = await reportTurn(client, {
         state: "started",
         workflowMessageId: message.workflowMessageId,
@@ -438,16 +458,21 @@ export class WorkflowMessageCoordinator {
     this.turn = null;
   }
 
+  /**
+   * Report the branch facts of one message: the view's current message, or the
+   * named owned delivery. One report proves one message only.
+   */
   private async reportBranch(
     client: WorkflowClient,
     ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager">,
     view: WorkflowSessionView,
+    ownedDelivery?: WorkflowSessionMessage,
   ): Promise<void> {
     if (view.coordinatorEpoch === null) return;
-    const current = view.workflowMessage;
+    const reported = ownedDelivery ?? view.workflowMessage;
     const branch = branchWorkflowEntries(ctx.sessionManager.getBranch());
     const piSessionEntryId =
-      current === null ? null : (branch.get(current.workflowMessageId) ?? null);
+      reported === null ? null : (branch.get(reported.workflowMessageId) ?? null);
     const isIdle = ctx.isIdle();
     const hasPendingMessages = ctx.hasPendingMessages();
     const response = await client.request({
@@ -455,7 +480,7 @@ export class WorkflowMessageCoordinator {
       payload: {
         targetSessionId: view.sessionId,
         coordinatorEpoch: view.coordinatorEpoch,
-        workflowMessageId: current?.workflowMessageId ?? null,
+        workflowMessageId: reported?.workflowMessageId ?? null,
         piSessionEntryId,
         isIdle,
         hasPendingMessages,
@@ -464,15 +489,43 @@ export class WorkflowMessageCoordinator {
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
       throw new Error(response.error ?? "Workflow server rejected the Pi branch report");
     }
-    if (current !== null && piSessionEntryId !== null) {
-      const message = messageById(view, current.workflowMessageId);
+    if (ownedDelivery !== undefined) {
+      // The epoch still waits for a report of the current message.
+      if (
+        piSessionEntryId !== null &&
+        this.turn?.message.workflowMessageId === ownedDelivery.workflowMessageId
+      ) {
+        this.turn.entryReported = true;
+      }
+      return;
+    }
+    if (reported !== null && piSessionEntryId !== null) {
+      const message = messageById(view, reported.workflowMessageId);
       if (message !== undefined) {
         message.status = "sent";
         message.piSessionEntryId = piSessionEntryId;
       }
-      this.queued.delete(current.workflowMessageId);
+      this.queued.delete(reported.workflowMessageId);
     }
     this.lastBranchEpoch = view.coordinatorEpoch;
+  }
+
+  /**
+   * The delivered message of an unconfirmed owned turn when Pi holds it, the
+   * server's view names another message, and the server has no report of its
+   * entry yet.
+   */
+  private unreportedOwnedDelivery(
+    view: WorkflowSessionView,
+    ctx: Pick<ExtensionContext, "sessionManager">,
+  ): WorkflowSessionMessage | undefined {
+    const turn = this.turn;
+    if (turn === null || turn.startedReported || turn.entryReported) return undefined;
+    const messageId = turn.message.workflowMessageId;
+    if (view.workflowMessage?.workflowMessageId === messageId) return undefined;
+    return branchWorkflowEntries(ctx.sessionManager.getBranch()).has(messageId)
+      ? turn.message
+      : undefined;
   }
 
   private hasUnconfirmedBranchEntry(

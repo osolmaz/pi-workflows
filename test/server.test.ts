@@ -2508,6 +2508,138 @@ export default defineWorkflow({ name: "paused-branch", startAt: "work", nodes: {
     }
   }, 60_000);
 
+  it("keeps a resumed step deliverable while Pi has not added it yet", async () => {
+    const cwd = await makeTempDir("resumed-delivery-project");
+    const databasePath = path.join(await makeTempDir("resumed-delivery-state"), "state.sqlite");
+    const sessionId = "server-test-session";
+    const workflowPath = path.join(cwd, "resumed-delivery.workflow.ts");
+    await fs.writeFile(
+      workflowPath,
+      `
+import { agent, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "resumed-delivery", startAt: "work", nodes: {
+  work: agent({ prompt: () => "Return a result." })
+}, edges: [] });`,
+    );
+    const server = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath, clientId: "resumed-delivery-client" });
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    await server.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "resumed-delivery",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => observed.listPendingInteractions(sessionId).length === 1, 30_000);
+      const interaction = observed.listPendingInteractions(sessionId)[0];
+      if (interaction === undefined) throw new Error("interaction missing");
+      const initial = observed.workflowMessages
+        .listSession(sessionId)
+        .find((message) => message.sourceId === interaction.requestId);
+      if (initial === undefined) throw new Error("step message missing");
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "resumed-delivery", sessionId, coordinator: true },
+      });
+      const authority = {
+        targetSessionId: sessionId,
+        coordinatorEpoch: (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch,
+      };
+      await reportBranch(client, authority, {
+        workflowMessageId: initial.workflowMessageId,
+        piSessionEntryId: "initial-entry",
+        isIdle: true,
+      });
+      expect(observed.workflowMessages.require(initial.workflowMessageId).status).toBe("sent");
+
+      // A pause and a resume return the step as a new resumed message, while Pi
+      // still holds the first delivery.
+      await client.request({ operation: "run.pause", runId: interaction.runId });
+      await waitUntil(() => observed.isRunPaused(interaction.runId), 30_000);
+      await client.request({ operation: "run.resume", runId: interaction.runId });
+      await waitUntil(
+        () =>
+          observed.workflowMessages
+            .listSession(sessionId)
+            .some(
+              (message) =>
+                message.sourceId === interaction.requestId && message.status === "pending",
+            ),
+        30_000,
+      );
+      const resumed = observed.workflowMessages
+        .listSession(sessionId)
+        .find(
+          (message) => message.sourceId === interaction.requestId && message.status === "pending",
+        );
+      if (resumed === undefined) throw new Error("resumed message missing");
+      expect(await currentWorkflowMessageId(client, sessionId)).toBe(resumed.workflowMessageId);
+      const statuses = () =>
+        new Map(
+          observed.workflowMessages
+            .listSession(sessionId)
+            .filter((message) => message.sourceId === interaction.requestId)
+            .map((message) => [message.workflowMessageId, message.status]),
+        );
+
+      // Pi can add a sent message after the send call returns, and it stays idle
+      // until then. The report sent in that gap proves only that the resumed
+      // message is not added yet, so the server keeps it and changes nothing else.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: resumed.workflowMessageId,
+          piSessionEntryId: null,
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "absent" } });
+      expect(statuses()).toEqual(
+        new Map([
+          [initial.workflowMessageId, "sent"],
+          [resumed.workflowMessageId, "pending"],
+        ]),
+      );
+      expect(await currentWorkflowMessageId(client, sessionId)).toBe(resumed.workflowMessageId);
+
+      // A stale report that the first delivery left the branch re-issues the step
+      // through the same resumed message, so the request still has one message
+      // that Pi can receive.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: initial.workflowMessageId,
+          piSessionEntryId: null,
+          isIdle: true,
+        }),
+      ).toMatchObject({ receipt: { outcome: "absent" } });
+      expect(statuses()).toEqual(
+        new Map([
+          [initial.workflowMessageId, "sent"],
+          [resumed.workflowMessageId, "pending"],
+        ]),
+      );
+      expect(await currentWorkflowMessageId(client, sessionId)).toBe(resumed.workflowMessageId);
+
+      // Pi adds the resumed message, and the next report confirms it.
+      expect(
+        await reportBranch(client, authority, {
+          workflowMessageId: resumed.workflowMessageId,
+          piSessionEntryId: "resumed-entry",
+          isIdle: false,
+        }),
+      ).toMatchObject({ receipt: { outcome: "present" } });
+      expect(observed.workflowMessages.require(resumed.workflowMessageId)).toMatchObject({
+        status: "sent",
+        piSessionEntryId: "resumed-entry",
+      });
+    } finally {
+      observed.close();
+      await client.close();
+      await server.stop();
+    }
+  }, 60_000);
+
   it("closes active time atomically when pausing a validating interaction", async () => {
     const cwd = await makeTempDir("pause-validation-project");
     const databasePath = path.join(await makeTempDir("pause-validation-state"), "state.sqlite");
