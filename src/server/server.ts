@@ -1127,8 +1127,9 @@ export class WorkflowServer {
     );
     const messages = this.serverState.workflowMessages.listSessionSummaries(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
-    // Pi reports its one current message, or null when it holds none yet. A
-    // present report without an entry means the message stays pending.
+    // Pi reports one message: its current message, the delivered message whose
+    // unconfirmed turn it still owns, or null when it holds none yet. A present
+    // report without an entry means the message stays pending.
     const workflowMessageId = report.workflowMessageId;
     // A report proves the branch facts of one known message. An unknown ID is a
     // stale or wrong-session report, and it must not authorize idle recovery.
@@ -1198,10 +1199,21 @@ export class WorkflowServer {
           const sourceMessages = refreshed.filter(
             (message) => message.sourceId === interaction.requestId,
           );
-          if (
-            sourceMessages.some((message) => message.status === "sent") &&
-            !sourceMessages.some((message) => branchIds.has(message.workflowMessageId))
-          ) {
+          // A report proves only the message it names. A named message that Pi has
+          // not received yet proves nothing about its source, because Pi can add
+          // it after the send call returns, so the source waits for that delivery.
+          // Only a named sent message without an entry has left the branch. A
+          // report of no message holds no entry, so it covers every sent source.
+          const leftBranch =
+            workflowMessageId === null
+              ? sourceMessages.some((message) => message.status === "sent")
+              : sourceMessages.some(
+                  (message) =>
+                    message.workflowMessageId === workflowMessageId &&
+                    message.status === "sent" &&
+                    !branchIds.has(message.workflowMessageId),
+                );
+          if (leftBranch) {
             this.serverState.workflowMessages.cancelPendingForSource(interaction.requestId);
             const ensured = this.serverState.ensureInteractionMessage(
               interaction,

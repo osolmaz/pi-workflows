@@ -984,4 +984,108 @@ describe("WorkflowMessageCoordinator", () => {
       expect.objectContaining({ operation: "workflowMessage.reportBranch" }),
     );
   });
+
+  it.each(["active", "absent"] as const)(
+    "settles a turn whose message the server cancelled before Pi added it (%s receipt)",
+    async (ownership) => {
+      const delivered = stepMessage("resumed-step");
+      const coordinator = new WorkflowMessageCoordinator();
+      coordinator.updateView(view(delivered));
+      const branch: Record<string, unknown>[] = [];
+      let idle = true;
+      const abort = vi.fn();
+      const ctx = {
+        isIdle: () => idle,
+        abort,
+        hasPendingMessages: () => false,
+        sessionManager: { getBranch: () => branch },
+      } as never;
+      // Pi defers a turn requested while its settled handlers run, so the send
+      // call returns before Pi adds the message or stops being idle.
+      const sent: { details: unknown }[] = [];
+      const sendMessage = vi.fn((entry: { details: unknown }) => {
+        sent.push(entry);
+      });
+      const request = vi.fn(async (options: Record<string, unknown>) => {
+        if (options.operation === "workflowTurn.report" && ownership === "absent") {
+          return {
+            outcome: "adopted",
+            receipt: {
+              schema: "pi-workflows.workflow-turn-report-receipt.v1",
+              ownership: "absent",
+              turn: null,
+            },
+          };
+        }
+        return acceptedServerRequest(options);
+      });
+      const reports = (operation: string) =>
+        request.mock.calls
+          .map(([call]) => call)
+          .filter((call) => call.operation === operation)
+          .map((call) => call.payload as Record<string, unknown>);
+      const sync = () =>
+        coordinator.synchronize({ sendMessage } as never, clientDouble(request), ctx);
+
+      await sync();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(reports("workflowMessage.reportBranch").at(-1)).toMatchObject({
+        workflowMessageId: "resumed-step",
+        piSessionEntryId: null,
+        isIdle: true,
+      });
+
+      // The server cancels the message before Pi adds it and names another one.
+      coordinator.updateView(view(stepMessage("earlier-step", "sent")));
+      branch.push({ type: "custom_message", id: "resumed-entry", details: sent[0]?.details });
+      idle = false;
+      coordinator.startTurn();
+      await sync();
+
+      // The extension reports the entry of the message it delivered, and the
+      // server's turn receipt decides whether the turn is workflow work.
+      expect(reports("workflowMessage.reportBranch").at(-1)).toMatchObject({
+        workflowMessageId: "resumed-step",
+        piSessionEntryId: "resumed-entry",
+      });
+      expect(reports("workflowTurn.report")).toEqual([
+        expect.objectContaining({ state: "started", workflowMessageId: "resumed-step" }),
+      ]);
+      expect(coordinator.activeTurnMessage()?.workflowMessageId).toBe(
+        ownership === "active" ? "resumed-step" : undefined,
+      );
+      expect(abort).toHaveBeenCalledTimes(ownership === "active" ? 0 : 1);
+
+      // The turn settles, and the next step reaches Pi.
+      coordinator.endTurn(ownership === "active" ? "completed" : "aborted", "response-entry");
+      idle = true;
+      coordinator.updateView(view(stepMessage("next-step")));
+      await sync();
+      expect(reports("workflowTurn.report")).toEqual([
+        expect.objectContaining({ state: "started", workflowMessageId: "resumed-step" }),
+        expect.objectContaining({ state: "ended", workflowMessageId: "resumed-step" }),
+      ]);
+      expect(coordinator.activeTurnMessage()).toBeUndefined();
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect(sent[1]?.details).toMatchObject({ workflowMessageId: "next-step" });
+    },
+  );
 });
+
+/** A step message with its own identity, verified content, and request. */
+function stepMessage(
+  workflowMessageId: string,
+  status: "pending" | "sent" = "pending",
+): WorkflowMessage {
+  const base = followUpMessage(status);
+  const content: WorkflowMessage["content"] = { ...base.content, details: { workflowMessageId } };
+  return {
+    ...base,
+    workflowMessageId,
+    kind: "step",
+    sourceId: "request-1",
+    contentDigest: contentDigestOf(content),
+    piSessionEntryId: status === "sent" ? `${workflowMessageId}-entry` : null,
+    content,
+  };
+}
