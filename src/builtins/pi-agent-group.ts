@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isModelType } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createAgentSessionFromServices,
@@ -79,8 +80,17 @@ export type PiAgentLifecycleEvent = {
 
 type PiAgentEvent = Record<string, unknown>;
 
+/**
+ * How Pi dispatched an accepted prompt. Pi reports no disposition for a rejected
+ * prompt, and only a `started` prompt runs the model.
+ */
+type PromptDisposition = "started" | "handled" | "queued";
+
 type PiAgentSession = {
-  prompt(text: string, options?: { preflightResult?: (accepted: boolean) => void }): Promise<void>;
+  prompt(
+    text: string,
+    options?: { preflightResult?: (disposition: PromptDisposition) => void },
+  ): Promise<void>;
   subscribe(listener: (event: PiAgentEvent) => void): () => void;
   abort(): Promise<void>;
   dispose(): void | Promise<void>;
@@ -823,7 +833,7 @@ async function runOneAgent(
   let session: PiAgentSession | undefined;
   let unsubscribe: (() => void) | undefined;
   let finalMessage: Record<string, unknown> | undefined;
-  let preflightAccepted: boolean | undefined;
+  let preflightDisposition: PromptDisposition | undefined;
   let abortKind: "timeout" | "cancelled" | undefined;
   let abortFailure: unknown;
   let abortWork = Promise.resolve();
@@ -875,8 +885,8 @@ async function runOneAgent(
     }
 
     await session.prompt(request.prompt, {
-      preflightResult: (accepted) => {
-        preflightAccepted = accepted;
+      preflightResult: (disposition) => {
+        preflightDisposition = disposition;
       },
     });
     await abortWork;
@@ -894,8 +904,14 @@ async function runOneAgent(
         `${cancellationReason(options.signal.reason)}${abortSuffix(abortFailure)}`,
       );
     }
-    if (preflightAccepted === false) {
-      throw new PiAgentGroupError(request.id, "rejected prompt", "prompt preflight failed");
+    if (preflightDisposition !== "started") {
+      throw new PiAgentGroupError(
+        request.id,
+        "rejected prompt",
+        preflightDisposition === undefined
+          ? "prompt preflight failed"
+          : `Pi ${preflightDisposition} the prompt without running the model`,
+      );
     }
     lifecycle.emit("running", "finalizing", true);
     const text = finalAssistantText(request.id, finalMessage, options.maxFinalChars!);
@@ -980,10 +996,14 @@ async function createSdkSession(
   signal: AbortSignal,
 ): Promise<PiAgentSession> {
   if (signal.aborted) throw cancellationError(request.id, signal.reason);
-  const model = plan.modelSnapshot.models.find(
-    (candidate) =>
-      candidate.provider === plan.dispatch.provider && candidate.id === plan.dispatch.modelId,
-  );
+  // One provider model ID can name a chat entry and an image or classifier
+  // entry. An agent session needs the chat entry.
+  const model = plan.modelSnapshot.models
+    .filter((candidate) => isModelType(candidate, "chat"))
+    .find(
+      (candidate) =>
+        candidate.provider === plan.dispatch.provider && candidate.id === plan.dispatch.modelId,
+    );
   if (model === undefined) {
     throw new PiAgentGroupError(
       request.id,

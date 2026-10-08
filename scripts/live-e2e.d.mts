@@ -27,6 +27,10 @@ export function isExpectedWorkflowAbort(
 ): boolean;
 export function parseArgs(argv: string[]): LiveE2eOptions;
 export function configureModelBudget(profile: string, options: LiveE2eOptions): Promise<void>;
+export function assertPackageIsolation(
+  rpc: { request(command: string): Promise<unknown> },
+  candidate: string,
+): Promise<void>;
 export function assertSafeTempRoot(root: string, temporaryDirectory?: string): string;
 export function removeTemporaryRoot(root: string, temporaryDirectory?: string): Promise<void>;
 export function withTemporaryRoot<T>(

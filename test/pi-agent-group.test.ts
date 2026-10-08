@@ -93,7 +93,7 @@ function successfulFactory(
         return () => listeners.delete(listener);
       },
       async prompt(_prompt, options) {
-        options?.preflightResult?.(true);
+        options?.preflightResult?.("started");
         active += 1;
         hooks.active?.(active);
         for (const listener of listeners) {
@@ -218,7 +218,7 @@ describe("Pi agent groups", () => {
           return () => listeners.delete(listener);
         },
         async prompt(_prompt, options) {
-          options?.preflightResult?.(true);
+          options?.preflightResult?.("started");
           for (const listener of listeners) listener(message("", "error", "provider failed"));
         },
         async abort() {},
@@ -257,7 +257,7 @@ describe("Pi agent groups", () => {
       thinkingLevel: "off",
       subscribe: () => () => {},
       async prompt(_prompt, options) {
-        options?.preflightResult?.(true);
+        options?.preflightResult?.("started");
         await new Promise<void>((resolve) => {
           release = resolve;
         });
@@ -414,30 +414,38 @@ describe("Pi agent groups", () => {
   });
 
   it("reports prompt rejection and missing final output", async () => {
-    const rejected: PiAgentSessionFactory = async () => ({
-      model: { provider: "mock", id: "model" },
-      thinkingLevel: "off",
-      subscribe: () => () => {},
-      async prompt(_prompt, options) {
-        options?.preflightResult?.(false);
-      },
-      async abort() {},
-      dispose() {},
-    });
-    await expect(
-      runPiAgentGroup([request("rejected")], {
-        maxConcurrency: 1,
-        signal: new AbortController().signal,
-        sessionFactory: rejected,
-      }),
-    ).rejects.toThrow(/rejected prompt/);
+    // Pi reports no disposition for a rejected prompt, and an extension can
+    // handle a prompt or Pi can queue it without running the model.
+    for (const disposition of [undefined, "handled", "queued"] as const) {
+      const rejected: PiAgentSessionFactory = async () => ({
+        model: { provider: "mock", id: "model" },
+        thinkingLevel: "off",
+        subscribe: () => () => {},
+        async prompt(_prompt, options) {
+          if (disposition !== undefined) options?.preflightResult?.(disposition);
+        },
+        async abort() {},
+        dispose() {},
+      });
+      await expect(
+        runPiAgentGroup([request("rejected")], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          sessionFactory: rejected,
+        }),
+      ).rejects.toThrow(
+        disposition === undefined
+          ? /rejected prompt: prompt preflight failed/
+          : new RegExp(`rejected prompt: Pi ${disposition} the prompt`),
+      );
+    }
 
     const missing: PiAgentSessionFactory = async () => ({
       model: { provider: "mock", id: "model" },
       thinkingLevel: "off",
       subscribe: () => () => {},
       async prompt(_prompt, options) {
-        options?.preflightResult?.(true);
+        options?.preflightResult?.("started");
       },
       async abort() {},
       dispose() {},
@@ -462,7 +470,7 @@ describe("Pi agent groups", () => {
           return () => listeners.delete(listener);
         },
         async prompt(_prompt, options) {
-          options?.preflightResult?.(true);
+          options?.preflightResult?.("started");
           for (const listener of listeners) {
             listener({
               type: "message_end",
@@ -498,7 +506,8 @@ describe("Pi agent groups", () => {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
-        async prompt() {
+        async prompt(_prompt, options) {
+          options?.preflightResult?.("started");
           for (const listener of listeners) {
             listener({ type: "tool_execution_start", toolName: "bash" });
             listener(message("old failure", "error", "old"));
@@ -545,7 +554,8 @@ describe("Pi agent groups", () => {
             listeners.add(listener);
             return () => listeners.delete(listener);
           },
-          async prompt() {
+          async prompt(_prompt, options) {
+            options?.preflightResult?.("started");
             for (const event of events) for (const listener of listeners) listener(event);
           },
           async abort() {},
@@ -660,7 +670,8 @@ describe("Pi agent groups", () => {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
-        async prompt() {
+        async prompt(_prompt, options) {
+          options?.preflightResult?.("started");
           for (const listener of listeners) listener(message("ok"));
         },
         async abort() {},
@@ -818,7 +829,8 @@ describe("Pi agent groups", () => {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
-        async prompt() {
+        async prompt(_prompt, options) {
+          options?.preflightResult?.("started");
           for (let index = 0; index < 100; index += 1) {
             for (const listener of listeners) {
               listener({
