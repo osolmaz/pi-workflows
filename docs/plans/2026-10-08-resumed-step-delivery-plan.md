@@ -79,6 +79,16 @@ With these rules, the result no longer depends on when Pi writes the entry.
 - [Workflow server](../WORKFLOW_SERVER.md) and [Workflow step messages](../WORKFLOW_STEP_MESSAGES.md):
   state the rules above, and fix the stale sentence that says the branch report covers the complete
   view window.
+- Pi 1.1.0 for development and CI, at Onur's request after the first review. The development
+  dependencies move from 0.85.0 to 1.1.0, so CI runs the deferred `agent_settled` timing that caused
+  this incident. The new E2E test hangs on Pi 1.1.0 without the fix.
+- `src/builtins/pi-agent-group.ts`: since Pi 0.99.0, `preflightResult` reports a disposition for an
+  accepted prompt (`started`, `handled`, or `queued`) and nothing for a rejected one. The old check
+  waited for `false`, so a handled or queued prompt passed as accepted. The agent group now requires
+  `started`, and it picks the chat entry of a model ID that also has image or classifier entries.
+  The Pi peer ranges move to `>=0.99.0`, the first release with both APIs.
+- `scripts/live-e2e.mjs`: the isolation check accepts the extensions that Pi 1.0 and later ship built
+  in, such as llama.cpp and MCP, and still rejects every other foreign resource.
 
 ## Non-goals
 
@@ -86,8 +96,6 @@ With these rules, the result no longer depends on when Pi writes the entry.
   ID.
 - No change to reports that name no message. They keep their current rule.
 - No change to the status text for a pending step.
-- No upgrade of the Pi development dependency from 0.85.0. The unit tests model the deferred Pi
-  delivery directly, and the E2E suite can run on a newer Pi through `PI_WORKFLOWS_E2E_PI_ENTRY`.
 - Post-workflow turns and missing-submission reminders keep their behavior. Reminder steps are a
   second message for a request, so this fix also stops the server from cancelling them.
 
@@ -119,7 +127,8 @@ The E2E test "delivers a step resumed from a model turn and the step after it" r
 on a real Pi with a local mock model. `PI_WORKFLOWS_E2E_PI_ENTRY` points the E2E suite at another Pi
 `cli.js`. With Pi 1.0.4 and without this fix, the test hangs at the second step with "A step is
 pending delivery. It starts a new model turn after this turn ends." With the fix, it passes, and so
-does the whole workflow E2E file:
+does the whole workflow E2E file. The pinned Pi 1.1.0 gives the same results, so CI runs this check
+without the variable:
 
 ```bash
 PI_WORKFLOWS_E2E_PI_ENTRY=/path/to/pi-coding-agent/dist/cli.js \

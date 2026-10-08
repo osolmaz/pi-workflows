@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertPackageIsolation,
   assertSafeTempRoot,
   configureModelBudget,
   isExpectedWorkflowAbort,
@@ -194,6 +195,36 @@ describe("installed live E2E script", () => {
     } finally {
       await rpc.stop();
     }
+  });
+
+  it("accepts base Pi built-in extensions but no other foreign resource", async () => {
+    const candidate = path.join(os.tmpdir(), "live-e2e-candidate");
+    const own = ["workflow", "resource-manager", "piw"].map((name) => ({
+      name,
+      source: "extension",
+      sourceInfo: { path: path.join(candidate, "src", "extension", "index.ts") },
+    }));
+    const builtin = {
+      name: "llama",
+      source: "extension",
+      sourceInfo: { path: "builtin:llama.cpp", source: "builtin" },
+    };
+    const rpc = (commands: unknown[]) => ({ request: async () => ({ commands }) });
+    await expect(
+      assertPackageIsolation(rpc([...own, builtin]), candidate),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertPackageIsolation(
+        rpc([
+          ...own,
+          { name: "user", source: "extension", sourceInfo: { path: "/home/user/ext.ts" } },
+        ]),
+        candidate,
+      ),
+    ).rejects.toThrow("Base Pi loaded unrelated resources");
+    await expect(
+      assertPackageIsolation(rpc([...own, { name: "skill:x", source: "skill" }]), candidate),
+    ).rejects.toThrow("Base Pi loaded unrelated resources");
   });
 
   it("refuses cleanup outside one direct guarded temporary root", () => {

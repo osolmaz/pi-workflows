@@ -686,7 +686,7 @@ async function startPi(context) {
   return rpc;
 }
 
-async function assertPackageIsolation(rpc, candidate) {
+export async function assertPackageIsolation(rpc, candidate) {
   const data = requireObject(await rpc.request("get_commands"), "Pi commands response");
   if (!Array.isArray(data.commands)) throw new Error("Pi commands response has no command list");
   const commandPath = (command) => command.path ?? command.sourceInfo?.path;
@@ -707,6 +707,9 @@ async function assertPackageIsolation(rpc, candidate) {
   }
   const unrelated = data.commands.filter((command) => {
     if (command.source !== "extension") return true;
+    // Pi 1.0 and later ship built-in extensions, such as llama.cpp and MCP. They
+    // belong to base Pi, so they do not break isolation from user resources.
+    if (command.sourceInfo?.source === "builtin") return false;
     const sourcePath = commandPath(command);
     if (typeof sourcePath === "string" && sourcePath.startsWith("<inline:")) return false;
     return (

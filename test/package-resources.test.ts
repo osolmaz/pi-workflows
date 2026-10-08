@@ -89,8 +89,8 @@ describe("Pi package resources", () => {
       "@earendil-works/pi-coding-agent",
       "@earendil-works/pi-tui",
     ]) {
-      expect(manifest.devDependencies?.[packageName]).toBe("0.85.0");
-      expect(manifest.peerDependencies?.[packageName]).toBe(">=0.84.2");
+      expect(manifest.devDependencies?.[packageName]).toBe("1.1.0");
+      expect(manifest.peerDependencies?.[packageName]).toBe(">=0.99.0");
     }
     expect(manifest.dependencies?.["@earendil-works/pi-server"]).toBe(">=0.85.0");
   });
