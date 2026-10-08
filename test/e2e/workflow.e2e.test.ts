@@ -21,7 +21,9 @@ import { startMockOpenAiServer } from "./mock-openai.js";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
+// PI_WORKFLOWS_E2E_PI_ENTRY runs these scenarios on another Pi cli.js, such as a newer release.
+const PI_BIN =
+  process.env.PI_WORKFLOWS_E2E_PI_ENTRY ?? path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
 
 const ASSISTANT_WORKFLOW = `import { agent, assistantMessage, compute, defineWorkflow, notify } from "@osolmaz/pi-workflows";
@@ -123,6 +125,25 @@ export default defineWorkflow({
     }),
     second: agent({
       prompt: () => "Submit the second multi-step widget result.",
+      expectedOutput: '{ "second": true }',
+    }),
+  },
+  edges: [{ from: "first", to: "second" }],
+});
+`;
+
+const MODEL_RESUME_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "model-resume-e2e",
+  startAt: "first",
+  nodes: {
+    first: agent({
+      prompt: () => "Submit the first model resume result.",
+      expectedOutput: '{ "first": true }',
+    }),
+    second: agent({
+      prompt: () => "Submit the second model resume result.",
       expectedOutput: '{ "second": true }',
     }),
   },
@@ -482,6 +503,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
   let sessionDir: string;
   let sessionId: string;
   let holdPauseSubmission = true;
+  let holdModelResumeSubmission = true;
   let holdRestartSubmission = true;
   let autoimplementHandoffDecisionCount = 0;
 
@@ -543,6 +565,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
               },
             },
           };
+        }
+        if (JSON.stringify(messages.at(-1)?.content).includes("RESUME_WORKFLOW_FROM_MODEL_TURN")) {
+          return { kind: "tool", toolName: "workflow", args: { action: "resume" } };
         }
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
         if (contract.workflow === "autoimplement") {
@@ -649,6 +674,20 @@ describe.sequential("out-of-process workflow server end to end", () => {
             args: { command: "printf forbidden > forbidden-recovery-write" },
           };
         }
+        if (contract.workflow === "model-resume-e2e") {
+          if (contract.step === "first" && holdModelResumeSubmission) {
+            return { kind: "text", text: "Waiting for the model resume pause. ".repeat(500) };
+          }
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              requestId: contract.requestId,
+              output: contract.step === "first" ? { first: true } : { second: true },
+            },
+          };
+        }
         if (contract.workflow === "pause-resume-e2e") {
           if (holdPauseSubmission) {
             return { kind: "text", text: "Waiting for the pause. ".repeat(500) };
@@ -705,6 +744,10 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "pause-resume-e2e.workflow.ts"),
       PAUSE_RESUME_WORKFLOW,
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "model-resume-e2e.workflow.ts"),
+      MODEL_RESUME_WORKFLOW,
     );
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "timeout-recovery-e2e.workflow.ts"),
@@ -1176,6 +1219,60 @@ describe.sequential("out-of-process workflow server end to end", () => {
         ),
     ).toHaveLength(2);
   }, 90_000);
+
+  it("delivers a step resumed from a model turn and the step after it", async () => {
+    const requestStart = mock.requests.length;
+    pi.send({ id: "model-resume-start", type: "prompt", message: "/workflow model-resume-e2e" });
+    await waitForCondition(
+      () =>
+        mock.requests
+          .slice(requestStart)
+          .some(({ messages }) =>
+            JSON.stringify(messages.at(-1)).includes("Submit the first model resume result."),
+          ),
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
+    pi.send({ id: "model-resume-abort", type: "abort" });
+    const paused = await waitForRun(
+      databasePath,
+      "model-resume-e2e",
+      (candidate) => candidate.paused === true,
+      () => rpcDiagnostic(pi),
+    );
+    await waitForPiIdle(pi);
+
+    // The model resumes the run inside its own turn. The extension then sends
+    // the resumed step from agent_settled, and Pi 0.87.0 and later add it only
+    // after every settled handler returns, so the first branch report sees no
+    // entry for it while Pi still reports itself idle.
+    holdModelResumeSubmission = false;
+    pi.send({
+      id: "model-resume-prompt",
+      type: "prompt",
+      message: "RESUME_WORKFLOW_FROM_MODEL_TURN",
+    });
+    await waitForRun(
+      databasePath,
+      "model-resume-e2e",
+      (candidate) => candidate.status === "completed",
+      () => rpcDiagnostic(pi),
+      60_000,
+    );
+    await waitForPiIdle(pi);
+
+    const stepEntries = customEntriesForRun(
+      await readRpcEntries(pi),
+      "pi-workflows-step",
+      paused.runId,
+    );
+    expect(
+      stepEntries
+        .map((entry) => entry.details)
+        .filter(isRecord)
+        .map((details) => details.reason),
+    ).toEqual(["initial", "resumed", "initial"]);
+  }, 120_000);
 
   it("restarts a recorded terminal run with its execution revision", async () => {
     const source = await waitForRun(
