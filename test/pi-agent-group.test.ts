@@ -1,5 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createFauxCore, fauxAssistantMessage, normalizeContext } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
   createEphemeralCredentialStore,
@@ -581,6 +584,17 @@ describe("Pi agent groups", () => {
       }),
     ).rejects.toThrow(/provider stopped/);
     await expect(
+      runPiAgentGroup([request("refresh-error")], {
+        maxConcurrency: 1,
+        signal: new AbortController().signal,
+        sessionFactory: makeFactory([
+          message("", "error", "Credential store modify failed for mock: PRIVATE_CREDENTIAL_TEXT"),
+        ]),
+      }),
+    ).rejects.toThrow(
+      "Pi agent refresh-error stopped with error: Could not access Pi credentials for isolated agents",
+    );
+    await expect(
       runPiAgentGroup([request("non-text")], {
         maxConcurrency: 1,
         signal: new AbortController().signal,
@@ -1035,6 +1049,170 @@ describe("Pi agent groups", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it.each([
+    ["openai", false],
+    ["openai-codex", false],
+    ["openai", true],
+    ["openai-codex", true],
+  ] as const)("admits core provider %s with behavior extension %s", async (provider, behavior) => {
+    const agentDir = await makeTempDir("pi-agent-group-core");
+    const cwd = await makeTempDir("pi-agent-group-core-project");
+    const model = getBuiltinModels(provider)[0]!;
+    await fs.writeFile(path.join(agentDir, "settings.json"), "{}");
+    await fs.writeFile(
+      path.join(agentDir, "models-store.json"),
+      JSON.stringify({ [provider]: { models: [model], checkedAt: 1 } }),
+    );
+    await fs.writeFile(path.join(agentDir, "auth.json"), "{}");
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    const faux = createFauxCore({ provider, models: [{ id: model.id }] });
+    faux.setResponses([fauxAssistantMessage("OK"), fauxAssistantMessage("OK")]);
+    const stream = vi
+      .spyOn(ModelRuntime.prototype, "streamSimple")
+      .mockImplementation((model, context, options) =>
+        faux.streamSimple(model, normalizeContext(context), options),
+      );
+    const auth = vi.spyOn(ModelRuntime.prototype, "getAuth").mockResolvedValue({
+      auth: { apiKey: "fixture-key" },
+    });
+    vi.spyOn(ModelRuntime.prototype, "hasConfiguredAuth").mockReturnValue(true);
+    const lookup = vi.spyOn(ModelRuntime.prototype, "getProvider");
+    try {
+      const results = await runPiAgentGroup(
+        ["core-a", "core-b"].map((id) => ({
+          ...request(id),
+          cwd,
+          model: { provider, id: model.id },
+          thinkingLevel: "off" as const,
+        })),
+        {
+          maxConcurrency: 2,
+          signal: new AbortController().signal,
+          ...(behavior ? { behaviorExtensionPaths: [fixtureExtension("behavior")] } : {}),
+        },
+      );
+      expect(results.map((result) => result.text)).toEqual(["OK", "OK"]);
+      expect(stream).toHaveBeenCalledTimes(2);
+      expect(lookup).toHaveBeenCalledWith(provider);
+      expect(auth).toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects an unknown provider before creating or prompting any child", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-unknown");
+    const cwd = await makeTempDir("pi-agent-group-unknown-project");
+    await writeNativeFixtureConfig(agentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    const prompt = vi.spyOn(AgentSession.prototype, "prompt");
+    const auth = vi.spyOn(ModelRuntime.prototype, "getAuth");
+    try {
+      await expect(
+        runPiAgentGroup(
+          [
+            {
+              ...request("unknown"),
+              cwd,
+              model: { provider: "nonexistent-provider", id: "gpt-6.1-sol" },
+              thinkingLevel: "off",
+            },
+          ],
+          { maxConcurrency: 1, signal: new AbortController().signal },
+        ),
+      ).rejects.toThrow(/has no provider extension: nonexistent-provider/);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(auth).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("shares Pi AuthStorage with child runtimes and persists serialized refreshes", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-shared-auth");
+    const cwd = await makeTempDir("pi-agent-group-shared-auth-project");
+    await writeNativeFixtureConfig(agentDir, [fixtureExtension("oauth-provider")]);
+    const authPath = path.join(agentDir, "auth.json");
+    await fs.writeFile(
+      authPath,
+      JSON.stringify({
+        "fixture-native": { type: "oauth", access: "access", refresh: "0", expires: 1 },
+        unrelated: { type: "api_key", key: "keep" },
+      }),
+    );
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    const create = vi.spyOn(ModelRuntime, "create");
+    try {
+      const results = await runPiAgentGroup(
+        ["auth-a", "auth-b"].map((id) => ({ ...request(id), cwd })),
+        { maxConcurrency: 2, signal: new AbortController().signal },
+      );
+      expect(results).toHaveLength(2);
+      const childOptions = create.mock.calls
+        .map(([options]) => options)
+        .filter((options) => options?.authPath);
+      expect(childOptions).toHaveLength(2);
+      for (const options of childOptions) {
+        expect(options?.authPath).toBe(authPath);
+        expect(options?.credentials).toBeUndefined();
+      }
+      expect(JSON.parse(await fs.readFile(authPath, "utf8"))).toEqual({
+        "fixture-native": {
+          type: "oauth",
+          access: "refreshed",
+          refresh: "1",
+          expires: expect.any(Number),
+        },
+        unrelated: { type: "api_key", key: "keep" },
+      });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([false, true])(
+    "sanitizes shared credential errors with corruption during prompt %s",
+    async (duringPrompt) => {
+      const agentDir = await makeTempDir("pi-agent-group-invalid-shared-auth");
+      const cwd = await makeTempDir("pi-agent-group-invalid-shared-auth-project");
+      await writeNativeFixtureConfig(agentDir);
+      const authPath = path.join(agentDir, "auth.json");
+      const corruptAuth = async () => await fs.writeFile(authPath, "PRIVATE_NOT_JSON");
+      vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+      vi.stubEnv("HOME", agentDir);
+      const originalPrompt = AgentSession.prototype.prompt;
+      const prompt = vi.spyOn(AgentSession.prototype, "prompt");
+      if (duringPrompt) {
+        prompt.mockImplementation(async function (this: AgentSession, text, options) {
+          await corruptAuth();
+          return await originalPrompt.call(this, text, options);
+        });
+      } else {
+        await corruptAuth();
+      }
+      try {
+        await expect(
+          runPiAgentGroup([{ ...request("invalid-auth"), cwd }], {
+            maxConcurrency: 1,
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toMatchObject({
+          message: `Pi agent invalid-auth ${duringPrompt ? "stopped with error" : "failed"}: Could not access Pi credentials for isolated agents`,
+        });
+        expect(prompt).toHaveBeenCalledTimes(duringPrompt ? 1 : 0);
+      } finally {
+        vi.restoreAllMocks();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it("runs provider extensions through isolated per-agent SDK runtimes", async () => {
     const agentDir = await makeTempDir("pi-agent-group-agent");
