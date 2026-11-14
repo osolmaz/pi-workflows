@@ -31,6 +31,7 @@ import {
   parseResourceManagerArgs,
   type ParsedResourceManagerArgs,
 } from "./resource-manager-command.js";
+import { RexWorkflowViewer } from "./rex-viewer.js";
 import { SessionWorkflowView } from "./session-view.js";
 import { loadScrollShortcuts, scrollShortcutHint } from "./shortcuts.js";
 import { recoverAssistantStep, registerWorkflowAgentStepMessageRenderer } from "./step-message.js";
@@ -181,7 +182,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   registerWorkflowAgentStepMessageRenderer(pi);
   registerTerminalMessageRenderer(pi);
   let client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
-  const herdrViewer = new HerdrWorkflowViewer(pi.exec, process.env, () => client.endpoint);
+  const herdrViewer = new (
+    RexWorkflowViewer.detects(process.env) ? RexWorkflowViewer : HerdrWorkflowViewer
+  )(pi.exec, process.env, () => client.endpoint);
   let sessionContext: ExtensionContext | null = null;
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
@@ -332,10 +335,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       ctx.ui.notify(errorMessage(error), "warning");
       return;
     }
-    ctx.ui.notify(
-      opened.reused ? "Focused the existing piw view." : "Opened piw in Herdr.",
-      "info",
-    );
+    ctx.ui.notify(opened.reused ? "Focused the existing piw view." : "Opened piw.", "info");
   };
 
   const runToolInOrder = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -362,7 +362,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     getArgumentCompletions: async (prefix: string) => {
       const workflows = await listWorkflowMetadata(process.cwd());
       const items = [
-        ...workflows.map((workflow) => ({ value: workflow.name, label: workflow.name })),
+        ...workflows.map((workflow) => ({
+          value: workflow.name,
+          label: workflow.name,
+        })),
         ...[
           "status",
           "pause",
@@ -952,7 +955,10 @@ async function executeCommand(
     }
     case "run": {
       await client.ensureAvailable();
-      const resolved = await client.resolveWorkflow({ cwd: ctx.cwd, workflowRef: command.ref });
+      const resolved = await client.resolveWorkflow({
+        cwd: ctx.cwd,
+        workflowRef: command.ref,
+      });
       const runId = createRunId(resolved.workflowName);
       const response = await requestAccepted(client, {
         operation: "run.start",
@@ -1028,7 +1034,11 @@ async function executeCommand(
       const receipt = restartReceipt(response.receipt);
       return {
         message: `Created child workflow run ${receipt.runId} from terminal parent ${receipt.parentRunId} (restart ${receipt.restartNumber}). Continue with the child run.`,
-        details: { action: "restart", ...receipt, response: response.receipt ?? null },
+        details: {
+          action: "restart",
+          ...receipt,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "change-settings": {
@@ -1050,7 +1060,11 @@ async function executeCommand(
       });
       return {
         message: `Changed workflow settings for ${runId}.`,
-        details: { action: "change-settings", runId, response: response.receipt ?? null },
+        details: {
+          action: "change-settings",
+          runId,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "queue-follow-up": {
@@ -1065,7 +1079,11 @@ async function executeCommand(
       });
       return {
         message: "Queued the workflow follow-up.",
-        details: { action: "queue-follow-up", runId, response: response.receipt ?? null },
+        details: {
+          action: "queue-follow-up",
+          runId,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "remove-follow-up": {
@@ -1076,11 +1094,18 @@ async function executeCommand(
         requestId: `remove-follow-up-${idempotencyKey}`,
         idempotencyKey,
         runId,
-        payload: { ...sessionCommandPayload(ctx), followUpId: command.followUpId },
+        payload: {
+          ...sessionCommandPayload(ctx),
+          followUpId: command.followUpId,
+        },
       });
       return {
         message: "Removed the workflow follow-up.",
-        details: { action: "remove-follow-up", runId, response: response.receipt ?? null },
+        details: {
+          action: "remove-follow-up",
+          runId,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "pause":
@@ -1095,7 +1120,11 @@ async function executeCommand(
       });
       return {
         message: `Workflow ${run.runId} ${command.kind} request accepted.`,
-        details: { action: command.kind, runId: run.runId, response: response.receipt ?? null },
+        details: {
+          action: command.kind,
+          runId: run.runId,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "cancel": {
@@ -1112,7 +1141,12 @@ async function executeCommand(
         });
         return {
           message: `Cleared terminal workflow ${runId} from this session.`,
-          details: { action: "cancel", runId, cleared: true, response: response.receipt ?? null },
+          details: {
+            action: "cancel",
+            runId,
+            cleared: true,
+            response: response.receipt ?? null,
+          },
         };
       }
       const response = await requestAccepted(client, {
@@ -1123,7 +1157,11 @@ async function executeCommand(
       });
       return {
         message: `Workflow ${runId} cancel request accepted.`,
-        details: { action: "cancel", runId, response: response.receipt ?? null },
+        details: {
+          action: "cancel",
+          runId,
+          response: response.receipt ?? null,
+        },
       };
     }
     case "answer": {
@@ -1363,11 +1401,18 @@ async function listWorkflowMetadata(cwd: string): Promise<Array<{ name: string; 
 function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): ParsedWorkflowArgs {
   switch (params.action) {
     case "list":
-      return { kind: "list", ...(params.offset === undefined ? {} : { offset: params.offset }) };
+      return {
+        kind: "list",
+        ...(params.offset === undefined ? {} : { offset: params.offset }),
+      };
     case "start":
       return { kind: "run", ref: params.workflow, input: params.input ?? {} };
     case "restart":
-      return { kind: "restart", runId: params.runId, expectedRevision: params.expectedRevision };
+      return {
+        kind: "restart",
+        runId: params.runId,
+        expectedRevision: params.expectedRevision,
+      };
     case "change-settings":
       return {
         kind: "change-settings",
@@ -1391,7 +1436,10 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
         ...(params.runId === undefined ? {} : { runId: params.runId }),
       };
     case "status":
-      return { kind: "status", ...(params.runId === undefined ? {} : { runId: params.runId }) };
+      return {
+        kind: "status",
+        ...(params.runId === undefined ? {} : { runId: params.runId }),
+      };
     case "pause":
     case "resume":
       return { kind: params.action };
@@ -1441,7 +1489,10 @@ async function requestAccepted(
   const response =
     options.idempotencyKey === undefined
       ? await client.request(options)
-      : await client.requestDurable({ ...options, idempotencyKey: options.idempotencyKey });
+      : await client.requestDurable({
+          ...options,
+          idempotencyKey: options.idempotencyKey,
+        });
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
     throw new Error(response.error ?? `Workflow server rejected ${options.operation}`);
   }
@@ -1550,9 +1601,15 @@ function validRunId(value: string): boolean {
 }
 
 /** Bounded reason code and safe text for one failed subscription. */
-function subscriptionFailure(payload: unknown): { reasonCode: string | null; message: string } {
+function subscriptionFailure(payload: unknown): {
+  reasonCode: string | null;
+  message: string;
+} {
   if (!isRecord(payload))
-    return { reasonCode: null, message: "Workflow server connection is unavailable." };
+    return {
+      reasonCode: null,
+      message: "Workflow server connection is unavailable.",
+    };
   const reasonCode = payload.reasonCode;
   const message = typeof payload.message === "string" ? payload.message : undefined;
   const reason =

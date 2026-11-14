@@ -295,6 +295,15 @@ keeps its message on screen and names the failure in its label. The npm package
 ships JavaScript only; the client binary belongs to crates.io, where
 `cargo install pi-workflows --version <x>` installs it.
 
+## Rex integration
+
+Inside [Rex](https://rex.dev), the same `Ctrl+Shift+R` shortcut and `/piw` placements work without
+a plugin. The extension detects `REX_BLOCK` and opens the resolved `piw` client in a Rex block
+labeled `piw · <run-id>`: a split for `right`, `below`, `left`, and `above`, a window for `tab`,
+and a session for `workspace`. It passes the same `PIW_BIN`, `PIW_SOCKET`, and
+`PIW_NO_AUTOSTART=1` contract, and focuses an existing viewer in the current session instead of
+opening a duplicate. Herdr takes precedence when both are present.
+
 ## Node types
 
 A workflow is a graph of named nodes with exactly one entry point. Each node
