@@ -297,7 +297,7 @@ ships JavaScript only; the client binary belongs to crates.io, where
 
 ## Rex integration
 
-Inside [Rex](https://rex.dev), the same `Ctrl+Shift+R` shortcut and `/piw` placements work without
+Inside Rex, the same `Ctrl+Shift+R` shortcut and `/piw` placements work without
 a plugin. The extension detects `REX_BLOCK` and opens the resolved `piw` client in a Rex block
 labeled `piw · <run-id>`: a split for `right`, `below`, `left`, and `above`, a window for `tab`,
 and a session for `workspace`. It passes the same `PIW_BIN`, `PIW_SOCKET`, and
